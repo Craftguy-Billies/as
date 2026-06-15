@@ -8,7 +8,7 @@ plugins {
 
 android {
     namespace = "com.billiez.vibecode"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 35
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -22,8 +22,8 @@ android {
 
     defaultConfig {
         applicationId = "com.billiez.vibecode"
-        minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
+        minSdk = 23
+        targetSdk = 35
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
@@ -36,7 +36,7 @@ android {
 }
 
 dependencies {
-    implementation(platform("com.google.firebase:firebase-bom:34.14.1"))
+    implementation(platform("com.google.firebase:firebase-bom:33.10.0"))
     implementation("com.google.firebase:firebase-analytics")
 }
 
