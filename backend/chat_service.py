@@ -264,6 +264,15 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     except Exception:
         pass
 
+    # Add git config if set
+    try:
+        from agent_runner import get_git_config
+        git = get_git_config()
+        if git["name"] and git["email"]:
+            body["git_config"] = {"name": git["name"], "email": git["email"]}
+    except Exception:
+        pass
+
     resp = httpx.post(
         f"{CLOUD_API_URL}/api/v1/app-conversations",
         headers=_headers(),

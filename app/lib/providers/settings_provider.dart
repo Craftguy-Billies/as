@@ -10,6 +10,8 @@ class SettingsProvider extends ChangeNotifier {
   bool _testing = false;
   bool? _connected;
   String? _modelName;
+  String? _gitName;
+  String? _gitEmail;
 
   SettingsProvider(this._api, this._prefs) {
     _serverUrl = _prefs.serverUrl;
@@ -21,6 +23,8 @@ class SettingsProvider extends ChangeNotifier {
   bool get testing => _testing;
   bool? get connected => _connected;
   String? get modelName => _modelName;
+  String? get gitName => _gitName;
+  String? get gitEmail => _gitEmail;
   bool get isSetup => _prefs.hasServerUrl && _connected == true;
 
   Future<void> setServerUrl(String url) async {
@@ -76,5 +80,15 @@ class SettingsProvider extends ChangeNotifier {
     } catch (e) {
       throw Exception('Failed to update LLM config: $e');
     }
+  }
+
+  Future<void> updateGitConfig({
+    required String name,
+    required String email,
+  }) async {
+    await _api.updateGitConfig(name: name, email: email);
+    _gitName = name;
+    _gitEmail = email;
+    notifyListeners();
   }
 }

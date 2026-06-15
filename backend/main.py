@@ -20,6 +20,7 @@ from models import (
     BaseModel,
     PromptRequest,
     LLMConfigRequest,
+    GitConfigRequest,
     FCMTokenRequest,
     TaskResponse,
     EventResponse,
@@ -27,7 +28,7 @@ from models import (
     TasksListResponse,
     EventsListResponse,
 )
-from agent_runner import get_llm_config, set_llm_config, AgentConfig
+from agent_runner import get_llm_config, set_llm_config, AgentConfig, get_git_config, set_git_config
 from worker import start_worker, stop_worker
 from fcm_service import init_firebase
 
@@ -423,6 +424,21 @@ async def get_current_llm_config():
         "base_url": cfg.base_url,
         "has_api_key": bool(cfg.api_key),
     }
+
+
+@app.put("/api/config/git")
+async def update_git_config(req: GitConfigRequest):
+    """Update git name/email for AI agent commits."""
+    set_git_config(name=req.name, email=req.email)
+    cfg = get_git_config()
+    return {"status": "updated", "name": cfg["name"], "email": cfg["email"]}
+
+
+@app.get("/api/config/git")
+async def get_current_git_config():
+    """Get current git configuration."""
+    cfg = get_git_config()
+    return {"name": cfg["name"], "email": cfg["email"]}
 
 
 # ---------------------------------------------------------------------------

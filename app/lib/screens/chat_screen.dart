@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/chat_provider.dart';
+import '../providers/task_provider.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -13,10 +14,12 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final _inputCtrl = TextEditingController();
   final _repoCtrl = TextEditingController();
+  final _branchCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
   bool _hasLoaded = false;
   bool _showRepoBar = false;
   String _mode = 'code';
+  String _activeModel = '';
 
   @override
   void initState() {
@@ -30,11 +33,17 @@ class _ChatScreenState extends State<ChatScreen> {
       await prov.loadFromCache();
     } catch (_) {}
     if (mounted) setState(() => _hasLoaded = true);
-    // Restore last repo from preferences
+    // Restore last repo/branch/mode from preferences
     try {
       final prefs = await _loadPrefs();
       _repoCtrl.text = prefs['repo'] ?? '';
+      _branchCtrl.text = prefs['branch'] ?? 'main';
       setState(() => _mode = prefs['mode'] ?? 'code');
+    } catch (_) {}
+    // Load model from server
+    try {
+      final sp = await SharedPreferences.getInstance();
+      setState(() => _activeModel = sp.getString('last_model') ?? '');
     } catch (_) {}
   }
 
@@ -52,7 +61,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final sp = await SharedPreferences.getInstance();
       await Future.wait([
         sp.setString('last_repo', _repoCtrl.text.trim()),
-        sp.setString('last_branch', 'main'),
+        sp.setString('last_branch', _branchCtrl.text.trim().isEmpty ? 'main' : _branchCtrl.text.trim()),
         sp.setString('last_mode', _mode),
       ]);
     } catch (_) {}
@@ -67,6 +76,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void dispose() {
     _inputCtrl.dispose();
     _repoCtrl.dispose();
+    _branchCtrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
   }
@@ -76,11 +86,12 @@ class _ChatScreenState extends State<ChatScreen> {
     final loading = context.read<ChatProvider>().loading;
     if (text.isEmpty || loading) return;
     _inputCtrl.clear();
+    _saveRepoPrefs(); // save before send so branch persists
     try {
       context.read<ChatProvider>().sendMessage(
         text,
         repo: _repoCtrl.text.trim(),
-        branch: 'main',
+        branch: _branchCtrl.text.trim().isEmpty ? 'main' : _branchCtrl.text.trim(),
         mode: _mode,
       );
     } catch (_) {}
@@ -119,13 +130,17 @@ class _ChatScreenState extends State<ChatScreen> {
             final activeMode = chatProv.serverMode.isNotEmpty
                 ? chatProv.serverMode
                 : _mode;
+            final parts = <String>[];
+            if (activeRepo.isNotEmpty) parts.add(activeRepo);
+            if (activeRepo.isNotEmpty) parts.add(activeMode.toUpperCase());
+            if (_activeModel.isNotEmpty) parts.add(_activeModel);
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text('Chat', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                if (activeRepo.isNotEmpty)
+                if (parts.isNotEmpty)
                   Text(
-                    '$activeRepo · ${activeMode.toUpperCase()}',
+                    parts.join(' · '),
                     style: TextStyle(color: Colors.grey[500], fontSize: 11),
                   ),
               ],
@@ -201,61 +216,126 @@ class _ChatScreenState extends State<ChatScreen> {
         color: Color(0xFF121212),
         border: Border(bottom: BorderSide(color: Color(0xFF2A2A2A))),
       ),
-      child: Row(
+      child: Column(
         children: [
-          // Repo input
-          Expanded(
-            child: TextField(
-              controller: _repoCtrl,
-              style: const TextStyle(color: Colors.white, fontSize: 13),
-              onChanged: (v) => _saveRepoPrefs(),
-              decoration: InputDecoration(
-                hintText: 'owner/repo (empty = general chat)',
-                hintStyle: TextStyle(color: Colors.grey[700], fontSize: 12),
-                filled: true,
-                fillColor: const Color(0xFF1A1A2E),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: BorderSide.none,
+          Row(
+            children: [
+              // Repo input
+              Expanded(
+                flex: 3,
+                child: TextField(
+                  controller: _repoCtrl,
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                  onChanged: (_) => _saveRepoPrefs(),
+                  decoration: InputDecoration(
+                    hintText: 'owner/repo',
+                    hintStyle: TextStyle(color: Colors.grey[700], fontSize: 12),
+                    filled: true,
+                    fillColor: const Color(0xFF1A1A2E),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: BorderSide.none,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    isDense: true,
+                  ),
                 ),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                isDense: true,
               ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          // Plan / Code mode toggle
-          InkWell(
-            onTap: () => _setMode(_mode == 'code' ? 'plan' : 'code'),
-            borderRadius: BorderRadius.circular(8),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-              decoration: BoxDecoration(
-                color: _mode == 'plan'
-                    ? const Color(0xFF7C3AED).withValues(alpha: 0.2)
-                    : const Color(0xFF1A1A2E),
+              const SizedBox(width: 6),
+              // Branch input
+              SizedBox(
+                width: 72,
+                child: TextField(
+                  controller: _branchCtrl,
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                  onChanged: (_) => _saveRepoPrefs(),
+                  decoration: InputDecoration(
+                    hintText: 'main',
+                    hintStyle: TextStyle(color: Colors.grey[700], fontSize: 12),
+                    filled: true,
+                    fillColor: const Color(0xFF1A1A2E),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: BorderSide.none,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                    isDense: true,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              // Plan / Code mode toggle
+              InkWell(
+                onTap: () => _setMode(_mode == 'code' ? 'plan' : 'code'),
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(
-                  color: _mode == 'plan'
-                      ? const Color(0xFF7C3AED).withValues(alpha: 0.5)
-                      : const Color(0xFF2A2A2A),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: _mode == 'plan'
+                        ? const Color(0xFF7C3AED).withValues(alpha: 0.2)
+                        : const Color(0xFF1A1A2E),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: _mode == 'plan'
+                          ? const Color(0xFF7C3AED).withValues(alpha: 0.5)
+                          : const Color(0xFF2A2A2A),
+                    ),
+                  ),
+                  child: Text(
+                    _mode == 'plan' ? 'Plan' : 'Code',
+                    style: TextStyle(
+                      color: _mode == 'plan' ? const Color(0xFF7C3AED) : Colors.grey,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 ),
               ),
-              child: Text(
-                _mode == 'plan' ? 'Plan' : 'Code',
-                style: TextStyle(
-                  color: _mode == 'plan' ? const Color(0xFF7C3AED) : Colors.grey,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
+            ],
+          ),
+          // Task queue mini-preview
+          const SizedBox(height: 6),
+          Consumer<TaskProvider>(
+            builder: (_, tp, __) {
+              final active = tp.tasks.where((t) => t.isRunning || t.isQueued).toList();
+              if (active.isEmpty) return const SizedBox.shrink();
+              return GestureDetector(
+                onTap: () => _showTaskSheet(context),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1A1A2E),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.queue_play_next, size: 14, color: Colors.grey[500]),
+                      const SizedBox(width: 6),
+                      Text('${active.length} task${active.length > 1 ? 's' : ''} in queue',
+                        style: TextStyle(color: Colors.grey[500], fontSize: 11)),
+                      const Spacer(),
+                      Icon(Icons.keyboard_arrow_up, size: 16, color: Colors.grey[600]),
+                    ],
+                  ),
                 ),
-              ),
-            ),
+              );
+            },
           ),
         ],
       ),
     );
   }
 
+  void _showTaskSheet(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF121212),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => _TaskQueueSheet(),
+    );
+  }
   Widget _buildEmpty() {
     return Center(
       child: Column(
@@ -508,4 +588,94 @@ class _TypingIndicatorState extends State<_TypingIndicator>
       ),
     );
   }
+
+// ---------------------------------------------------------------------------
+// Task queue bottom sheet
+// ---------------------------------------------------------------------------
+class _TaskQueueSheet extends StatelessWidget {
+  const _TaskQueueSheet();
+
+  @override
+  Widget build(BuildContext context) {
+    final tasks = context.watch<TaskProvider>().tasks;
+    final active = tasks.where((t) => t.status == 'running' || t.status == 'starting' || t.status == 'queued').toList();
+    final done = tasks.where((t) => t.status == 'completed' || t.status == 'failed').toList();
+    
+    return Container(
+      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.45),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Handle bar
+          Container(
+            margin: const EdgeInsets.symmetric(vertical: 8),
+            width: 40,
+            height: 4,
+            decoration: BoxDecoration(
+              color: Colors.grey[600],
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          // Title
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: Row(
+              children: [
+                const Icon(Icons.queue_play_next, color: Colors.white70, size: 18),
+                const SizedBox(width: 8),
+                const Text('Task Queue', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                const Spacer(),
+                Text('${tasks.length} total', style: TextStyle(color: Colors.grey[500], fontSize: 12)),
+              ],
+            ),
+          ),
+          const Divider(color: Color(0xFF2A2A2A)),
+          // Task list
+          Flexible(
+            child: tasks.isEmpty
+                ? Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text('No tasks yet', style: TextStyle(color: Colors.grey[600])),
+                  )
+                : ListView.builder(
+                    shrinkWrap: true,
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    itemCount: tasks.length,
+                    itemBuilder: (_, i) {
+                      final t = tasks[i];
+                      final isActive = t.status == 'running' || t.status == 'starting' || t.status == 'queued';
+                      return ListTile(
+                        dense: true,
+                        leading: Icon(
+                          t.status == 'completed' ? Icons.check_circle : 
+                          t.status == 'failed' ? Icons.error :
+                          t.status == 'running' ? Icons.sync : Icons.hourglass_empty,
+                          size: 18,
+                          color: t.status == 'completed' ? Colors.green :
+                                 t.status == 'failed' ? Colors.red :
+                                 t.status == 'running' ? const Color(0xFF7C3AED) : Colors.grey,
+                        ),
+                        title: Text(
+                          t.prompt.length > 60 ? '${t.prompt.substring(0, 60)}...' : t.prompt,
+                          style: const TextStyle(color: Colors.white70, fontSize: 13),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: Text(
+                          '${t.status} · ${t.repo}',
+                          style: TextStyle(color: Colors.grey[600], fontSize: 11),
+                        ),
+                        onTap: () {
+                          Navigator.pop(context);
+                          Navigator.pushNamed(context, '/tasks/${t.id}');
+                        },
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
 }
+

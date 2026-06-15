@@ -252,4 +252,18 @@ class ApiService {
     } catch (_) {}
     return null;
   }
+
+  Future<void> updateGitConfig({
+    required String name,
+    required String email,
+  }) async {
+    final resp = await http.put(
+      Uri.parse('$_url/api/config/git'),
+      headers: {'Content-Type': 'application/json'},
+      body: json.encode({'name': name, 'email': email}),
+    ).timeout(const Duration(seconds: 8));
+    if (resp.statusCode != 200) {
+      throw Exception('Failed to update git config: ${resp.statusCode}');
+    }
+  }
 }

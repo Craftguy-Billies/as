@@ -15,6 +15,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _apiKeyCtrl = TextEditingController();
   final _modelCtrl = TextEditingController();
   final _baseUrlCtrl = TextEditingController();
+  final _gitNameCtrl = TextEditingController();
+  final _gitEmailCtrl = TextEditingController();
   Timer? _urlDebounce;
 
   @override
@@ -24,6 +26,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _apiKeyCtrl.dispose();
     _modelCtrl.dispose();
     _baseUrlCtrl.dispose();
+    _gitNameCtrl.dispose();
+    _gitEmailCtrl.dispose();
     super.dispose();
   }
 
@@ -162,6 +166,55 @@ class _SettingsScreenState extends State<SettingsScreen> {
             },
             icon: const Icon(Icons.save),
             label: const Text('Save LLM Config'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF7C3AED),
+            ),
+          ),
+
+          const SizedBox(height: 32),
+
+          // Git Configuration
+          _SectionTitle(title: 'Git Configuration'),
+          const SizedBox(height: 4),
+          Text(
+            'Used for commits made by AI agents',
+            style: TextStyle(color: Colors.grey[600], fontSize: 12),
+          ),
+          const SizedBox(height: 8),
+          _buildTextField(
+            controller: _gitNameCtrl,
+            label: 'Git Name',
+            hint: 'Your Name',
+            icon: Icons.person,
+          ),
+          const SizedBox(height: 8),
+          _buildTextField(
+            controller: _gitEmailCtrl,
+            label: 'Git Email',
+            hint: 'you@example.com',
+            icon: Icons.email,
+          ),
+          const SizedBox(height: 12),
+          ElevatedButton.icon(
+            onPressed: () async {
+              if (_gitNameCtrl.text.isEmpty || _gitEmailCtrl.text.isEmpty) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Name and email are required'), backgroundColor: Colors.red),
+                );
+                return;
+              }
+              await settings.updateGitConfig(
+                name: _gitNameCtrl.text.trim(),
+                email: _gitEmailCtrl.text.trim(),
+              );
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Git config saved'), backgroundColor: Colors.green),
+                );
+              }
+            },
+            icon: const Icon(Icons.save),
+            label: const Text('Save Git Config'),
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFF7C3AED),
             ),

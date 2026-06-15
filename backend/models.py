@@ -24,6 +24,11 @@ class LLMConfigRequest(BaseModel):
     base_url: Optional[str] = None
 
 
+class GitConfigRequest(BaseModel):
+    name: str = Field(..., min_length=1)
+    email: str = Field(..., min_length=5, pattern=r"^[^@]+@[^@]+\.[^@]+$")
+
+
 class FCMTokenRequest(BaseModel):
     token: str = Field(..., min_length=1)
 

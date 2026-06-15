@@ -28,10 +28,14 @@ class AgentConfig:
     model: str
     api_key: str
     base_url: Optional[str] = None
+    git_name: Optional[str] = None
+    git_email: Optional[str] = None
 
 
 # Global LLM config — persisted to DB, survives server restart
 _llm_config: Optional[AgentConfig] = None
+# Global git config
+_git_config = {"name": None, "email": None}
 _config_lock = threading.Lock()
 
 CLOUD_API_URL = os.getenv("OPENHANDS_CLOUD_API_URL", "https://app.all-hands.dev")
@@ -111,6 +115,38 @@ def set_llm_config(config: AgentConfig) -> None:
             )
             db.commit()
             logger.info("LLM config persisted: model=%s", config.model)
+        except Exception:
+            try:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT)"
+                )
+                db.commit()
+            except Exception:
+                pass
+
+
+def get_git_config() -> dict:
+    """Get current git name/email config."""
+    global _git_config
+    with _config_lock:
+        return dict(_git_config)
+
+
+def set_git_config(name: str, email: str) -> None:
+    """Update git name/email. Persists to DB for survival across restarts."""
+    global _git_config
+    with _config_lock:
+        _git_config = {"name": name, "email": email}
+    db = _get_kv_db()
+    if db:
+        try:
+            data = json.dumps({"name": name, "email": email})
+            db.execute(
+                "INSERT OR REPLACE INTO kv_store (key, value) VALUES ('git_config', ?)",
+                (data,),
+            )
+            db.commit()
+            logger.info("Git config persisted: %s <%s>", name, email)
         except Exception:
             try:
                 db.execute(
@@ -288,6 +324,11 @@ def run_conversation_sync(
         mcp_config = _build_default_mcp_config(mcp_servers)
         if mcp_config:
             body["mcp_servers"] = mcp_config
+
+        # Include git config for commits
+        git = get_git_config()
+        if git["name"] and git["email"]:
+            body["git_config"] = {"name": git["name"], "email": git["email"]}
 
         resp = httpx.post(
             f"{CLOUD_API_URL}/api/v1/app-conversations",
