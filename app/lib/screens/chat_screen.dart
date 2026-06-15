@@ -85,6 +85,18 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _inputCtrl.text.trim();
     final loading = context.read<ChatProvider>().loading;
     if (text.isEmpty || loading) return;
+
+    final repo = _repoCtrl.text.trim();
+    if (repo.isNotEmpty && !RegExp(r'^[\w.-]+/[\w.-]+$').hasMatch(repo)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Invalid repo format. Use: owner/repo'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
     _inputCtrl.clear();
     _saveRepoPrefs(); // save before send so branch persists
     try {

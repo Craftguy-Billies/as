@@ -142,7 +142,7 @@ class ApiService {
             'mode': mode,
           }),
         )
-        .timeout(const Duration(seconds: 200));
+        .timeout(const Duration(seconds: 310));
     if (resp.statusCode != 200) {
       final detail = _tryParseError(resp.body);
       throw Exception(detail ?? 'Chat failed (${resp.statusCode})');
@@ -265,5 +265,14 @@ class ApiService {
     if (resp.statusCode != 200) {
       throw Exception('Failed to update git config: ${resp.statusCode}');
     }
+  }
+
+  Future<Map<String, dynamic>?> getGitConfig() async {
+    try {
+      final resp = await http.get(Uri.parse('$_url/api/config/git'))
+          .timeout(const Duration(seconds: 5));
+      if (resp.statusCode == 200) return json.decode(resp.body);
+    } catch (_) {}
+    return null;
   }
 }

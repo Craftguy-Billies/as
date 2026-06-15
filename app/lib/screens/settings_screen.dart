@@ -46,6 +46,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _urlCtrl.text = settings.serverUrl!;
     }
 
+    // Pre-populate git config from server state
+    if (settings.gitName != null && _gitNameCtrl.text.isEmpty) {
+      _gitNameCtrl.text = settings.gitName!;
+    }
+    if (settings.gitEmail != null && _gitEmailCtrl.text.isEmpty) {
+      _gitEmailCtrl.text = settings.gitEmail!;
+    }
+
     return Scaffold(
       backgroundColor: const Color(0xFF0D0D0D),
       appBar: AppBar(

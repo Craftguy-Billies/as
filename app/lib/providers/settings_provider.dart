@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api_service.dart';
 import '../services/preferences_service.dart';
 
@@ -51,6 +52,14 @@ class SettingsProvider extends ChangeNotifier {
         final health = await _api.health();
         _modelName = health?['model'] as String?;
       } catch (_) {}
+      // Load git config from server
+      try {
+        final git = await _api.getGitConfig();
+        if (git != null) {
+          _gitName = git['name'] as String?;
+          _gitEmail = git['email'] as String?;
+        }
+      } catch (_) {}
     }
 
     _testing = false;
@@ -76,6 +85,9 @@ class SettingsProvider extends ChangeNotifier {
         baseUrl: baseUrl,
       );
       _modelName = model;
+      // Persist model name for chat subtitle
+      final sp = await SharedPreferences.getInstance();
+      await sp.setString('last_model', model);
       notifyListeners();
     } catch (e) {
       throw Exception('Failed to update LLM config: $e');

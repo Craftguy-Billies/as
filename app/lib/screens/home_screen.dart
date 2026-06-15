@@ -16,6 +16,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final _promptCtrl = TextEditingController();
   final _repoCtrl = TextEditingController();
+  final _branchCtrl = TextEditingController();
   String _mode = 'code';
   bool _sending = false;
 
@@ -24,6 +25,7 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     final prefs = context.read<PreferencesService>();
     _repoCtrl.text = prefs.lastRepo;
+    _branchCtrl.text = prefs.lastBranch;
     _mode = prefs.lastMode;
     WidgetsBinding.instance.addPostFrameCallback((_) => _autoConnect());
   }
@@ -53,6 +55,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void dispose() {
     _promptCtrl.dispose();
     _repoCtrl.dispose();
+    _branchCtrl.dispose();
     super.dispose();
   }
 
@@ -70,12 +73,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() => _sending = true);
     try {
+      final branch = _branchCtrl.text.trim().isEmpty ? 'main' : _branchCtrl.text.trim();
       final taskProv = context.read<TaskProvider>();
       final task = await taskProv
-          .createPrompt(prompt: prompt, repo: repo, mode: _mode)
+          .createPrompt(prompt: prompt, repo: repo, branch: branch, mode: _mode)
           .timeout(const Duration(seconds: 15));
       if (task != null && mounted) {
-        context.read<PreferencesService>().saveLastPrompt(repo, 'main', _mode);
+        context.read<PreferencesService>().saveLastPrompt(repo, branch, _mode);
         _promptCtrl.clear();
         Navigator.pushNamed(context, '/tasks/${task.id}');
       } else {
@@ -94,7 +98,7 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() => _mode = m);
     try {
       final prefs = context.read<PreferencesService>();
-      prefs.saveLastPrompt(_repoCtrl.text.trim(), 'main', m);
+      prefs.saveLastPrompt(_repoCtrl.text.trim(), _branchCtrl.text.trim().isEmpty ? 'main' : _branchCtrl.text.trim(), m);
     } catch (_) {}
   }
 
@@ -240,6 +244,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 Row(
                   children: [
                     Expanded(
+                      flex: 3,
                       child: TextField(
                         controller: _repoCtrl,
                         style: const TextStyle(color: Colors.white70, fontSize: 14),
@@ -257,7 +262,27 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ),
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 6),
+                    SizedBox(
+                      width: 72,
+                      child: TextField(
+                        controller: _branchCtrl,
+                        style: const TextStyle(color: Colors.white70, fontSize: 14),
+                        decoration: InputDecoration(
+                          hintText: 'main',
+                          hintStyle: TextStyle(color: Colors.grey[700]),
+                          filled: true,
+                          fillColor: const Color(0xFF1A1A2E),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide.none,
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                          isDense: true,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
                     // Mode toggle
                     Container(
                       decoration: BoxDecoration(
