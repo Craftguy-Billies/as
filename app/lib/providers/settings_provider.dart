@@ -13,10 +13,11 @@ class SettingsProvider extends ChangeNotifier {
 
   SettingsProvider(this._api, this._prefs) {
     _serverUrl = _prefs.serverUrl;
-    _api.setBaseUrl(_serverUrl);
+    _api.setBaseUrl(_serverUrl!);
   }
 
-  String? get serverUrl => _serverUrl;
+  String get serverUrl => _serverUrl ?? '';
+  String? get serverUrlNullable => _serverUrl;
   bool get testing => _testing;
   bool? get connected => _connected;
   String? get modelName => _modelName;
