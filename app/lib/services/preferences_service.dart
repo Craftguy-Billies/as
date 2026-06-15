@@ -10,7 +10,9 @@ class PreferencesService {
     _prefs = await SharedPreferences.getInstance();
   }
 
-  String? get serverUrl => _prefs.getString(_serverUrlKey);
+  static const defaultUrl = 'http://34.44.82.227:8080';
+
+  String get serverUrl => _prefs.getString(_serverUrlKey) ?? defaultUrl;
   String? get lastSeenTimestamp => _prefs.getString(_lastSeenKey);
 
   Future<void> setServerUrl(String url) async {
@@ -21,5 +23,5 @@ class PreferencesService {
     await _prefs.setString(_lastSeenKey, ts);
   }
 
-  bool get hasServerUrl => _prefs.containsKey(_serverUrlKey);
+  bool get hasServerUrl => true;
 }

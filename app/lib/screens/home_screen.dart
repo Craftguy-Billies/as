@@ -18,6 +18,19 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _sending = false;
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _autoConnect());
+  }
+
+  Future<void> _autoConnect() async {
+    final settings = context.read<SettingsProvider>();
+    if (settings.connected == null) {
+      await settings.testConnection();
+    }
+  }
+
+  @override
   void dispose() {
     _promptCtrl.dispose();
     _repoCtrl.dispose();
@@ -49,11 +62,55 @@ class _HomeScreenState extends State<HomeScreen> {
     final taskProv = context.watch<TaskProvider>();
     final settings = context.watch<SettingsProvider>();
 
-    if (!settings.isSetup) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        Navigator.pushReplacementNamed(context, '/setup');
-      });
-      return const SizedBox.shrink();
+    if (settings.connected == null) {
+      return const Scaffold(
+        backgroundColor: Color(0xFF0D0D0D),
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              SizedBox(height: 80, width: 80,
+                child: CircularProgressIndicator(strokeWidth: 3, color: Color(0xFF7C3AED))),
+              SizedBox(height: 24),
+              Text('VibeCode', style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
+              SizedBox(height: 8),
+              Text('Connecting to server...', style: TextStyle(color: Colors.grey, fontSize: 14)),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (settings.connected == false) {
+      return Scaffold(
+        backgroundColor: const Color(0xFF0D0D0D),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.cloud_off, size: 64, color: Colors.red),
+                const SizedBox(height: 16),
+                const Text('Cannot connect to server', style: TextStyle(color: Colors.white, fontSize: 18)),
+                const SizedBox(height: 8),
+                Text(settings.serverUrl ?? '', style: TextStyle(color: Colors.grey[600], fontSize: 14)),
+                const SizedBox(height: 24),
+                ElevatedButton(
+                  onPressed: () => settings.testConnection(),
+                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF7C3AED)),
+                  child: const Text('Retry', style: TextStyle(color: Colors.white)),
+                ),
+                const SizedBox(height: 8),
+                TextButton(
+                  onPressed: () => Navigator.pushNamed(context, '/settings'),
+                  child: const Text('Change server URL', style: TextStyle(color: Colors.grey)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
     }
 
     return Scaffold(

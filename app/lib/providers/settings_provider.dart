@@ -13,9 +13,7 @@ class SettingsProvider extends ChangeNotifier {
 
   SettingsProvider(this._api, this._prefs) {
     _serverUrl = _prefs.serverUrl;
-    if (_serverUrl != null) {
-      _api.setBaseUrl(_serverUrl!);
-    }
+    _api.setBaseUrl(_serverUrl);
   }
 
   String? get serverUrl => _serverUrl;

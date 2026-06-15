@@ -16,7 +16,7 @@ void main() async {
   try { await Firebase.initializeApp(); } catch (_) {}
   final prefs = PreferencesService(); await prefs.init();
   final api = ApiService();
-  if (prefs.serverUrl != null) { api.setBaseUrl(prefs.serverUrl!); }
+  api.setBaseUrl(prefs.serverUrl); // Always set (hardcoded default if not stored)
   final ns = NotificationService(api); await ns.initialize();
   runApp(VibeCodeApp(api: api, prefs: prefs));
 }

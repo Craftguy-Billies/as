@@ -10,7 +10,8 @@ class ApiService {
     _baseUrl = url.endsWith('/') ? url.substring(0, url.length - 1) : url;
   }
 
-  String get _url => _baseUrl ?? 'http://localhost:8080';
+  static const defaultUrl = 'http://34.44.82.227:8080';
+  String get _url => _baseUrl ?? defaultUrl;
 
   Future<bool> testConnection() async {
     try {
