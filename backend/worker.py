@@ -1,7 +1,12 @@
 """Background task worker for VibeCode.
 
-Processes queued tasks by running the OpenHands SDK agent in a background thread,
-persists events to SQLite in real-time, and sends push notifications on completion.
+Processes queued tasks ONE AT A TIME (sequential) by running the OpenHands
+Cloud API agent in a background thread. Persists events to SQLite in real-time,
+and sends push notifications on completion.
+
+The worker runs on the SERVER — closing the phone does NOT stop processing.
+Tasks stay queued in SQLite until the worker picks them up. Unlimited queue
+depth — you can submit as many tasks as you want; they process one by one.
 """
 
 import asyncio
@@ -18,8 +23,8 @@ from fcm_service import send_push_notification
 
 logger = logging.getLogger(__name__)
 
-# Max concurrent tasks
-MAX_CONCURRENT = int(os.getenv("VIBECODE_MAX_CONCURRENT", "3"))
+# Sequential processing — one task at a time to avoid git conflicts
+MAX_CONCURRENT = 1
 _active_tasks: dict[str, threading.Thread] = {}
 _worker_running = False
 _loop: asyncio.AbstractEventLoop | None = None
