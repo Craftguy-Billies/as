@@ -137,7 +137,7 @@ def get_state() -> dict:
             "mode": _conversation_mode,
             "batch": {
                 "running": _batch_running,
-                "position": _batch_position,
+                "position": _batch_position + (1 if _batch_running else 0),
                 "total": _batch_total,
                 "prompts": list(_batch_prompts),
             },
@@ -147,8 +147,8 @@ def get_state() -> dict:
 def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") -> dict:
     """Send a chat message and wait for the agent response (synchronous).
 
-    Creates a new conversation when repo or mode changes — different context
-    needs a different conversation. Same repo+mode reuses conversation (token-efficient).
+    Creates a new conversation when repo or mode changes.
+    Lock is released during _wait_for_response() so get_state() polling works.
     """
     global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index
 
@@ -157,9 +157,9 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
 
     logger.info("Chat send: prompt=%.80s... repo=%s mode=%s", prompt, repo, mode)
 
-    with _lock:
-        try:
-            # Detect context change — different repo or mode needs new conversation
+    # Phase 1: Quick setup under lock (create/send + save user msg)
+    try:
+        with _lock:
             ctx_changed = (
                 _conversation_id is not None
                 and (repo != _conversation_repo or mode != _conversation_mode)
@@ -169,11 +169,8 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                             _conversation_repo, repo, _conversation_mode, mode)
                 _conversation_id = None
                 _last_event_index = 0
-                # Keep old messages in history; they're still visible to user
-                # New conversation starts fresh on the Cloud API side
 
             if _conversation_id is None:
-                # -- First message: create a conversation ---
                 _conversation_id = _create_conversation(prompt, repo, branch, mode)
                 _conversation_repo = repo
                 _conversation_mode = mode
@@ -181,7 +178,6 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                 logger.info("Created conversation %s (repo=%s mode=%s)",
                             _conversation_id, repo, mode)
             else:
-                # -- Subsequent message: send to existing conversation ---
                 resp = httpx.post(
                     f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/send",
                     headers=_headers(),
@@ -191,44 +187,48 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                 resp.raise_for_status()
                 logger.info("Sent to conversation %s", _conversation_id)
 
-            # Save user message
             _messages.append({
                 "role": "user",
                 "content": prompt,
                 "timestamp": int(time.time() * 1000),
             })
             _persist_to_db()
+    except httpx.HTTPStatusError as e:
+        logger.error("HTTP error: %s %s", e.response.status_code, e.response.text[:200])
+        if e.response.status_code in (404, 410):
+            _conversation_id = None
+            _last_event_index = 0
+            _persist_to_db()
+        return {"error": f"Cloud API error: {e.response.status_code}"}
+    except Exception as e:
+        logger.error("Chat error (keeping conversation): %s", e)
+        return {"error": str(e)}
 
-            # Wait for agent response
-            response = _wait_for_response()
-            if response:
-                _messages.append({
-                    "role": "assistant",
-                    "content": response,
-                    "timestamp": int(time.time() * 1000),
-                })
-                _persist_to_db()
-                return {
-                    "response": response,
-                    "conversation_id": _conversation_id,
-                }
-            else:
-                return {
-                    "error": "Agent did not produce a response (timeout or conversation error)",
-                    "conversation_id": _conversation_id,
-                }
+    # Phase 2: Long wait — NO LOCK, get_state() can read events live
+    try:
+        response = _wait_for_response()
+    except Exception as e:
+        logger.error("Wait for response crashed: %s", e)
+        response = None
 
-        except httpx.HTTPStatusError as e:
-            logger.error("HTTP error: %s %s", e.response.status_code, e.response.text[:200])
-            if e.response.status_code in (404, 410):
-                _conversation_id = None  # conversation dead — start fresh next time
-                _last_event_index = 0
-                _persist_to_db()
-            return {"error": f"Cloud API error: {e.response.status_code}"}
-        except Exception as e:
-            # Transient failures do NOT kill the conversation
-            logger.error("Chat error (keeping conversation): %s", e)
-            return {"error": str(e)}
+    # Phase 3: Save result under lock
+    with _lock:
+        if response:
+            _messages.append({
+                "role": "assistant",
+                "content": response,
+                "timestamp": int(time.time() * 1000),
+            })
+            _persist_to_db()
+            return {
+                "response": response,
+                "conversation_id": _conversation_id,
+            }
+        else:
+            return {
+                "error": "Agent did not produce a response (timeout or conversation error)",
+                "conversation_id": _conversation_id,
+            }
 
 
 # ---------------------------------------------------------------------------
