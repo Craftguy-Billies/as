@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -13,11 +14,15 @@ import 'screens/settings_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  try { await Firebase.initializeApp(); } catch (_) {}
+  if (!kIsWeb) {
+    try { await Firebase.initializeApp(); } catch (_) {}
+  }
   final prefs = PreferencesService(); await prefs.init();
   final api = ApiService();
-  api.setBaseUrl(prefs.serverUrl); // Always set (hardcoded default if not stored)
-  final ns = NotificationService(api); await ns.initialize();
+  api.setBaseUrl(prefs.serverUrl);
+  if (!kIsWeb) {
+    final ns = NotificationService(api); await ns.initialize();
+  }
   runApp(VibeCodeApp(api: api, prefs: prefs));
 }
 
