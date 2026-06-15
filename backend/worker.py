@@ -208,9 +208,21 @@ async def _worker_loop() -> None:
 
 
 async def start_worker() -> None:
-    """Start the background worker."""
+    """Start the background worker. Recovers orphaned tasks from previous crashes."""
     global _loop
     _loop = asyncio.get_running_loop()
+
+    # Recover orphaned tasks from unclean shutdown
+    try:
+        async with get_db_ctx() as db:
+            await db.execute(
+                "UPDATE tasks SET status = 'failed', error_message = 'Server restarted — task was in progress' "
+                "WHERE status IN ('starting', 'running')"
+            )
+            await db.commit()
+    except Exception as e:
+        logger.error("Orphan recovery failed: %s", e)
+
     asyncio.create_task(_worker_loop())
 
 

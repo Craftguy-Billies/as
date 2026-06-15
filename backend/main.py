@@ -119,12 +119,14 @@ class ChatRequest(BaseModel):
     prompt: str
     repo: str = ""
     branch: str = "main"
-    mode: str = "code"
+    mode: str = "code"  # "code" or "plan", validated in endpoint
 
 
 @app.post("/api/chat")
 async def chat_send_message(req: ChatRequest):
     """Send a chat message. Reuses conversation across requests for token savings."""
+    if req.mode not in ("code", "plan"):
+        raise HTTPException(status_code=400, detail="mode must be 'code' or 'plan'")
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, chat_send, req.prompt, req.repo, req.branch, req.mode)
     if "error" in result:

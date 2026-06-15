@@ -6,6 +6,7 @@ class NotificationService {
   final FirebaseMessaging _messaging = FirebaseMessaging.instance;
   final ApiService _api;
   final List<StreamSubscription> _subscriptions = [];
+  void Function(String taskId)? onTaskTap;
 
   NotificationService(this._api);
 
@@ -66,8 +67,8 @@ class NotificationService {
 
   void _handleNotificationTap(RemoteMessage message) {
     final taskId = message.data['task_id'];
-    if (taskId != null) {
-      // Navigate to task — handled by app's navigator observer
+    if (taskId != null && onTaskTap != null) {
+      onTaskTap!(taskId);
     }
   }
 }

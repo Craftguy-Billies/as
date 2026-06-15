@@ -47,6 +47,19 @@ class _ChatScreenState extends State<ChatScreen> {
     };
   }
 
+  Future<void> _saveRepoPrefs() async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setString('last_repo', _repoCtrl.text.trim());
+      await sp.setString('last_mode', _mode);
+    } catch (_) {}
+  }
+
+  void _setMode(String m) {
+    setState(() => _mode = m);
+    _saveRepoPrefs();
+  }
+
   @override
   void dispose() {
     _inputCtrl.dispose();
@@ -175,6 +188,7 @@ class _ChatScreenState extends State<ChatScreen> {
             child: TextField(
               controller: _repoCtrl,
               style: const TextStyle(color: Colors.white, fontSize: 13),
+              onChanged: (v) => _saveRepoPrefs(),
               decoration: InputDecoration(
                 hintText: 'owner/repo (empty = general chat)',
                 hintStyle: TextStyle(color: Colors.grey[700], fontSize: 12),
@@ -192,7 +206,7 @@ class _ChatScreenState extends State<ChatScreen> {
           const SizedBox(width: 8),
           // Plan / Code mode toggle
           InkWell(
-            onTap: () => setState(() => _mode = _mode == 'code' ? 'plan' : 'code'),
+            onTap: () => _setMode(_mode == 'code' ? 'plan' : 'code'),
             borderRadius: BorderRadius.circular(8),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),

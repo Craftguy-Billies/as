@@ -7,6 +7,7 @@ Uses OpenHands Cloud REST API (SAME endpoints as agent_runner.py for consistency
 - Events poll:  GET  /api/v1/conversation/{id}/events/search
 
 Thread-safe: _lock serializes access to module-level session state.
+State persisted to SQLite — survives server restart.
 """
 import httpx
 import json
@@ -16,16 +17,64 @@ import threading
 import time
 from datetime import datetime, timezone
 
+try:
+    from database import get_db_ctx
+    _DB = get_db_ctx()
+except Exception:
+    _DB = None
+
 logger = logging.getLogger(__name__)
 
 CLOUD_API_URL = os.getenv("OPENHANDS_CLOUD_API_URL", "https://app.all-hands.dev")
 CLOUD_API_KEY = os.getenv("OPENHANDS_CLOUD_API_KEY", "")
 
-# -- Session state (persists across requests, lost on restart) --
+# -- Session state (persisted to DB, survives restart) --
 _conversation_id: str | None = None
 _last_event_index: int = 0
 _messages: list[dict] = []
 _lock = threading.Lock()
+
+# -- Restore state from DB on module load --
+def _restore_from_db() -> None:
+    global _conversation_id, _last_event_index, _messages
+    if _DB is None:
+        return
+    try:
+        row = _DB.execute("SELECT value FROM kv_store WHERE key = 'chat_session'").fetchone()
+        if row:
+            data = json.loads(row[0])
+            _conversation_id = data.get("conversation_id")
+            _last_event_index = data.get("last_event_index", 0)
+            _messages = data.get("messages", [])
+            logger.info("Restored chat session: conv=%s msgs=%d idx=%d",
+                         _conversation_id, len(_messages), _last_event_index)
+    except Exception:
+        pass  # DB may not be initialized yet, ignore
+
+def _persist_to_db() -> None:
+    if _DB is None:
+        return
+    try:
+        data = json.dumps({
+            "conversation_id": _conversation_id,
+            "last_event_index": _last_event_index,
+            "messages": _messages[-200:],  # keep last 200 messages max
+        })
+        _DB.execute(
+            "INSERT OR REPLACE INTO kv_store (key, value) VALUES ('chat_session', ?)",
+            (data,),
+        )
+        _DB.commit()
+    except Exception:
+        try:
+            _DB.execute(
+                "CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT)"
+            )
+            _DB.commit()
+        except Exception:
+            pass
+
+_restore_from_db()
 
 
 def _headers() -> dict:
@@ -42,6 +91,7 @@ def reset() -> None:
         _conversation_id = None
         _last_event_index = 0
         _messages = []
+        _persist_to_db()
     logger.info("Chat session reset")
 
 
@@ -66,8 +116,9 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
     with _lock:
         try:
             if _conversation_id is None:
-                # -- First message: create a task → get conversation_id ---
+                # -- First message: create a conversation ---
                 _conversation_id = _create_conversation(prompt, repo, branch, mode)
+                _last_event_index = 0  # CRITICAL: reset index for new conversation
                 logger.info("Created conversation %s", _conversation_id)
             else:
                 # -- Subsequent message: send to existing conversation ---
@@ -86,6 +137,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                 "content": prompt,
                 "timestamp": int(time.time() * 1000),
             })
+            _persist_to_db()
 
             # Wait for agent response
             response = _wait_for_response()
@@ -95,6 +147,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                     "content": response,
                     "timestamp": int(time.time() * 1000),
                 })
+                _persist_to_db()
 
             return {
                 "response": response or "(agent produced no text response)",
@@ -104,11 +157,13 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
         except httpx.HTTPStatusError as e:
             logger.error("HTTP error: %s %s", e.response.status_code, e.response.text[:200])
             if e.response.status_code in (404, 410):
-                _conversation_id = None  # conversation gone — start fresh next time
+                _conversation_id = None  # conversation dead — start fresh next time
+                _last_event_index = 0
+                _persist_to_db()
             return {"error": f"Cloud API error: {e.response.status_code}"}
         except Exception as e:
-            logger.error("Chat error: %s", e)
-            _conversation_id = None  # reset on any unexpected failure
+            # Transient failures do NOT kill the conversation
+            logger.error("Chat error (keeping conversation): %s", e)
             return {"error": str(e)}
 
 
@@ -123,14 +178,21 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     Returns the conversation_id. Raises on failure.
     """
     # Mode-specific prompt prefix
-    if mode == "plan" and repo:
-        full_prompt = (
-            f"Plan mode for {repo} on branch {branch}. "
-            f"First, explore the codebase, analyze the situation, "
-            f"and create a detailed plan. Do NOT implement yet. "
-            f"After the plan is complete, ask me whether to proceed.\n\n"
-            f"{prompt}"
-        )
+    if mode == "plan":
+        if repo:
+            full_prompt = (
+                f"Plan mode for {repo} on branch {branch}. "
+                f"First, explore the codebase, analyze the situation, "
+                f"and create a detailed plan. Do NOT implement yet. "
+                f"After the plan is complete, ask me whether to proceed.\n\n"
+                f"{prompt}"
+            )
+        else:
+            full_prompt = (
+                "PLAN MODE: First, analyze this request and create a detailed plan. "
+                "Do NOT implement yet. After the plan is complete, ask me whether to proceed.\n\n"
+                f"{prompt}"
+            )
     elif repo:
         full_prompt = (
             f"Repository: {repo} (branch: {branch}). {prompt}"

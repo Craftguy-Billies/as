@@ -30,11 +30,47 @@ class AgentConfig:
     base_url: Optional[str] = None
 
 
-# Global LLM config — updated via API
+# Global LLM config — persisted to DB, survives server restart
 _llm_config: Optional[AgentConfig] = None
 _config_lock = threading.Lock()
 
 CLOUD_API_URL = os.getenv("OPENHANDS_CLOUD_API_URL", "https://app.all-hands.dev")
+
+
+def _get_kv_db():
+    """Lazy-load database for KV storage."""
+    try:
+        from database import get_db_ctx
+        return get_db_ctx()
+    except Exception:
+        return None
+
+
+# Restore LLM config from DB on module load
+def _restore_llm_config() -> None:
+    global _llm_config
+    db = _get_kv_db()
+    if db is None:
+        return
+    try:
+        row = db.execute("SELECT value FROM kv_store WHERE key = 'llm_config'").fetchone()
+        if row:
+            data = json.loads(row[0])
+            _llm_config = AgentConfig(
+                model=data.get("model", ""),
+                api_key=data.get("api_key", ""),
+                base_url=data.get("base_url"),
+            )
+            # Also set env vars
+            os.environ["LLM_API_KEY"] = _llm_config.api_key
+            os.environ["LLM_MODEL"] = _llm_config.model
+            if _llm_config.base_url:
+                os.environ["LLM_BASE_URL"] = _llm_config.base_url
+            logger.info("Restored LLM config: model=%s", _llm_config.model)
+    except Exception:
+        pass
+
+_restore_llm_config()
 
 
 def get_llm_config() -> AgentConfig:
@@ -51,7 +87,7 @@ def get_llm_config() -> AgentConfig:
 
 
 def set_llm_config(config: AgentConfig) -> None:
-    """Update LLM config at runtime."""
+    """Update LLM config at runtime. Persists to DB for survival across restarts."""
     global _llm_config
     with _config_lock:
         _llm_config = config
@@ -59,6 +95,30 @@ def set_llm_config(config: AgentConfig) -> None:
     os.environ["LLM_MODEL"] = config.model
     if config.base_url:
         os.environ["LLM_BASE_URL"] = config.base_url
+
+    # Persist to DB
+    db = _get_kv_db()
+    if db:
+        try:
+            data = json.dumps({
+                "model": config.model,
+                "api_key": config.api_key,
+                "base_url": config.base_url,
+            })
+            db.execute(
+                "INSERT OR REPLACE INTO kv_store (key, value) VALUES ('llm_config', ?)",
+                (data,),
+            )
+            db.commit()
+            logger.info("LLM config persisted: model=%s", config.model)
+        except Exception:
+            try:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT)"
+                )
+                db.commit()
+            except Exception:
+                pass
 
 
 def _get_headers() -> dict:

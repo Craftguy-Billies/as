@@ -34,6 +34,7 @@ class ChatProvider extends ChangeNotifier {
   List<ChatMessage> _messages = [];
   bool _loading = false;
   String? _error;
+  DateTime? _loadingSince;  // safety: detect stuck loading
 
   ChatProvider(this._api);
 
@@ -62,12 +63,26 @@ class ChatProvider extends ChangeNotifier {
               ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
               .toList() ??
           [];
-      if (serverMsgs.isNotEmpty && serverMsgs.length > _messages.length) {
-        _messages = serverMsgs;
+      if (serverMsgs.isNotEmpty) {
+        // Merge: server messages + cache messages, deduplicated
+        final merged = <ChatMessage>[];
+        final seen = <String>{};
+        for (final m in [...serverMsgs, ..._messages]) {
+          final key = '${m.role}:${m.content}:${m.timestamp}';
+          if (seen.add(key)) merged.add(m);
+        }
+        _messages = merged;
         await _saveToCache();
         notifyListeners();
       }
     } catch (_) {}
+
+    // Safety: clear stuck loading from a previous crash
+    if (_loading && _loadingSince != null &&
+        DateTime.now().difference(_loadingSince!) > const Duration(seconds: 210)) {
+      _loading = false;
+      _loadingSince = null;
+    }
   }
 
   Future<void> sendMessage(
@@ -79,6 +94,7 @@ class ChatProvider extends ChangeNotifier {
     if (prompt.trim().isEmpty || _loading) return;
 
     _loading = true;
+    _loadingSince = DateTime.now();
     _error = null;
 
     final userMsg = ChatMessage(
@@ -110,6 +126,7 @@ class ChatProvider extends ChangeNotifier {
       _error = e.toString();
     } finally {
       _loading = false;
+      _loadingSince = null;
       notifyListeners();
     }
   }

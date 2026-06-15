@@ -32,22 +32,41 @@ void main() async {
   runApp(VibeCodeApp(api: api, prefs: prefs, ns: ns));
 }
 
-class VibeCodeApp extends StatelessWidget {
+class VibeCodeApp extends StatefulWidget {
   final ApiService api;
   final PreferencesService prefs;
   final NotificationService? ns;
   const VibeCodeApp({super.key, required this.api, required this.prefs, this.ns});
 
   @override
+  State<VibeCodeApp> createState() => _VibeCodeAppState();
+}
+
+class _VibeCodeAppState extends State<VibeCodeApp> {
+  final _navKey = GlobalKey<NavigatorState>();
+
+  @override
+  void initState() {
+    super.initState();
+    final ns = widget.ns;
+    if (ns != null) {
+      ns.onTaskTap = (taskId) {
+        _navKey.currentState?.pushNamed('/tasks/$taskId');
+      };
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
-        Provider.value(value: prefs),
-        ChangeNotifierProvider(create: (_) => TaskProvider(api, prefs)),
-        ChangeNotifierProvider(create: (_) => SettingsProvider(api, prefs)),
-        ChangeNotifierProvider(create: (_) => ChatProvider(api)),
+        Provider.value(value: widget.prefs),
+        ChangeNotifierProvider(create: (_) => TaskProvider(widget.api, widget.prefs)),
+        ChangeNotifierProvider(create: (_) => SettingsProvider(widget.api, widget.prefs)),
+        ChangeNotifierProvider(create: (_) => ChatProvider(widget.api)),
       ],
       child: MaterialApp(
+        navigatorKey: _navKey,
         title: 'VibeCode',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
