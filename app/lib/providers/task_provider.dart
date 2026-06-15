@@ -56,7 +56,7 @@ class TaskProvider extends ChangeNotifier {
     try {
       _tasks = await _api.listTasks(status: statusFilter);
     } catch (e) {
-      _error = e.toString();
+      _error = _api.friendlyError(e);
     }
 
     _loading = false;
@@ -81,7 +81,7 @@ class TaskProvider extends ChangeNotifier {
       _safeNotify();
       return task;
     } catch (e) {
-      _error = e.toString();
+      _error = _api.friendlyError(e);
       _safeNotify();
       return null;
     }
@@ -93,7 +93,7 @@ class TaskProvider extends ChangeNotifier {
       _tasks.removeWhere((t) => t.id == id);
       _safeNotify();
     } catch (e) {
-      _error = e.toString();
+      _error = _api.friendlyError(e);
       _safeNotify();
     }
   }
@@ -103,7 +103,7 @@ class TaskProvider extends ChangeNotifier {
       await _api.retryTask(id);
       await loadTasks();
     } catch (e) {
-      _error = e.toString();
+      _error = _api.friendlyError(e);
       _safeNotify();
     }
   }
@@ -114,7 +114,7 @@ class TaskProvider extends ChangeNotifier {
       _tasks.clear();
       _safeNotify();
     } catch (e) {
-      _error = e.toString();
+      _error = _api.friendlyError(e);
       _safeNotify();
     }
   }
@@ -204,6 +204,12 @@ class TaskProvider extends ChangeNotifier {
         _prefs.setLastSeenTimestamp(newEvents.last.timestamp);
       }
 
+      // Update inline task status so list tile reflects current state
+      final taskIdx = _tasks.indexWhere((t) => t.id == taskId);
+      if (taskIdx != -1 && _tasks[taskIdx].status != taskStatus) {
+        _tasks[taskIdx] = _tasks[taskIdx].copyWith(status: taskStatus);
+      }
+
       if (taskStatus == 'completed' || taskStatus == 'failed') {
         stopPolling();
         await loadTasks();
@@ -214,7 +220,7 @@ class TaskProvider extends ChangeNotifier {
       // Guard: only apply if still polling the same task
       if (_currentTaskId != taskId) return;
       _consecutiveFailures++;
-      _feedError = e.toString();
+      _feedError = _api.friendlyError(e);
       _safeNotify();
       if (_consecutiveFailures >= _maxFailures) {
         stopPolling();

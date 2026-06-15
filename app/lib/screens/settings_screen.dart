@@ -103,7 +103,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           // LLM Configuration
           _SectionTitle(title: 'LLM Configuration'),
           const SizedBox(height: 8),
-          if (settings.modelName != null)
+          if (settings.modelName != null && settings.modelName!.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: Text(

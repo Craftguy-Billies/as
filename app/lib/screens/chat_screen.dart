@@ -73,7 +73,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _send() {
     final text = _inputCtrl.text.trim();
-    if (text.isEmpty) return;
+    if (text.isEmpty || loading) return;
     _inputCtrl.clear();
     try {
       context.read<ChatProvider>().sendMessage(
@@ -110,7 +110,17 @@ class _ChatScreenState extends State<ChatScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFF0D0D0D),
       appBar: AppBar(
-        title: const Text('Chat', style: TextStyle(fontWeight: FontWeight.bold)),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Chat', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+            if (_repoCtrl.text.isNotEmpty)
+              Text(
+                '${_repoCtrl.text.trim()} · ${_mode.toUpperCase()}',
+                style: TextStyle(color: Colors.grey[500], fontSize: 11),
+              ),
+          ],
+        ),
         backgroundColor: const Color(0xFF0D0D0D),
         actions: [
           // Repo/mode toggle
@@ -122,17 +132,12 @@ class _ChatScreenState extends State<ChatScreen> {
             tooltip: _showRepoBar ? 'Hide repo settings' : 'Repo & mode',
             onPressed: () => setState(() => _showRepoBar = !_showRepoBar),
           ),
+          // Always show clear — user needs to reset conversation even when empty
           IconButton(
-            icon: const Icon(Icons.settings, color: Colors.grey),
-            tooltip: 'Settings',
-            onPressed: () => Navigator.pushNamed(context, '/settings'),
+            icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+            tooltip: 'New conversation',
+            onPressed: () => _confirmClear(context),
           ),
-          if (msgs.isNotEmpty)
-            IconButton(
-              icon: const Icon(Icons.delete_outline, color: Colors.grey),
-              tooltip: 'Clear chat',
-              onPressed: () => _confirmClear(context),
-            ),
         ],
       ),
       body: Column(

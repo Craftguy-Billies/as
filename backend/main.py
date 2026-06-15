@@ -297,10 +297,10 @@ async def retry_task(task_id: str):
 
 @app.delete("/api/tasks")
 async def delete_all_tasks(status: str = "all"):
-    """Delete all tasks, optionally filtered by status."""
+    """Delete all tasks, optionally filtered by status. Never deletes running/starting tasks."""
     async with get_db_ctx() as db:
         if status == "all":
-            await db.execute("DELETE FROM tasks")
+            await db.execute("DELETE FROM tasks WHERE status NOT IN ('running', 'starting')")
         elif status in ("completed", "failed", "queued"):
             await db.execute("DELETE FROM tasks WHERE status = ?", (status,))
         else:

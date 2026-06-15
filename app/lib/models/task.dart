@@ -45,4 +45,20 @@ class Task {
   bool get isCompleted => status == 'completed';
   bool get isFailed => status == 'failed';
   bool get isQueued => status == 'queued';
+
+  Task copyWith({String? status, String? errorMessage}) {
+    return Task(
+      id: id,
+      prompt: prompt,
+      repo: repo,
+      branch: branch,
+      mode: mode,
+      status: status ?? this.status,
+      conversationId: conversationId,
+      sandboxId: sandboxId,
+      createdAt: createdAt,
+      completedAt: completedAt,
+      errorMessage: errorMessage ?? this.errorMessage,
+    );
+  }
 }

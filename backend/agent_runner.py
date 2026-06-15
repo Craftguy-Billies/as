@@ -38,10 +38,10 @@ CLOUD_API_URL = os.getenv("OPENHANDS_CLOUD_API_URL", "https://app.all-hands.dev"
 
 
 def _get_kv_db():
-    """Lazy-load database for KV storage."""
+    """Lazy-load sync database for KV storage."""
     try:
-        from database import get_db_ctx
-        return get_db_ctx()
+        from database import get_sync_db
+        return get_sync_db()
     except Exception:
         return None
 

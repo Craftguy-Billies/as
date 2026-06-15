@@ -2,9 +2,34 @@
 
 import aiosqlite
 import os
+import sqlite3
+import threading
 from contextlib import asynccontextmanager
 
 DB_PATH = os.getenv("VIBECODE_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "vibecode.db"))
+
+# Thread-local synchronous connection for non-async callers (chat_service, agent_runner)
+_sync_conns: threading.local = threading.local()
+
+
+def _resolve_path() -> str:
+    path = DB_PATH
+    if not os.path.isabs(path):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
+
+
+def get_sync_db() -> sqlite3.Connection:
+    """Get a thread-local synchronous sqlite3 connection (for non-async code)."""
+    conn = getattr(_sync_conns, 'conn', None)
+    if conn is None:
+        conn = sqlite3.connect(_resolve_path())
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        _sync_conns.conn = conn
+    return conn
 
 
 async def _get_db_path() -> str:

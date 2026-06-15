@@ -18,8 +18,8 @@ import time
 from datetime import datetime, timezone
 
 try:
-    from database import get_db_ctx
-    _DB = get_db_ctx()
+    from database import get_sync_db
+    _DB = get_sync_db()
 except Exception:
     _DB = None
 
@@ -30,13 +30,15 @@ CLOUD_API_KEY = os.getenv("OPENHANDS_CLOUD_API_KEY", "")
 
 # -- Session state (persisted to DB, survives restart) --
 _conversation_id: str | None = None
+_conversation_repo: str = ""
+_conversation_mode: str = "code"
 _last_event_index: int = 0
 _messages: list[dict] = []
 _lock = threading.Lock()
 
 # -- Restore state from DB on module load --
 def _restore_from_db() -> None:
-    global _conversation_id, _last_event_index, _messages
+    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages
     if _DB is None:
         return
     try:
@@ -44,12 +46,14 @@ def _restore_from_db() -> None:
         if row:
             data = json.loads(row[0])
             _conversation_id = data.get("conversation_id")
+            _conversation_repo = data.get("repo", "")
+            _conversation_mode = data.get("mode", "code")
             _last_event_index = data.get("last_event_index", 0)
             _messages = data.get("messages", [])
-            logger.info("Restored chat session: conv=%s msgs=%d idx=%d",
-                         _conversation_id, len(_messages), _last_event_index)
+            logger.info("Restored chat session: conv=%s repo=%s mode=%s msgs=%d",
+                         _conversation_id, _conversation_repo, _conversation_mode, len(_messages))
     except Exception:
-        pass  # DB may not be initialized yet, ignore
+        pass
 
 def _persist_to_db() -> None:
     if _DB is None:
@@ -57,6 +61,8 @@ def _persist_to_db() -> None:
     try:
         data = json.dumps({
             "conversation_id": _conversation_id,
+            "repo": _conversation_repo,
+            "mode": _conversation_mode,
             "last_event_index": _last_event_index,
             "messages": _messages[-200:],  # keep last 200 messages max
         })
@@ -86,9 +92,11 @@ def _headers() -> dict:
 
 def reset() -> None:
     """Clear the current chat session."""
-    global _conversation_id, _last_event_index, _messages
+    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages
     with _lock:
         _conversation_id = None
+        _conversation_repo = ""
+        _conversation_mode = "code"
         _last_event_index = 0
         _messages = []
         _persist_to_db()
@@ -101,25 +109,47 @@ def get_state() -> dict:
         return {
             "messages": list(_messages),
             "conversation_id": _conversation_id,
+            "repo": _conversation_repo,
+            "mode": _conversation_mode,
         }
 
 
 def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") -> dict:
-    """Send a chat message and wait for the agent response (synchronous)."""
-    global _conversation_id, _last_event_index
+    """Send a chat message and wait for the agent response (synchronous).
+
+    Creates a new conversation when repo or mode changes — different context
+    needs a different conversation. Same repo+mode reuses conversation (token-efficient).
+    """
+    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index
 
     if not CLOUD_API_KEY:
         return {"error": "OPENHANDS_CLOUD_API_KEY not configured on server"}
 
-    logger.info("Chat send: prompt=%.80s...", prompt)
+    logger.info("Chat send: prompt=%.80s... repo=%s mode=%s", prompt, repo, mode)
 
     with _lock:
         try:
+            # Detect context change — different repo or mode needs new conversation
+            ctx_changed = (
+                _conversation_id is not None
+                and (repo != _conversation_repo or mode != _conversation_mode)
+            )
+            if ctx_changed:
+                logger.info("Context changed: repo %s→%s mode %s→%s — starting new conversation",
+                            _conversation_repo, repo, _conversation_mode, mode)
+                _conversation_id = None
+                _last_event_index = 0
+                # Keep old messages in history; they're still visible to user
+                # New conversation starts fresh on the Cloud API side
+
             if _conversation_id is None:
                 # -- First message: create a conversation ---
                 _conversation_id = _create_conversation(prompt, repo, branch, mode)
-                _last_event_index = 0  # CRITICAL: reset index for new conversation
-                logger.info("Created conversation %s", _conversation_id)
+                _conversation_repo = repo
+                _conversation_mode = mode
+                _last_event_index = 0
+                logger.info("Created conversation %s (repo=%s mode=%s)",
+                            _conversation_id, repo, mode)
             else:
                 # -- Subsequent message: send to existing conversation ---
                 resp = httpx.post(

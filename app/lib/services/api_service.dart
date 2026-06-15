@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/task.dart';
 import '../models/event.dart';
+import 'preferences_service.dart';
 
 class ApiService {
   String? _baseUrl;
@@ -10,8 +11,26 @@ class ApiService {
     _baseUrl = url.endsWith('/') ? url.substring(0, url.length - 1) : url;
   }
 
-  static const defaultUrl = 'http://34.44.82.227:8080';
+  static const defaultUrl = PreferencesService.defaultUrl;
   String get _url => _baseUrl ?? defaultUrl;
+
+  /// Wrap network errors in user-friendly messages
+  String friendlyError(Object e) {
+    final s = e.toString().toLowerCase();
+    if (s.contains('socketexception') || s.contains('connection refused')) {
+      return 'Cannot reach server. Check your internet connection and server URL.';
+    }
+    if (s.contains('timeout') || s.contains('timed out')) {
+      return 'Request timed out. The server may be overloaded — try again.';
+    }
+    if (s.contains('handshake') || s.contains('certificate') || s.contains('tls')) {
+      return 'Secure connection failed. Check your server URL (use http:// for local servers).';
+    }
+    final msg = e.toString();
+    // Trim to first line and remove 'Exception: ' prefix
+    final clean = msg.split('\n').first.replaceAll(RegExp(r'^(Exception|Error):\s*'), '');
+    return clean.isEmpty ? 'Something went wrong. Please try again.' : clean;
+  }
 
   Future<bool> testConnection() async {
     try {
