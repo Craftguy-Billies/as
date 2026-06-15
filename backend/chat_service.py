@@ -54,7 +54,7 @@ def get_state() -> dict:
         }
 
 
-def send(prompt: str, repo: str = "", branch: str = "main") -> dict:
+def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") -> dict:
     """Send a chat message and wait for the agent response (synchronous)."""
     global _conversation_id, _last_event_index
 
@@ -67,7 +67,7 @@ def send(prompt: str, repo: str = "", branch: str = "main") -> dict:
         try:
             if _conversation_id is None:
                 # -- First message: create a task → get conversation_id ---
-                _conversation_id = _create_conversation(prompt, repo, branch)
+                _conversation_id = _create_conversation(prompt, repo, branch, mode)
                 logger.info("Created conversation %s", _conversation_id)
             else:
                 # -- Subsequent message: send to existing conversation ---
@@ -117,14 +117,30 @@ def send(prompt: str, repo: str = "", branch: str = "main") -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _create_conversation(prompt: str, repo: str, branch: str) -> str:
+def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     """Create a conversation via POST /api/v1/app-conversations (SAME as agent_runner).
 
     Returns the conversation_id. Raises on failure.
     """
+    # Mode-specific prompt prefix
+    if mode == "plan" and repo:
+        full_prompt = (
+            f"Plan mode for {repo} on branch {branch}. "
+            f"First, explore the codebase, analyze the situation, "
+            f"and create a detailed plan. Do NOT implement yet. "
+            f"After the plan is complete, ask me whether to proceed.\n\n"
+            f"{prompt}"
+        )
+    elif repo:
+        full_prompt = (
+            f"Repository: {repo} (branch: {branch}). {prompt}"
+        )
+    else:
+        full_prompt = prompt
+
     body: dict = {
         "initial_message": {
-            "content": [{"type": "text", "text": prompt}],
+            "content": [{"type": "text", "text": full_prompt}],
         },
         "title": prompt[:80],
     }

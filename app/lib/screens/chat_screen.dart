@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/chat_provider.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -11,8 +12,11 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final _inputCtrl = TextEditingController();
+  final _repoCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
   bool _hasLoaded = false;
+  bool _showRepoBar = false;
+  String _mode = 'code';
 
   @override
   void initState() {
@@ -26,11 +30,27 @@ class _ChatScreenState extends State<ChatScreen> {
       await prov.loadFromCache();
     } catch (_) {}
     if (mounted) setState(() => _hasLoaded = true);
+    // Restore last repo from preferences
+    try {
+      final prefs = await _loadPrefs();
+      _repoCtrl.text = prefs['repo'] ?? '';
+      setState(() => _mode = prefs['mode'] ?? 'code');
+    } catch (_) {}
+  }
+
+  Future<Map<String, String?>> _loadPrefs() async {
+    // Use the same SharedPreferences as PreferencesService
+    final sp = await SharedPreferences.getInstance();
+    return {
+      'repo': sp.getString('last_repo') ?? '',
+      'mode': sp.getString('last_mode') ?? 'code',
+    };
   }
 
   @override
   void dispose() {
     _inputCtrl.dispose();
+    _repoCtrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
   }
@@ -40,7 +60,11 @@ class _ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty) return;
     _inputCtrl.clear();
     try {
-      context.read<ChatProvider>().sendMessage(text);
+      context.read<ChatProvider>().sendMessage(
+        text,
+        repo: _repoCtrl.text.trim(),
+        mode: _mode,
+      );
     } catch (_) {}
   }
 
@@ -72,6 +96,15 @@ class _ChatScreenState extends State<ChatScreen> {
         title: const Text('Chat', style: TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: const Color(0xFF0D0D0D),
         actions: [
+          // Repo/mode toggle
+          IconButton(
+            icon: Icon(
+              _showRepoBar ? Icons.code_off : Icons.code,
+              color: _repoCtrl.text.isNotEmpty ? const Color(0xFF7C3AED) : Colors.grey,
+            ),
+            tooltip: _showRepoBar ? 'Hide repo settings' : 'Repo & mode',
+            onPressed: () => setState(() => _showRepoBar = !_showRepoBar),
+          ),
           IconButton(
             icon: const Icon(Icons.settings, color: Colors.grey),
             tooltip: 'Settings',
@@ -87,6 +120,9 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       body: Column(
         children: [
+          // Repo bar (collapsible)
+          if (_showRepoBar) _buildRepoBar(),
+
           // Messages
           Expanded(
             child: _hasLoaded
@@ -120,6 +156,67 @@ class _ChatScreenState extends State<ChatScreen> {
 
           // Input bar
           _buildInput(prov.loading),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRepoBar() {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      decoration: const BoxDecoration(
+        color: Color(0xFF121212),
+        border: Border(bottom: BorderSide(color: Color(0xFF2A2A2A))),
+      ),
+      child: Row(
+        children: [
+          // Repo input
+          Expanded(
+            child: TextField(
+              controller: _repoCtrl,
+              style: const TextStyle(color: Colors.white, fontSize: 13),
+              decoration: InputDecoration(
+                hintText: 'owner/repo (empty = general chat)',
+                hintStyle: TextStyle(color: Colors.grey[700], fontSize: 12),
+                filled: true,
+                fillColor: const Color(0xFF1A1A2E),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: BorderSide.none,
+                ),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                isDense: true,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          // Plan / Code mode toggle
+          InkWell(
+            onTap: () => setState(() => _mode = _mode == 'code' ? 'plan' : 'code'),
+            borderRadius: BorderRadius.circular(8),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: _mode == 'plan'
+                    ? const Color(0xFF7C3AED).withValues(alpha: 0.2)
+                    : const Color(0xFF1A1A2E),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: _mode == 'plan'
+                      ? const Color(0xFF7C3AED).withValues(alpha: 0.5)
+                      : const Color(0xFF2A2A2A),
+                ),
+              ),
+              child: Text(
+                _mode == 'plan' ? 'Plan' : 'Code',
+                style: TextStyle(
+                  color: _mode == 'plan' ? const Color(0xFF7C3AED) : Colors.grey,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );

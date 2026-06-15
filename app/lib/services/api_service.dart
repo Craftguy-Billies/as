@@ -98,12 +98,22 @@ class ApiService {
 
   // --- Chat ---
 
-  Future<Map<String, dynamic>> sendChatMessage(String prompt) async {
+  Future<Map<String, dynamic>> sendChatMessage(
+    String prompt, {
+    String repo = '',
+    String branch = 'main',
+    String mode = 'code',
+  }) async {
     final resp = await http
         .post(
           Uri.parse('$_url/api/chat'),
           headers: {'Content-Type': 'application/json'},
-          body: json.encode({'prompt': prompt}),
+          body: json.encode({
+            'prompt': prompt,
+            'repo': repo,
+            'branch': branch,
+            'mode': mode,
+          }),
         )
         .timeout(const Duration(seconds: 200));
     if (resp.statusCode != 200) {

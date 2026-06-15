@@ -70,7 +70,12 @@ class ChatProvider extends ChangeNotifier {
     } catch (_) {}
   }
 
-  Future<void> sendMessage(String prompt) async {
+  Future<void> sendMessage(
+    String prompt, {
+    String repo = '',
+    String branch = 'main',
+    String mode = 'code',
+  }) async {
     if (prompt.trim().isEmpty || _loading) return;
 
     _loading = true;
@@ -86,7 +91,12 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final data = await _api.sendChatMessage(prompt.trim());
+      final data = await _api.sendChatMessage(
+        prompt.trim(),
+        repo: repo,
+        branch: branch,
+        mode: mode,
+      );
       final response = (data['response'] ?? '').toString();
       if (response.isNotEmpty) {
         _messages.add(ChatMessage(
