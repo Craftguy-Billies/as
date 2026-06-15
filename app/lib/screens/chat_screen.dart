@@ -66,6 +66,11 @@ class _ChatScreenState extends State<ChatScreen> {
         title: const Text('Chat', style: TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: const Color(0xFF0D0D0D),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.settings, color: Colors.grey),
+            tooltip: 'Settings',
+            onPressed: () => Navigator.pushNamed(context, '/settings'),
+          ),
           if (msgs.isNotEmpty)
             IconButton(
               icon: const Icon(Icons.delete_outline, color: Colors.grey),
