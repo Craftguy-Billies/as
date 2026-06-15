@@ -18,7 +18,7 @@ import 'providers/chat_provider.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   if (!kIsWeb) {
-    try { await Firebase.initializeApp(); } catch (_) {}
+    try { await Firebase.initializeApp(); } catch (e) { debugPrint('Firebase init failed: $e'); }
   }
   final prefs = PreferencesService();
   try { await prefs.init(); } catch (_) { /* prefs unavailable — defaults used */ }

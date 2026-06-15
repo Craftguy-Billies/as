@@ -41,6 +41,7 @@ class ChatProvider extends ChangeNotifier {
   final List<String> _pendingPrompts = [];
   int _queuePosition = 0;
   int _queueTotal = 0;
+  int _batchPollFailures = 0;
 
   ChatProvider(this._api);
 
@@ -92,7 +93,7 @@ class ChatProvider extends ChangeNotifier {
         final merged = <ChatMessage>[];
         final seen = <String>{};
         for (final m in [...serverMsgs, ..._messages]) {
-          final key = '${m.role}:${m.content}:${m.timestamp}';
+          final key = '${m.role}:${m.content}';
           if (seen.add(key)) merged.add(m);
         }
         _messages = merged;
@@ -198,6 +199,7 @@ class ChatProvider extends ChangeNotifier {
       // Don't reset position — polling already tracks it
       if (result['status'] == 'queued') {
         _queuePosition = 0;
+        _batchPollFailures = 0;
         _loading = true;
         _loadingSince = DateTime.now();
         notifyListeners();
@@ -229,7 +231,7 @@ class ChatProvider extends ChangeNotifier {
           final merged = <ChatMessage>[];
           final seen = <String>{};
           for (final m in [...serverMsgs, ..._messages]) {
-            final key = '${m.role}:${m.content}:${m.timestamp}';
+            final key = '${m.role}:${m.content}';
             if (seen.add(key)) merged.add(m);
           }
           _messages = merged;
@@ -251,7 +253,14 @@ class ChatProvider extends ChangeNotifier {
 
         notifyListeners();
       } catch (_) {
-        // Polling errors are silent — we retry next tick
+        _batchPollFailures++;
+        if (_batchPollFailures >= 10) {
+          _error = 'Lost connection to server. Batch may still be running.';
+          _loading = false;
+          _loadingSince = null;
+          _batchPollTimer?.cancel();
+          notifyListeners();
+        }
       }
     });
   }

@@ -207,7 +207,7 @@ def _build_default_mcp_config(mcp_servers: Optional[list[dict]] = None) -> Optio
     """Build MCP configuration dict in Model Context Protocol format.
 
     Automatically enables:
-    - Web fetch (mcp-server-fetch): always included for web research
+    - Web fetch (mcp-server-fetch): included if VIBECODE_ENABLE_FETCH!=0 (default on)
     - Tavily search: if TAVILY_API_KEY env var is set
     - User-provided MCP servers merged on top
 
@@ -216,11 +216,12 @@ def _build_default_mcp_config(mcp_servers: Optional[list[dict]] = None) -> Optio
     """
     servers: dict = {}
 
-    # Always include web fetch for research
-    servers["fetch"] = {
-        "command": "uvx",
-        "args": ["mcp-server-fetch"],
-    }
+    # Web fetch (mcp-server-fetch): gated behind env var
+    if os.getenv("VIBECODE_ENABLE_FETCH", "1") != "0":
+        servers["fetch"] = {
+            "command": "uvx",
+            "args": ["mcp-server-fetch"],
+        }
 
     # Tavily web search if API key provided
     tavily_key = os.getenv("TAVILY_API_KEY", "")

@@ -1,8 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:http/http.dart' as http;
-import '../services/preferences_service.dart';
+import '../providers/settings_provider.dart';
 
 class LogViewerScreen extends StatefulWidget {
   const LogViewerScreen({super.key});
@@ -28,9 +29,8 @@ class _LogViewerScreenState extends State<LogViewerScreen> {
 
   Future<void> _initPrefs() async {
     try {
-      final prefs = PreferencesService();
-      await prefs.init();
-      _baseUrl = prefs.serverUrl;
+      final settings = context.read<SettingsProvider>();
+      _baseUrl = settings.serverUrl;
       _doFetch();
       _timer = Timer.periodic(const Duration(seconds: 3), (_) => _doFetch());
     } catch (_) {

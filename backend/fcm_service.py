@@ -1,11 +1,13 @@
 """Firebase Cloud Messaging service for push notifications."""
 
 import json
+import logging
 import os
 from typing import Optional
 
 import aiosqlite
 
+logger = logging.getLogger(__name__)
 
 _fcm_initialized = False
 _fcm_app = None
@@ -17,7 +19,7 @@ def init_firebase() -> bool:
 
     creds_path = os.getenv("FIREBASE_CREDENTIALS_PATH", "")
     if not creds_path or not os.path.exists(creds_path):
-        print(f"[FCM] Firebase credentials not found at {creds_path} — push notifications disabled")
+        logger.info("Firebase credentials not found at %s — push notifications disabled", creds_path)
         return False
 
     try:
@@ -28,10 +30,10 @@ def init_firebase() -> bool:
             cred = credentials.Certificate(creds_path)
             _fcm_app = firebase_admin.initialize_app(cred)
         _fcm_initialized = True
-        print("[FCM] Firebase initialized successfully")
+        logger.info("Firebase initialized successfully")
         return True
     except Exception as e:
-        print(f"[FCM] Firebase init failed: {e}")
+        logger.warning("Firebase init failed: %s", e)
         return False
 
 
@@ -92,9 +94,9 @@ async def send_push_notification(
             response = messaging.send_each(messages=batch)
             sent += response.success_count
 
-        print(f"[FCM] Sent notifications: {sent}/{len(tokens)} devices")
+        logger.info("Sent notifications: %d/%d devices", sent, len(tokens))
         return sent > 0
 
     except Exception as e:
-        print(f"[FCM] Failed to send notification: {e}")
+        logger.error("Failed to send notification: %s", e)
         return False

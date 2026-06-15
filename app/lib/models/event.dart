@@ -46,7 +46,7 @@ class AgentEvent {
   bool get isAgentMessage =>
       kind == 'MessageEvent' && (source == 'agent' || source == 'assistant');
   bool get isTerminalAction =>
-      kind == 'ActionEvent' && toolName == 'terminal';
+      kind == 'ActionEvent' && (toolName == 'bash' || toolName == 'terminal');
   bool get isFileEditAction =>
       kind == 'ActionEvent' && (toolName == 'file_editor' || toolName == 'str_replace_editor');
   bool get isSearchAction =>

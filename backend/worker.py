@@ -231,6 +231,7 @@ async def start_worker() -> None:
 
 async def stop_worker() -> None:
     """Stop the background worker gracefully."""
-    global _worker_running
+    global _worker_running, _loop
     _worker_running = False
+    _loop = None
     logger.info("Worker stopping...")

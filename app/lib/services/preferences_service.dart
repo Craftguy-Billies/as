@@ -13,7 +13,7 @@ class PreferencesService {
     _prefs = await SharedPreferences.getInstance();
   }
 
-  static const defaultUrl = 'http://34.44.82.227:8080';
+  static const defaultUrl = 'http://localhost:8080';
 
   String get serverUrl => _prefs.getString(_serverUrlKey) ?? defaultUrl;
   String? get lastSeenTimestamp => _prefs.getString(_lastSeenKey);

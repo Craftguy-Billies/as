@@ -16,7 +16,7 @@ class SettingsProvider extends ChangeNotifier {
 
   SettingsProvider(this._api, this._prefs) {
     _serverUrl = _prefs.serverUrl;
-    _api.setBaseUrl(_serverUrl!);
+    _api.setBaseUrl(_serverUrl ?? '');
   }
 
   String get serverUrl => _serverUrl ?? '';
@@ -30,8 +30,8 @@ class SettingsProvider extends ChangeNotifier {
 
   Future<void> setServerUrl(String url) async {
     _serverUrl = url.trim();
-    _api.setBaseUrl(_serverUrl!);
-    await _prefs.setServerUrl(_serverUrl!);
+    _api.setBaseUrl(_serverUrl ?? '');
+    await _prefs.setServerUrl(_serverUrl ?? '');
     notifyListeners();
   }
 

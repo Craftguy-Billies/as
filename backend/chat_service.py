@@ -535,7 +535,7 @@ def _format_event_preview(evt: dict) -> str | None:
             except Exception:
                 action = {}
 
-        if tool in ("terminal", "execute_bash_command"):
+        if tool in ("bash", "terminal", "execute_bash_command"):
             cmd = action.get("command", "") or action.get("content", "")
             if cmd:
                 return f"💻 $ {str(cmd)[:200]}"
@@ -562,7 +562,7 @@ def _format_event_preview(evt: dict) -> str | None:
             except Exception:
                 obs = {"output": str(obs)[:200]}
 
-        if tool in ("terminal", "execute_bash_command"):
+        if tool in ("bash", "terminal", "execute_bash_command"):
             stdout = obs.get("stdout", "") or obs.get("output", "") or obs.get("content", "")
             if stdout:
                 return f"📤 {str(stdout)[:300]}"

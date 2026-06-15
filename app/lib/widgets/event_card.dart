@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../models/event.dart';
 
 class EventCard extends StatelessWidget {
@@ -92,7 +93,13 @@ class EventCard extends StatelessWidget {
               const Spacer(),
               GestureDetector(
                 onTap: () {
-                  // Copy to clipboard would go here
+                  Clipboard.setData(ClipboardData(text: command));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Copied to clipboard'),
+                      duration: Duration(seconds: 1),
+                    ),
+                  );
                 },
                 child: const Icon(Icons.copy, color: Colors.grey, size: 14),
               ),
@@ -206,7 +213,7 @@ class EventCard extends StatelessWidget {
     try {
       if (event.observationJson != null) {
         final obs = json.decode(event.observationJson!) as Map<String, dynamic>;
-        if (toolName == 'terminal' || toolName == 'execute_bash_command') {
+        if (toolName == 'bash' || toolName == 'terminal' || toolName == 'execute_bash_command') {
           final stdout = obs['stdout'] as String? ?? '';
           final stderr = obs['stderr'] as String? ?? '';
           final exitCode = obs['exit_code'];
