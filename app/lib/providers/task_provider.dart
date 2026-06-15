@@ -18,8 +18,20 @@ class TaskProvider extends ChangeNotifier {
   String? _currentTaskId;
   Timer? _pollTimer;
   bool _autoScroll = true;
+  bool _disposed = false;
 
   TaskProvider(this._api, this._prefs);
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _pollTimer?.cancel();
+    super.dispose();
+  }
+
+  void _safeNotify() {
+    if (!_disposed) notifyListeners();
+  }
 
   List<Task> get tasks => _tasks;
   List<AgentEvent> get events => _events;
@@ -30,7 +42,7 @@ class TaskProvider extends ChangeNotifier {
 
   set autoScroll(bool v) {
     _autoScroll = v;
-    notifyListeners();
+    _safeNotify();
   }
 
   Future<void> loadTasks({String? statusFilter}) async {
@@ -44,7 +56,7 @@ class TaskProvider extends ChangeNotifier {
     }
 
     _loading = false;
-    notifyListeners();
+    _safeNotify();
   }
 
   Future<Task?> createPrompt({
@@ -62,11 +74,11 @@ class TaskProvider extends ChangeNotifier {
         mode: mode,
       );
       _tasks.insert(0, task);
-      notifyListeners();
+      _safeNotify();
       return task;
     } catch (e) {
       _error = e.toString();
-      notifyListeners();
+      _safeNotify();
       return null;
     }
   }
@@ -75,10 +87,10 @@ class TaskProvider extends ChangeNotifier {
     try {
       await _api.deleteTask(id);
       _tasks.removeWhere((t) => t.id == id);
-      notifyListeners();
+      _safeNotify();
     } catch (e) {
       _error = e.toString();
-      notifyListeners();
+      _safeNotify();
     }
   }
 
@@ -112,7 +124,7 @@ class TaskProvider extends ChangeNotifier {
       );
       if (olderEvents.isNotEmpty) {
         _events = [...olderEvents, ..._events];
-        notifyListeners();
+        _safeNotify();
       }
     } catch (_) {}
   }
@@ -120,7 +132,7 @@ class TaskProvider extends ChangeNotifier {
   void collapseEvents() {
     if (_events.length > 30) {
       _events = _events.sublist(_events.length - 30);
-      notifyListeners();
+      _safeNotify();
     }
   }
 
@@ -144,7 +156,7 @@ class TaskProvider extends ChangeNotifier {
         _prefs.setLastSeenTimestamp(
           newEvents.last.timestamp,
         );
-        notifyListeners();
+        _safeNotify();
       }
 
       // Check if task completed
