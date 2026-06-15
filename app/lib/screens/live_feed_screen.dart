@@ -103,30 +103,7 @@ class _LiveFeedScreenState extends State<LiveFeedScreen>
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        if (prov.feedError == null) ...[
-                          const SizedBox(
-                            height: 24, width: 24,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                          const SizedBox(height: 16),
-                          const Text(
-                            'Waiting for agent...',
-                            style: TextStyle(color: Colors.grey),
-                          ),
-                        ] else ...[
-                          const Icon(Icons.cloud_off, color: Colors.red, size: 40),
-                          const SizedBox(height: 16),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 32),
-                            child: Text(
-                              prov.feedError!,
-                              style: const TextStyle(color: Colors.redAccent, fontSize: 13),
-                              textAlign: TextAlign.center,
-                              maxLines: 5,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ],
+                        _WaitingIndicator(feedError: prov.feedError),
                       ],
                     ),
                   )
@@ -164,6 +141,88 @@ class _LiveFeedScreenState extends State<LiveFeedScreen>
               child: const Icon(Icons.arrow_downward, color: Colors.white),
             )
           : null,
+    );
+  }
+}
+
+
+class _WaitingIndicator extends StatefulWidget {
+  final String? feedError;
+  const _WaitingIndicator({this.feedError});
+
+  @override
+  State<_WaitingIndicator> createState() => _WaitingIndicatorState();
+}
+
+class _WaitingIndicatorState extends State<_WaitingIndicator>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final Animation<double> _pulse;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat(reverse: true);
+    _pulse = Tween<double>(begin: 0.6, end: 1.0).animate(
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.feedError != null) {
+      return Column(
+        children: [
+          const Icon(Icons.cloud_off, color: Colors.red, size: 40),
+          const SizedBox(height: 16),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 32),
+            child: Text(
+              widget.feedError!,
+              style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+              textAlign: TextAlign.center,
+              maxLines: 5,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      );
+    }
+
+    return AnimatedBuilder(
+      animation: _pulse,
+      builder: (context, child) => Opacity(
+        opacity: _pulse.value,
+        child: child,
+      ),
+      child: Column(
+        children: [
+          const SizedBox(
+            height: 48,
+            width: 48,
+            child: CircularProgressIndicator(strokeWidth: 2.5),
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            'Connecting to agent...',
+            style: TextStyle(color: Colors.white70, fontSize: 15),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Events will appear here in real time',
+            style: TextStyle(color: Colors.grey[600], fontSize: 12),
+          ),
+        ],
+      ),
     );
   }
 }

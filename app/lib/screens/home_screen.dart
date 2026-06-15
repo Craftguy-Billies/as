@@ -102,6 +102,33 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  void _confirmClearHistory(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A2E),
+        title: const Text('Clear History', style: TextStyle(color: Colors.white)),
+        content: const Text(
+          'Delete all tasks and chat history? This cannot be undone.',
+          style: TextStyle(color: Colors.grey),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              context.read<TaskProvider>().deleteAllTasks();
+            },
+            child: const Text('Clear All', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final taskProv = context.watch<TaskProvider>();
@@ -164,6 +191,12 @@ class _HomeScreenState extends State<HomeScreen> {
         title: const Text('VibeCode', style: TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: const Color(0xFF0D0D0D),
         actions: [
+          if (taskProv.tasks.isNotEmpty)
+            IconButton(
+              icon: const Icon(Icons.delete_sweep, color: Colors.redAccent),
+              tooltip: 'Clear all history',
+              onPressed: () => _confirmClearHistory(context),
+            ),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () => Navigator.pushNamed(context, '/settings'),

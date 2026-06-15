@@ -30,6 +30,10 @@ class PreferencesService {
     await _prefs.setString(_lastSeenKey, ts);
   }
 
+  Future<void> clearLastSeenTimestamp() async {
+    await _prefs.remove(_lastSeenKey);
+  }
+
   Future<void> saveLastPrompt(String repo, String branch, String mode) async {
     await Future.wait([
       _prefs.setString(_lastRepoKey, repo),

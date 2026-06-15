@@ -98,16 +98,30 @@ class TaskProvider extends ChangeNotifier {
     }
   }
 
+  Future<void> deleteAllTasks() async {
+    try {
+      await _api.deleteAllTasks();
+      _tasks.clear();
+      _safeNotify();
+    } catch (e) {
+      _error = e.toString();
+      _safeNotify();
+    }
+  }
+
   // --- Live Feed ---
 
   void startPolling(String taskId) {
     _currentTaskId = taskId;
     _events = [];
+    _feedError = null;
+    _consecutiveFailures = 0;
     _autoScroll = true;
+    _prefs.clearLastSeenTimestamp();
     _fetchEvents();
 
     _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+    _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       _fetchEvents();
     });
     // notifyListeners() called by _fetchEvents() when data arrives

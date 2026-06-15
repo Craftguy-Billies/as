@@ -87,6 +87,15 @@ class ApiService {
     }
   }
 
+  Future<void> deleteAllTasks({String status = 'all'}) async {
+    final resp = await http.delete(
+      Uri.parse('$_url/api/tasks').replace(queryParameters: {'status': status}),
+    ).timeout(const Duration(seconds: 8));
+    if (resp.statusCode != 200) {
+      throw Exception('Failed to clear history');
+    }
+  }
+
   Future<Map<String, dynamic>> getEvents(
     String taskId, {
     String? sinceTimestamp,

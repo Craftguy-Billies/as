@@ -205,6 +205,20 @@ async def delete_task(task_id: str):
     return {"status": "deleted", "task_id": task_id}
 
 
+@app.delete("/api/tasks")
+async def delete_all_tasks(status: str = "all"):
+    """Delete all tasks, optionally filtered by status."""
+    async with get_db_ctx() as db:
+        if status == "all":
+            await db.execute("DELETE FROM tasks")
+        elif status in ("completed", "failed", "queued"):
+            await db.execute("DELETE FROM tasks WHERE status = ?", (status,))
+        else:
+            raise HTTPException(status_code=400, detail=f"Invalid status filter: {status}")
+        await db.commit()
+    return {"ok": True, "deleted": status}
+
+
 # ---------------------------------------------------------------------------
 # Events
 # ---------------------------------------------------------------------------
