@@ -113,7 +113,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
 
           // Input bar
-          _buildInput(),
+          _buildInput(prov.loading),
         ],
       ),
     );
@@ -150,7 +150,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _buildInput() {
+  Widget _buildInput(bool loading) {
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 8, 8, 12),
       decoration: const BoxDecoration(
@@ -187,8 +187,8 @@ class _ChatScreenState extends State<ChatScreen> {
             child: FloatingActionButton(
               heroTag: 'chat_send',
               backgroundColor: const Color(0xFF7C3AED),
-              onPressed: prov.loading ? null : _send,
-              child: prov.loading
+              onPressed: loading ? null : _send,
+              child: loading
                   ? const SizedBox(
                       height: 20,
                       width: 20,
