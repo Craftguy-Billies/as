@@ -113,7 +113,7 @@ async def stream_logs():
 # Chat (token-efficient conversation reuse)
 # ---------------------------------------------------------------------------
 
-from chat_service import send as chat_send, reset as chat_reset, get_state as chat_state
+from chat_service import send as chat_send, reset as chat_reset, get_state as chat_state, enqueue_batch as chat_enqueue_batch, cancel_batch as chat_cancel_batch
 
 
 class ChatRequest(BaseModel):
@@ -147,6 +147,39 @@ async def chat_clear():
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, chat_reset)
     return {"ok": True}
+
+
+class BatchRequest(BaseModel):
+    prompts: list[str]
+    repo: str = ""
+    branch: str = "main"
+    mode: str = "code"
+
+
+@app.post("/api/chat/batch")
+async def chat_batch(req: BatchRequest):
+    """Enqueue a batch of prompts — processed sequentially in one conversation.
+    
+    Returns immediately. Processing happens in background.
+    Poll /api/chat to see progress and new messages.
+    """
+    if req.mode not in ('code', 'plan'):
+        raise HTTPException(status_code=400, detail="mode must be 'code' or 'plan'")
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None, chat_enqueue_batch, req.prompts, req.repo, req.branch, req.mode
+    )
+    if "error" in result:
+        raise HTTPException(status_code=409, detail=result["error"])
+    return result
+
+
+@app.post("/api/chat/batch/cancel")
+async def chat_batch_cancel():
+    """Cancel the running batch queue."""
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, chat_cancel_batch)
+    return result
 
 
 # ---------------------------------------------------------------------------

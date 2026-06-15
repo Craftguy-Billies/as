@@ -150,6 +150,42 @@ class ApiService {
     return json.decode(resp.body) as Map<String, dynamic>;
   }
 
+  /// Send all prompts at once — backend queues them, processes in background.
+  /// Returns immediately. Poll getChat() to track progress and new messages.
+  Future<Map<String, dynamic>> sendChatBatch({
+    required List<String> prompts,
+    String repo = '',
+    String branch = 'main',
+    String mode = 'code',
+  }) async {
+    final resp = await http
+        .post(
+          Uri.parse('$_url/api/chat/batch'),
+          headers: {'Content-Type': 'application/json'},
+          body: json.encode({
+            'prompts': prompts,
+            'repo': repo,
+            'branch': branch,
+            'mode': mode,
+          }),
+        )
+        .timeout(const Duration(seconds: 10));
+    if (resp.statusCode != 200) {
+      final detail = _tryParseError(resp.body);
+      throw Exception(detail ?? 'Batch failed (${resp.statusCode})');
+    }
+    return json.decode(resp.body) as Map<String, dynamic>;
+  }
+
+  Future<void> cancelChatBatch() async {
+    await http
+        .post(
+          Uri.parse('$_url/api/chat/batch/cancel'),
+          headers: {'Content-Type': 'application/json'},
+        )
+        .timeout(const Duration(seconds: 5));
+  }
+
   Future<Map<String, dynamic>> getChat() async {
     final resp = await http
         .get(Uri.parse('$_url/api/chat'))

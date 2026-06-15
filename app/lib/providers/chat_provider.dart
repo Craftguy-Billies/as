@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -100,6 +101,24 @@ class ChatProvider extends ChangeNotifier {
       }
     } catch (_) {}
 
+    // Resume batch polling if a batch is running on the server
+    try {
+      final state = await _api.getChat();
+      final batch = state?['batch'] as Map<String, dynamic>?;
+      if (batch != null && batch['running'] == true) {
+        _queuePosition = (batch['position'] as int?) ?? 0;
+        _queueTotal = (batch['total'] as int?) ?? 0;
+        _loading = true;
+        _loadingSince = DateTime.now();
+        notifyListeners();
+        _pollBatchProgress(
+          repo: state?['repo']?.toString() ?? '',
+          branch: 'main',
+          mode: state?['mode']?.toString() ?? 'code',
+        );
+      }
+    } catch (_) {}
+
     // Safety: clear stuck loading from a previous crash
     if (_loading && _loadingSince != null &&
         DateTime.now().difference(_loadingSince!) > const Duration(seconds: 210)) {
@@ -154,94 +173,101 @@ class ChatProvider extends ChangeNotifier {
     }
   }
 
-  /// Queue multiple prompts and process them sequentially in the same conversation.
-  void enqueueBatch(List<String> prompts, {
+  /// Send all prompts to backend — processed sequentially in one conversation.
+  /// Survives phone close. Polls for new messages + progress every 2 seconds.
+  Future<void> enqueueBatch(List<String> prompts, {
     String repo = '',
     String branch = 'main',
     String mode = 'code',
-  }) {
-    final cleaned = prompts.map((p) => p.trim()).where((p) => p.isNotEmpty).toList();
-    if (cleaned.isEmpty || isProcessingQueue) return;
-
-    _pendingPrompts.clear();
-    _pendingPrompts.addAll(cleaned);
-    _queuePosition = 0;
-    _queueTotal = cleaned.length;
-    _error = null;
-    notifyListeners();
-    _processNextInQueue(repo: repo, branch: branch, mode: mode);
-  }
-
-  Future<void> _processNextInQueue({
-    required String repo,
-    required String branch,
-    required String mode,
   }) async {
-    if (_queuePosition >= _queueTotal) {
-      // Done — clear queue state
-      _pendingPrompts.clear();
-      _queuePosition = 0;
-      _queueTotal = 0;
-      notifyListeners();
-      return;
-    }
-
-    final prompt = _pendingPrompts[_queuePosition];
-    _queuePosition++;
-    notifyListeners();
+    final cleaned = prompts.map((p) => p.trim()).where((p) => p.isNotEmpty).toList();
+    if (cleaned.isEmpty || _loading) return;
 
     _loading = true;
     _loadingSince = DateTime.now();
-
-    final userMsg = ChatMessage(
-      role: 'user',
-      content: '[${_queuePosition}/$_queueTotal] $prompt',
-      timestamp: DateTime.now().millisecondsSinceEpoch,
-    );
-    _messages.add(userMsg);
-    await _saveToCache();
+    _error = null;
     notifyListeners();
 
     try {
-      final data = await _api.sendChatMessage(
-        prompt,
+      final result = await _api.sendChatBatch(
+        prompts: cleaned,
         repo: repo,
         branch: branch,
         mode: mode,
       );
-      final response = (data['response'] ?? '').toString();
-      if (response.isNotEmpty) {
-        _messages.add(ChatMessage(
-          role: 'assistant',
-          content: response,
-          timestamp: DateTime.now().millisecondsSinceEpoch,
-        ));
-      }
-      await _saveToCache();
+      _queueTotal = (result['total'] as int?) ?? cleaned.length;
+      _queuePosition = 0;
+      notifyListeners();
+
+      // Start polling for progress + new messages
+      _pollBatchProgress(repo: repo, branch: branch, mode: mode);
     } catch (e) {
-      _messages.add(ChatMessage(
-        role: 'assistant',
-        content: '❌ Failed: ${ApiService.friendlyError(e)}',
-        timestamp: DateTime.now().millisecondsSinceEpoch,
-      ));
-      await _saveToCache();
+      _error = ApiService.friendlyError(e);
+      _loading = false;
+      _loadingSince = null;
+      notifyListeners();
     }
+  }
 
-    _loading = false;
-    _loadingSince = null;
-    notifyListeners();
+  Timer? _batchPollTimer;
 
-    // Small delay so user can see each response, then next
-    await Future.delayed(const Duration(milliseconds: 600));
-    _processNextInQueue(repo: repo, branch: branch, mode: mode);
+  void _pollBatchProgress({required String repo, required String branch, required String mode}) {
+    _batchPollTimer?.cancel();
+    _batchPollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      try {
+        final state = await _api.getChat();
+        if (state == null) return;
+
+        // Merge any new server messages into local messages
+        final serverMsgs = (state['messages'] as List?)
+                ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
+                .toList() ??
+            [];
+        if (serverMsgs.isNotEmpty) {
+          final merged = <ChatMessage>[];
+          final seen = <String>{};
+          for (final m in [...serverMsgs, ..._messages]) {
+            final key = '${m.role}:${m.content}:${m.timestamp}';
+            if (seen.add(key)) merged.add(m);
+          }
+          _messages = merged;
+          await _saveToCache();
+        }
+
+        // Update batch progress
+        final batch = state['batch'] as Map<String, dynamic>?;
+        if (batch != null) {
+          _loading = batch['running'] == true;
+          _queuePosition = (batch['position'] as int?) ?? 0;
+          _queueTotal = (batch['total'] as int?) ?? 0;
+
+          if (!_loading && _loadingSince != null) {
+            _loadingSince = null;
+            _batchPollTimer?.cancel();
+          }
+        }
+
+        notifyListeners();
+      } catch (_) {
+        // Polling errors are silent — we retry next tick
+      }
+    });
   }
 
   void cancelQueue() {
-    _pendingPrompts.clear();
-    _queuePosition = _queueTotal; // stops processing at next iteration
+    _batchPollTimer?.cancel();
+    _api.cancelChatBatch(); // fire-and-forget
     _loading = false;
     _loadingSince = null;
+    _queuePosition = 0;
+    _queueTotal = 0;
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _batchPollTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> clearChat() async {

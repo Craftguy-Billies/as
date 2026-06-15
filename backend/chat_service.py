@@ -36,6 +36,15 @@ _last_event_index: int = 0
 _messages: list[dict] = []
 _lock = threading.Lock()
 
+# Batch queue — server-side, survives client disconnect
+_batch_prompts: list[str] = []
+_batch_position: int = 0
+_batch_total: int = 0
+_batch_repo: str = ""
+_batch_branch: str = "main"
+_batch_mode: str = "code"
+_batch_running: bool = False
+
 # -- Restore state from DB on module load --
 def _restore_from_db() -> None:
     global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages
@@ -111,6 +120,12 @@ def get_state() -> dict:
             "conversation_id": _conversation_id,
             "repo": _conversation_repo,
             "mode": _conversation_mode,
+            "batch": {
+                "running": _batch_running,
+                "position": _batch_position,
+                "total": _batch_total,
+                "prompts": list(_batch_prompts),
+            },
         }
 
 
@@ -195,6 +210,100 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             # Transient failures do NOT kill the conversation
             logger.error("Chat error (keeping conversation): %s", e)
             return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Batch queue — server-side, survives client disconnect
+# ---------------------------------------------------------------------------
+
+
+def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "main", mode: str = "code") -> dict:
+    """Queue multiple prompts for sequential processing in the same conversation.
+
+    Returns immediately. Processing happens in a background thread.
+    Call get_state() to track progress.
+    """
+    global _batch_prompts, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _batch_running
+
+    cleaned = [p.strip() for p in prompts if p.strip()]
+    if not cleaned:
+        return {"error": "No valid prompts"}
+
+    with _lock:
+        if _batch_running:
+            return {"error": "Batch already running. Cancel first or wait."}
+
+        _batch_prompts = cleaned
+        _batch_position = 0
+        _batch_total = len(cleaned)
+        _batch_repo = repo
+        _batch_branch = branch
+        _batch_mode = mode
+        _batch_running = True
+
+    logger.info("Batch enqueued: %d prompts, repo=%s mode=%s", _batch_total, repo, mode)
+
+    # Start background processing
+    t = threading.Thread(target=_process_batch_worker, daemon=True)
+    t.start()
+
+    return {"status": "queued", "total": _batch_total}
+
+
+def _process_batch_worker() -> None:
+    """Process batch prompts one by one in a background thread."""
+    global _batch_position, _batch_running
+
+    while True:
+        with _lock:
+            if not _batch_running or _batch_position >= _batch_total:
+                _batch_running = False
+                _batch_prompts = []
+                _batch_position = 0
+                _batch_total = 0
+                _persist_to_db()
+                logger.info("Batch complete")
+                return
+            prompt = _batch_prompts[_batch_position]
+            pos = _batch_position + 1
+            total = _batch_total
+            repo = _batch_repo
+            branch = _batch_branch
+            mode = _batch_mode
+
+        # Send the prompt (this blocks — uses the same send() function)
+        logger.info("Batch [%d/%d]: %.80s...", pos, total, prompt)
+        result = send(prompt, repo=repo, branch=branch, mode=mode)
+
+        if "error" in result:
+            # Add error as a message so user can see it
+            with _lock:
+                _messages.append({
+                    "role": "assistant",
+                    "content": f"❌ [{pos}/{total}] Failed: {result['error']}",
+                    "timestamp": int(time.time() * 1000),
+                })
+
+        with _lock:
+            _batch_position += 1
+            _persist_to_db()
+
+        time.sleep(1)  # brief pause between prompts
+
+
+def cancel_batch() -> dict:
+    """Cancel the running batch queue."""
+    global _batch_running, _batch_prompts, _batch_position, _batch_total
+    with _lock:
+        was_running = _batch_running
+        _batch_running = False
+        remaining = _batch_total - _batch_position
+        _batch_prompts = []
+        _batch_position = 0
+        _batch_total = 0
+    if was_running:
+        logger.info("Batch cancelled (%d prompts remaining)", remaining)
+    return {"status": "cancelled", "remaining": remaining}
 
 
 # ---------------------------------------------------------------------------
