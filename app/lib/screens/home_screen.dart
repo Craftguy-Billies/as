@@ -79,7 +79,8 @@ class _HomeScreenState extends State<HomeScreen> {
         _promptCtrl.clear();
         Navigator.pushNamed(context, '/tasks/${task.id}');
       } else {
-        _showError('Failed to create task. Check backend logs.');
+        final err = context.read<TaskProvider>().error ?? 'Unknown error';
+        _showError('Failed: $err');
       }
     } catch (e) {
       _showError(e is TimeoutException
