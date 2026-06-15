@@ -105,10 +105,8 @@ class _ChatScreenState extends State<ChatScreen> {
     final branch = _branchCtrl.text.trim().isEmpty ? 'main' : _branchCtrl.text.trim();
 
     if (_batchMode) {
-      // Split by newlines, each non-empty line is a separate queued prompt
-      final lines = text.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList();
-      if (lines.isEmpty) return;
-      prov.enqueueBatch(lines, repo: repo, branch: branch, mode: _mode);
+      // Send as single prompt to cloud queue (append if batch running)
+      prov.enqueueBatch([text], repo: repo, branch: branch, mode: _mode);
     } else {
       prov.sendMessage(text, repo: repo, branch: branch, mode: _mode);
     }
@@ -452,7 +450,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   textInputAction: TextInputAction.send,
                   onSubmitted: (_) => _send(),
                   decoration: InputDecoration(
-                    hintText: _batchMode ? 'Paste multiple prompts, one per line...' : 'Send a message...',
+                    hintText: _batchMode ? 'Type a prompt to add to queue...' : 'Send a message...',
                     hintStyle: TextStyle(color: Colors.grey[700]),
                     filled: true,
                     fillColor: const Color(0xFF1A1A2E),
