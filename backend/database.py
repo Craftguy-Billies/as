@@ -4,7 +4,7 @@ import aiosqlite
 import os
 from contextlib import asynccontextmanager
 
-DB_PATH = os.getenv("VIBECODE_DB_PATH", "/opt/vibecode/data/vibecode.db")
+DB_PATH = os.getenv("VIBECODE_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "vibecode.db"))
 
 
 async def _get_db_path() -> str:
