@@ -91,17 +91,19 @@ class EventCard extends StatelessWidget {
                 style: TextStyle(color: Color(0xFF00FF88), fontSize: 12, fontWeight: FontWeight.w600),
               ),
               const Spacer(),
-              GestureDetector(
-                onTap: () {
-                  Clipboard.setData(ClipboardData(text: command));
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Copied to clipboard'),
-                      duration: Duration(seconds: 1),
-                    ),
-                  );
-                },
-                child: const Icon(Icons.copy, color: Colors.grey, size: 14),
+              Builder(
+                builder: (ctx) => GestureDetector(
+                  onTap: () {
+                    Clipboard.setData(ClipboardData(text: command));
+                    ScaffoldMessenger.of(ctx).showSnackBar(
+                      const SnackBar(
+                        content: Text('Copied to clipboard'),
+                        duration: Duration(seconds: 1),
+                      ),
+                    );
+                  },
+                  child: const Icon(Icons.copy, color: Colors.grey, size: 14),
+                ),
               ),
             ],
           ),
