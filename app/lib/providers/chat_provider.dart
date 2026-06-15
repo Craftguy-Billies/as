@@ -217,7 +217,17 @@ class ChatProvider extends ChangeNotifier {
 
   void _pollBatchProgress({required String repo, required String branch, required String mode}) {
     _batchPollTimer?.cancel();
+    final _pollStarted = DateTime.now();
     _batchPollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      // 30-minute max polling duration
+      if (DateTime.now().difference(_pollStarted).inMinutes >= 30) {
+        _batchPollTimer?.cancel();
+        _loading = false;
+        _loadingSince = null;
+        _error = 'Polling timed out (30 min). Queue may still run on server.';
+        notifyListeners();
+        return;
+      }
       try {
         final state = await _api.getChat();
         if (state == null) return;
@@ -251,6 +261,7 @@ class ChatProvider extends ChangeNotifier {
           }
         }
 
+        _batchPollFailures = 0;  // reset on every successful poll
         notifyListeners();
       } catch (_) {
         _batchPollFailures++;

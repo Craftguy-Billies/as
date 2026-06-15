@@ -129,7 +129,10 @@ async def chat_send_message(req: ChatRequest):
     if req.mode not in ("code", "plan"):
         raise HTTPException(status_code=400, detail="mode must be 'code' or 'plan'")
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, chat_send, req.prompt, req.repo, req.branch, req.mode)
+    try:
+        result = await loop.run_in_executor(None, chat_send, req.prompt, req.repo, req.branch, req.mode)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     if "error" in result:
         raise HTTPException(status_code=502, detail=result["error"])
     return result

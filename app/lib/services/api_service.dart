@@ -177,13 +177,18 @@ class ApiService {
     return json.decode(resp.body) as Map<String, dynamic>;
   }
 
-  Future<void> cancelChatBatch() async {
-    await http
-        .post(
-          Uri.parse('$_url/api/chat/batch/cancel'),
-          headers: {'Content-Type': 'application/json'},
-        )
-        .timeout(const Duration(seconds: 5));
+  Future<bool> cancelChatBatch() async {
+    try {
+      final resp = await http
+          .post(
+            Uri.parse('$_url/api/chat/batch/cancel'),
+            headers: {'Content-Type': 'application/json'},
+          )
+          .timeout(const Duration(seconds: 5));
+      return resp.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<Map<String, dynamic>> getChat() async {
@@ -283,7 +288,8 @@ class ApiService {
 
   Future<Map<String, dynamic>?> getLlmConfig() async {
     try {
-      final resp = await http.get(Uri.parse('$_url/api/config/llm'));
+      final resp = await http.get(Uri.parse('$_url/api/config/llm'))
+          .timeout(const Duration(seconds: 8));
       if (resp.statusCode == 200) return json.decode(resp.body);
     } catch (_) {}
     return null;

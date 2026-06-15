@@ -48,6 +48,7 @@ _batch_running: bool = False
 # -- Restore state from DB on module load --
 def _restore_from_db() -> None:
     global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages
+    global _batch_prompts, _batch_position, _batch_total, _batch_running
     if _DB is None:
         return
     try:
@@ -59,8 +60,14 @@ def _restore_from_db() -> None:
             _conversation_mode = data.get("mode", "code")
             _last_event_index = data.get("last_event_index", 0)
             _messages = data.get("messages", [])
-            logger.info("Restored chat session: conv=%s repo=%s mode=%s msgs=%d",
-                         _conversation_id, _conversation_repo, _conversation_mode, len(_messages))
+            # Restore batch queue if server restarted mid-batch
+            _batch_prompts = data.get("batch_prompts", [])
+            _batch_position = data.get("batch_position", 0)
+            _batch_total = data.get("batch_total", 0)
+            _batch_running = False  # never auto-resume — user must re-trigger
+            logger.info("Restored chat session: conv=%s repo=%s mode=%s msgs=%d batch=%d/%d",
+                         _conversation_id, _conversation_repo, _conversation_mode, len(_messages),
+                         _batch_position, _batch_total)
     except Exception:
         pass
 
@@ -68,12 +75,20 @@ def _persist_to_db() -> None:
     if _DB is None:
         return
     try:
+        # Trim in-memory to prevent unbounded growth
+        if len(_messages) > 500:
+            _messages[:] = _messages[-400:]
         data = json.dumps({
             "conversation_id": _conversation_id,
             "repo": _conversation_repo,
             "mode": _conversation_mode,
             "last_event_index": _last_event_index,
             "messages": _messages[-200:],  # keep last 200 messages max
+            # Batch state for survival across restarts
+            "batch_prompts": _batch_prompts,
+            "batch_position": _batch_position,
+            "batch_total": _batch_total,
+            "batch_running": _batch_running,
         })
         _DB.execute(
             "INSERT OR REPLACE INTO kv_store (key, value) VALUES ('chat_session', ?)",
@@ -193,11 +208,15 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                     "timestamp": int(time.time() * 1000),
                 })
                 _persist_to_db()
-
-            return {
-                "response": response or "(agent produced no text response)",
-                "conversation_id": _conversation_id,
-            }
+                return {
+                    "response": response,
+                    "conversation_id": _conversation_id,
+                }
+            else:
+                return {
+                    "error": "Agent did not produce a response (timeout or conversation error)",
+                    "conversation_id": _conversation_id,
+                }
 
         except httpx.HTTPStatusError as e:
             logger.error("HTTP error: %s %s", e.response.status_code, e.response.text[:200])
@@ -256,49 +275,80 @@ def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "main", mode
 
 
 def _process_batch_worker() -> None:
-    """Process batch prompts one by one in a background thread."""
+    """Process batch prompts one by one in a background thread.
+    
+    CRITICAL: Wrap in BaseException handler so a crash NEVER leaves
+    _batch_running=True (which would freeze the client forever).
+    Also enforce a 30-minute global timeout per batch.
+    """
     global _batch_position, _batch_running
+    _batch_started_at = time.time()
 
-    while True:
-        with _lock:
-            if not _batch_running or _batch_position >= _batch_total:
-                _batch_running = False
-                _batch_prompts = []
-                _batch_position = 0
-                _batch_total = 0
-                _persist_to_db()
-                logger.info("Batch complete")
-                return
-            prompt = _batch_prompts[_batch_position]
-            pos = _batch_position + 1
-            total = _batch_total
-            repo = _batch_repo
-            branch = _batch_branch
-            mode = _batch_mode
-
-        # Send the prompt (this blocks — uses the same send() function)
-        logger.info("Batch [%d/%d]: %.80s...", pos, total, prompt)
-        result = send(prompt, repo=repo, branch=branch, mode=mode)
-
-        if "error" in result:
-            # Add error as a message so user can see it
+    try:
+        while True:
             with _lock:
-                _messages.append({
-                    "role": "assistant",
-                    "content": f"❌ [{pos}/{total}] Failed: {result['error']}",
-                    "timestamp": int(time.time() * 1000),
-                })
+                if _batch_cancelled or not _batch_running or _batch_position >= _batch_total:
+                    _batch_running = False
+                    _batch_prompts = []
+                    _batch_position = 0
+                    _batch_total = 0
+                    _persist_to_db()
+                    logger.info("Batch complete")
+                    return
+                # 30-minute global batch timeout
+                if time.time() - _batch_started_at > 1800:
+                    _messages.append({
+                        "role": "error",
+                        "content": "Batch timed out after 30 minutes. Remaining prompts skipped.",
+                        "timestamp": int(time.time() * 1000),
+                    })
+                    _batch_running = False
+                    _batch_prompts = []
+                    _batch_position = 0
+                    _batch_total = 0
+                    _persist_to_db()
+                    logger.warning("Batch timed out")
+                    return
+                prompt = _batch_prompts[_batch_position]
+                pos = _batch_position + 1
+                total = _batch_total
+                repo = _batch_repo
+                branch = _batch_branch
+                mode = _batch_mode
 
+            # Send the prompt (this blocks — uses the same send() function)
+            logger.info("Batch [%d/%d]: %.80s...", pos, total, prompt)
+            try:
+                result = send(prompt, repo=repo, branch=branch, mode=mode)
+            except Exception as e:
+                logger.error("Batch send crashed [%d/%d]: %s", pos, total, e)
+                result = {"error": str(e)}
+
+            if result and "error" in result:
+                with _lock:
+                    _messages.append({
+                        "role": "assistant",
+                        "content": f"❌ [{pos}/{total}] Failed: {result['error']}",
+                        "timestamp": int(time.time() * 1000),
+                    })
+
+            with _lock:
+                _batch_position += 1
+                _persist_to_db()
+
+            time.sleep(1)  # brief pause between prompts
+    except BaseException as e:
+        logger.error("Batch worker FATAL crash: %s", e, exc_info=True)
+    finally:
         with _lock:
-            _batch_position += 1
-            _persist_to_db()
-
-        time.sleep(1)  # brief pause between prompts
+            _batch_running = False
+        _persist_to_db()
 
 
 def cancel_batch() -> dict:
-    """Cancel the running batch queue."""
-    global _batch_running, _batch_prompts, _batch_position, _batch_total
+    """Cancel the running batch queue. Non-blocking — sets flag for worker."""
+    global _batch_cancelled, _batch_running, _batch_prompts, _batch_position, _batch_total
+    _batch_cancelled = True  # non-blocking flag, worker checks each iteration
     with _lock:
         was_running = _batch_running
         _batch_running = False
@@ -384,8 +434,8 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
         git = get_git_config()
         if git["name"] and git["email"]:
             body["git_config"] = {"name": git["name"], "email": git["email"]}
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to load git config: %s", e)
 
     resp = httpx.post(
         f"{CLOUD_API_URL}/api/v1/app-conversations",

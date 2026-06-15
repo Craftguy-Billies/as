@@ -77,6 +77,23 @@ def _restore_llm_config() -> None:
 _restore_llm_config()
 
 
+def _restore_git_config() -> None:
+    global _git_config
+    db = _get_kv_db()
+    if db is None:
+        return
+    try:
+        row = db.execute("SELECT value FROM kv_store WHERE key = 'git_config'").fetchone()
+        if row:
+            data = json.loads(row[0])
+            _git_config = {"name": data.get("name"), "email": data.get("email")}
+            logger.info("Restored git config: name=%s", _git_config["name"])
+    except Exception:
+        pass
+
+_restore_git_config()
+
+
 def get_llm_config() -> AgentConfig:
     """Get current LLM config from env or global override."""
     global _llm_config
