@@ -90,6 +90,14 @@ class _HomeScreenState extends State<HomeScreen> {
     if (mounted) setState(() => _sending = false);
   }
 
+  void _setMode(String m) {
+    setState(() => _mode = m);
+    try {
+      final prefs = context.read<PreferencesService>();
+      prefs.saveLastPrompt(_repoCtrl.text.trim(), 'main', m);
+    } catch (_) {}
+  }
+
   void _showError(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -262,13 +270,13 @@ class _HomeScreenState extends State<HomeScreen> {
                             label: 'Code',
                             icon: Icons.bolt,
                             selected: _mode == 'code',
-                            onTap: () => setState(() => _mode = 'code'),
+                            onTap: () => _setMode('code'),
                           ),
                           _ModeChip(
                             label: 'Plan',
                             icon: Icons.map,
                             selected: _mode == 'plan',
-                            onTap: () => setState(() => _mode = 'plan'),
+                            onTap: () => _setMode('plan'),
                           ),
                         ],
                       ),
@@ -334,6 +342,9 @@ class _HomeScreenState extends State<HomeScreen> {
                               onTap: () =>
                                   Navigator.pushNamed(context, '/tasks/${task.id}'),
                               onDelete: () => taskProv.deleteTask(task.id),
+                              onRetry: task.isFailed
+                                  ? () => taskProv.retryTask(task.id)
+                                  : null,
                             );
                           },
                         ),

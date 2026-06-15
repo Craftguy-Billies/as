@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Sequential processing — one task at a time to avoid git conflicts
 MAX_CONCURRENT = 1
-_active_tasks: dict[str, threading.Thread] = {}
+_active_tasks: set[str] = set()
 _worker_running = False
 _loop: asyncio.AbstractEventLoop | None = None
 
@@ -102,7 +102,10 @@ async def _process_task(task_id: str) -> None:
                     batch = list(event_queue)
                     event_queue.clear()
                 last_flush = time.time()
-                asyncio.run_coroutine_threadsafe(_save_events(db, task_id, batch), loop)
+                future = asyncio.run_coroutine_threadsafe(_save_events(db, task_id, batch), loop)
+                future.add_done_callback(lambda f: (
+                    logger.error("Event save failed: %s", f.exception())
+                ) if f.exception() else None)
 
             def on_event(event: dict) -> None:
                 with queue_lock:
@@ -177,7 +180,7 @@ async def _process_task(task_id: str) -> None:
             logger.error(f"Failed to update task {task_id} status after exception")
 
     finally:
-        _active_tasks.pop(task_id, None)
+        _active_tasks.discard(task_id)
 
 
 async def _worker_loop() -> None:
@@ -197,7 +200,7 @@ async def _worker_loop() -> None:
                     row = await cursor.fetchone()
                     if row:
                         task_id = row["id"]
-                        _active_tasks[task_id] = threading.Thread(target=lambda: None)  # placeholder
+                        _active_tasks.add(task_id)
                         asyncio.create_task(_process_task(task_id))
 
             await asyncio.sleep(2)  # Poll every 2 seconds

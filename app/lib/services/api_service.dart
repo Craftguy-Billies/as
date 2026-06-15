@@ -87,6 +87,14 @@ class ApiService {
     }
   }
 
+  Future<void> retryTask(String id) async {
+    final resp = await http.post(Uri.parse('$_url/api/tasks/$id/retry'))
+        .timeout(const Duration(seconds: 8));
+    if (resp.statusCode != 200) {
+      throw Exception('Failed to retry task');
+    }
+  }
+
   Future<void> deleteAllTasks({String status = 'all'}) async {
     final resp = await http.delete(
       Uri.parse('$_url/api/tasks').replace(queryParameters: {'status': status}),

@@ -277,6 +277,24 @@ async def delete_task(task_id: str):
     return {"status": "deleted", "task_id": task_id}
 
 
+@app.post("/api/tasks/{task_id}/retry")
+async def retry_task(task_id: str):
+    """Retry a failed task — resets status to 'queued' so worker picks it up."""
+    async with get_db_ctx() as db:
+        cursor = await db.execute("SELECT id, status FROM tasks WHERE id = ?", (task_id,))
+        row = await cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Task not found")
+        if row["status"] != "failed":
+            raise HTTPException(status_code=400, detail=f"Cannot retry task with status '{row['status']}'")
+        await db.execute(
+            "UPDATE tasks SET status = 'queued', error_message = NULL, completed_at = NULL WHERE id = ?",
+            (task_id,),
+        )
+        await db.commit()
+    return {"status": "queued", "task_id": task_id}
+
+
 @app.delete("/api/tasks")
 async def delete_all_tasks(status: str = "all"):
     """Delete all tasks, optionally filtered by status."""

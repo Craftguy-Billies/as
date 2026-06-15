@@ -98,6 +98,16 @@ class TaskProvider extends ChangeNotifier {
     }
   }
 
+  Future<void> retryTask(String id) async {
+    try {
+      await _api.retryTask(id);
+      await loadTasks();
+    } catch (e) {
+      _error = e.toString();
+      _safeNotify();
+    }
+  }
+
   Future<void> deleteAllTasks() async {
     try {
       await _api.deleteAllTasks();
@@ -112,12 +122,16 @@ class TaskProvider extends ChangeNotifier {
   // --- Live Feed ---
 
   void startPolling(String taskId) {
-    _currentTaskId = taskId;
-    _events = [];
-    _feedError = null;
-    _consecutiveFailures = 0;
-    _autoScroll = true;
-    _prefs.clearLastSeenTimestamp();
+    if (_currentTaskId != taskId) {
+      // New task — clear and track it
+      _currentTaskId = taskId;
+      _events = [];
+      _feedError = null;
+      _consecutiveFailures = 0;
+      _autoScroll = true;
+      _prefs.clearLastSeenTimestamp();
+    }
+    // Same task — resume polling, preserve existing events
     _startPollTimer();
     _fetchEvents(); // immediate first fetch
   }

@@ -245,8 +245,11 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     return conversation_id
 
 
-def _wait_for_response(timeout: int = 180) -> str | None:
-    """Poll conversation status + events until the agent finishes (SAME logic as agent_runner)."""
+def _wait_for_response(timeout: int = 300) -> str | None:
+    """Poll conversation status + events until the agent finishes (SAME logic as agent_runner).
+    
+    Timeout: 300s (5 min). Complex tasks may need this — the agent may be thinking/typing.
+    """
     global _last_event_index
 
     start = time.time()

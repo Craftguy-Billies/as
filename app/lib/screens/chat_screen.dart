@@ -39,10 +39,10 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<Map<String, String?>> _loadPrefs() async {
-    // Use the same SharedPreferences as PreferencesService
     final sp = await SharedPreferences.getInstance();
     return {
       'repo': sp.getString('last_repo') ?? '',
+      'branch': sp.getString('last_branch') ?? 'main',
       'mode': sp.getString('last_mode') ?? 'code',
     };
   }
@@ -50,8 +50,11 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _saveRepoPrefs() async {
     try {
       final sp = await SharedPreferences.getInstance();
-      await sp.setString('last_repo', _repoCtrl.text.trim());
-      await sp.setString('last_mode', _mode);
+      await Future.wait([
+        sp.setString('last_repo', _repoCtrl.text.trim()),
+        sp.setString('last_branch', 'main'),
+        sp.setString('last_mode', _mode),
+      ]);
     } catch (_) {}
   }
 
@@ -76,6 +79,7 @@ class _ChatScreenState extends State<ChatScreen> {
       context.read<ChatProvider>().sendMessage(
         text,
         repo: _repoCtrl.text.trim(),
+        branch: 'main',
         mode: _mode,
       );
     } catch (_) {}

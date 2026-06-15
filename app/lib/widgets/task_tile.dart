@@ -5,12 +5,14 @@ class TaskTile extends StatelessWidget {
   final Task task;
   final VoidCallback onTap;
   final VoidCallback onDelete;
+  final VoidCallback? onRetry;
 
   const TaskTile({
     super.key,
     required this.task,
     required this.onTap,
     required this.onDelete,
+    this.onRetry,
   });
 
   static String _safeTime(String iso) {
@@ -118,7 +120,16 @@ class TaskTile extends StatelessWidget {
                     ],
                   ),
                 ),
-                Icon(Icons.chevron_right, color: Colors.grey[700]),
+                if (task.isFailed && onRetry != null)
+                  IconButton(
+                    icon: const Icon(Icons.refresh, color: Colors.amber, size: 20),
+                    tooltip: 'Retry',
+                    onPressed: onRetry,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                  )
+                else
+                  Icon(Icons.chevron_right, color: Colors.grey[700]),
               ],
             ),
           ),

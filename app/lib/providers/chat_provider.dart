@@ -48,10 +48,12 @@ class ChatProvider extends ChangeNotifier {
     if (raw != null) {
       try {
         final list = json.decode(raw) as List;
-        _messages = list
-            .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
-            .toList();
-        notifyListeners();
+        if (list.isNotEmpty) {
+          _messages = list
+              .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
+              .toList();
+          notifyListeners();
+        }
       } catch (_) {
         await prefs.remove(_cacheKey);
       }
@@ -124,6 +126,7 @@ class ChatProvider extends ChangeNotifier {
       await _saveToCache(); // persist full conversation after success
     } catch (e) {
       _error = e.toString();
+      // Keep user message in conversation — user can retry by sending again
     } finally {
       _loading = false;
       _loadingSince = null;
@@ -134,13 +137,16 @@ class ChatProvider extends ChangeNotifier {
   Future<void> clearChat() async {
     _messages.clear();
     _error = null;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_cacheKey);
+    _loading = false;
+    _loadingSince = null;
     notifyListeners();
 
+    // Delete from server first, then clear local cache
     try {
       await _api.deleteChat();
     } catch (_) {}
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_cacheKey);
   }
 
   Future<void> _saveToCache() async {

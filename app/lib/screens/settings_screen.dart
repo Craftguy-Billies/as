@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
@@ -14,14 +15,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _apiKeyCtrl = TextEditingController();
   final _modelCtrl = TextEditingController();
   final _baseUrlCtrl = TextEditingController();
+  Timer? _urlDebounce;
 
   @override
   void dispose() {
+    _urlDebounce?.cancel();
     _urlCtrl.dispose();
     _apiKeyCtrl.dispose();
     _modelCtrl.dispose();
     _baseUrlCtrl.dispose();
     super.dispose();
+  }
+
+  void _onUrlChanged(String v) {
+    _urlDebounce?.cancel();
+    _urlDebounce = Timer(const Duration(milliseconds: 800), () {
+      context.read<SettingsProvider>().setServerUrl(v);
+    });
   }
 
   @override
@@ -49,7 +59,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             label: 'Backend URL',
             hint: 'http://YOUR_VM_IP:8080',
             icon: Icons.dns,
-            onChanged: (v) => settings.setServerUrl(v),
+            onChanged: _onUrlChanged,
           ),
           const SizedBox(height: 8),
           Row(
