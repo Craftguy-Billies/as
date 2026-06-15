@@ -13,7 +13,7 @@ async def _get_db_path() -> str:
 
 
 async def init_db() -> None:
-    """Create tables and indexes if they don't exist."""
+    """Create tables and indexes if they don't exist. Migrate old DBs."""
     path = await _get_db_path()
     async with aiosqlite.connect(path) as db:
         await db.execute("PRAGMA journal_mode=WAL")
@@ -66,6 +66,11 @@ async def init_db() -> None:
                 created_at TEXT NOT NULL
             );
         """)
+        # Migration: add mcp_config column to existing DBs from older versions
+        cursor = await db.execute("PRAGMA table_info(tasks)")
+        columns = [row[1] for row in await cursor.fetchall()]
+        if "mcp_config" not in columns:
+            await db.execute("ALTER TABLE tasks ADD COLUMN mcp_config TEXT")
         await db.commit()
 
 
