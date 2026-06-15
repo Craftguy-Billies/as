@@ -181,10 +181,9 @@ class ChatProvider extends ChangeNotifier {
     String mode = 'code',
   }) async {
     final cleaned = prompts.map((p) => p.trim()).where((p) => p.isNotEmpty).toList();
-    if (cleaned.isEmpty || _loading) return;
+    if (cleaned.isEmpty) return;
 
-    _loading = true;
-    _loadingSince = DateTime.now();
+    // Don't block on _loading — batch appends should always go through
     _error = null;
     notifyListeners();
 
@@ -196,11 +195,12 @@ class ChatProvider extends ChangeNotifier {
         mode: mode,
       );
       _queueTotal = (result['total'] as int?) ?? cleaned.length;
-      _queuePosition = 0;
-      notifyListeners();
-
-      // Only start polling if this was a new batch (not appended to existing)
+      // Don't reset position — polling already tracks it
       if (result['status'] == 'queued') {
+        _queuePosition = 0;
+        _loading = true;
+        _loadingSince = DateTime.now();
+        notifyListeners();
         _pollBatchProgress(repo: repo, branch: branch, mode: mode);
       }
     } catch (e) {

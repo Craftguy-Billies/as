@@ -86,7 +86,9 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _inputCtrl.text.trim();
     final prov = context.read<ChatProvider>();
     final loading = prov.loading;
-    if (text.isEmpty || loading) return;
+    if (text.isEmpty) return;
+    // In normal mode, block send while loading. In batch mode, allow append.
+    if (!_batchMode && loading) return;
 
     final repo = _repoCtrl.text.trim();
     if (repo.isNotEmpty && !RegExp(r'^[\w.-]+/[\w.-]+$').hasMatch(repo)) {
