@@ -9,6 +9,7 @@ class AgentEvent {
   final String? actionJson;
   final String? observationJson;
   final String? messageJson;
+  final String? rawJson;
 
   const AgentEvent({
     required this.id,
@@ -21,6 +22,7 @@ class AgentEvent {
     this.actionJson,
     this.observationJson,
     this.messageJson,
+    this.rawJson,
   });
 
   factory AgentEvent.fromJson(Map<String, dynamic> json) {
@@ -35,6 +37,7 @@ class AgentEvent {
       actionJson: json['action_json']?.toString(),
       observationJson: json['observation_json']?.toString(),
       messageJson: json['message_json']?.toString(),
+      rawJson: json['raw_json']?.toString(),
     );
   }
 

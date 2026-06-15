@@ -53,6 +53,7 @@ class EventResponse(BaseModel):
     action_json: Optional[str] = None
     observation_json: Optional[str] = None
     message_json: Optional[str] = None
+    raw_json: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
