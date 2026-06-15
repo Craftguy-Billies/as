@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/task_provider.dart';
@@ -26,7 +27,14 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _autoConnect() async {
     final settings = context.read<SettingsProvider>();
     if (settings.connected == null) {
-      await settings.testConnection();
+      try {
+        await settings.testConnection().timeout(const Duration(seconds: 12));
+      } catch (_) {
+        // Will show error UI via connected==false from provider
+        if (mounted && settings.connected == null) {
+          settings.markDisconnected();
+        }
+      }
     }
   }
 

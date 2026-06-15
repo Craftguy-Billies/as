@@ -35,15 +35,28 @@ class SettingsProvider extends ChangeNotifier {
     _connected = null;
     notifyListeners();
 
-    _connected = await _api.testConnection();
+    try {
+      _connected = await _api.testConnection().timeout(const Duration(seconds: 10));
+    } catch (_) {
+      _connected = false;
+    }
+
     if (_connected == true) {
-      final health = await _api.health();
-      _modelName = health?['model'] as String?;
+      try {
+        final health = await _api.health();
+        _modelName = health?['model'] as String?;
+      } catch (_) {}
     }
 
     _testing = false;
     notifyListeners();
     return _connected == true;
+  }
+
+  void markDisconnected() {
+    _connected = false;
+    _testing = false;
+    notifyListeners();
   }
 
   Future<void> updateLlmConfig({
