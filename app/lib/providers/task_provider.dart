@@ -19,6 +19,9 @@ class TaskProvider extends ChangeNotifier {
   Timer? _pollTimer;
   bool _autoScroll = true;
   bool _disposed = false;
+  String? _feedError;
+  int _consecutiveFailures = 0;
+  static const int _maxFailures = 5;
 
   TaskProvider(this._api, this._prefs);
 
@@ -39,6 +42,7 @@ class TaskProvider extends ChangeNotifier {
   String? get error => _error;
   String? get currentTaskId => _currentTaskId;
   bool get autoScroll => _autoScroll;
+  String? get feedError => _feedError;
 
   set autoScroll(bool v) {
     _autoScroll = v;
@@ -150,22 +154,27 @@ class TaskProvider extends ChangeNotifier {
           .toList();
       final taskStatus = data['task_status'] as String;
 
+      _consecutiveFailures = 0;
+      _feedError = null;
+
       if (newEvents.isNotEmpty) {
         _events = [..._events, ...newEvents];
-        // Update last seen timestamp
-        _prefs.setLastSeenTimestamp(
-          newEvents.last.timestamp,
-        );
+        _prefs.setLastSeenTimestamp(newEvents.last.timestamp);
         _safeNotify();
       }
 
-      // Check if task completed
       if (taskStatus == 'completed' || taskStatus == 'failed') {
         stopPolling();
-        // Refresh task list
         await loadTasks();
       }
-    } catch (_) {}
+    } catch (e) {
+      _consecutiveFailures++;
+      _feedError = e.toString();
+      _safeNotify();
+      if (_consecutiveFailures >= _maxFailures) {
+        stopPolling();
+      }
+    }
   }
 
 }

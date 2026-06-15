@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timezone
 
 from database import get_db_ctx
@@ -84,18 +85,31 @@ async def _process_task(task_id: str) -> None:
         # Event queue for thread-safe collection
         event_queue: list[dict] = []
         queue_lock = threading.Lock()
-        last_flush = 0.0
+        last_flush = time.time()
+        FLUSH_INTERVAL = 10  # seconds
 
-        def on_event(event: dict) -> None:
+        loop = asyncio.get_running_loop()
+
+        def _flush_events() -> None:
+            """Thread-safe: schedule async flush on the event loop."""
             nonlocal last_flush
             with queue_lock:
+                if not event_queue:
+                    return
+                batch = list(event_queue)
+                event_queue.clear()
+            last_flush = time.time()
+            asyncio.run_coroutine_threadsafe(_save_events(db, task_id, batch), loop)
+
+        def on_event(event: dict) -> None:
+            with queue_lock:
                 event_queue.append(event)
+                should_flush = (time.time() - last_flush) >= FLUSH_INTERVAL
+            if should_flush:
+                _flush_events()
 
         def on_status(status: str) -> None:
             logger.info(f"Task {task_id} status: {status}")
-
-        # Run agent in a background thread
-        loop = asyncio.get_running_loop()
 
         # Parse MCP config from task if present
         mcp_servers = None
@@ -159,8 +173,12 @@ async def _process_task(task_id: str) -> None:
                 )
 
         except Exception as e:
-            logger.error(f"Task {task_id} failed with exception: {e}")
-            await _update_task_status(db, task_id, "failed", error_message=str(e))
+            import traceback
+            err_detail = f"{type(e).__name__}: {e}"
+            if not str(e):
+                err_detail = f"{type(e).__name__} (no detail)"
+            logger.error(f"Task {task_id} failed: {err_detail}\n{traceback.format_exc()}")
+            await _update_task_status(db, task_id, "failed", error_message=err_detail)
 
         finally:
             _active_tasks.pop(task_id, None)

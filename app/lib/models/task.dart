@@ -27,17 +27,17 @@ class Task {
 
   factory Task.fromJson(Map<String, dynamic> json) {
     return Task(
-      id: json['id'] as String,
-      prompt: json['prompt'] as String,
-      repo: json['repo'] as String,
-      branch: json['branch'] as String? ?? 'main',
-      mode: json['mode'] as String? ?? 'code',
-      status: json['status'] as String,
-      conversationId: json['conversation_id'] as String?,
-      sandboxId: json['sandbox_id'] as String?,
-      createdAt: json['created_at'] as String,
-      completedAt: json['completed_at'] as String?,
-      errorMessage: json['error_message'] as String?,
+      id: (json['id'] ?? '').toString(),
+      prompt: (json['prompt'] ?? '').toString(),
+      repo: (json['repo'] ?? '').toString(),
+      branch: (json['branch'] ?? 'main').toString(),
+      mode: (json['mode'] ?? 'code').toString(),
+      status: (json['status'] ?? 'queued').toString(),
+      conversationId: json['conversation_id']?.toString(),
+      sandboxId: json['sandbox_id']?.toString(),
+      createdAt: (json['created_at'] ?? '').toString(),
+      completedAt: json['completed_at']?.toString(),
+      errorMessage: json['error_message']?.toString(),
     );
   }
 

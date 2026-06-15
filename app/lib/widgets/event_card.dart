@@ -200,6 +200,20 @@ class EventCard extends StatelessWidget {
   }
 
   Widget _buildError() {
+    String errText = 'An error occurred';
+    // Extract useful error info from any available field
+    final sources = [
+      event.messageJson,
+      event.observationJson,
+      event.rawJson,
+    ];
+    for (final src in sources) {
+      if (src != null && src.isNotEmpty) {
+        errText = src.length > 300 ? '${src.substring(0, 300)}...' : src;
+        break;
+      }
+    }
+
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       padding: const EdgeInsets.all(12),
@@ -209,13 +223,17 @@ class EventCard extends StatelessWidget {
         border: Border.all(color: const Color(0xFF5B2020)),
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.error_outline, color: Colors.red, size: 18),
+          const Padding(
+            padding: EdgeInsets.only(top: 2),
+            child: Icon(Icons.error_outline, color: Colors.red, size: 18),
+          ),
           const SizedBox(width: 10),
-          const Expanded(
+          Expanded(
             child: Text(
-              'An error occurred',
-              style: TextStyle(color: Colors.redAccent, fontSize: 13),
+              errText,
+              style: const TextStyle(color: Colors.redAccent, fontSize: 13),
             ),
           ),
         ],

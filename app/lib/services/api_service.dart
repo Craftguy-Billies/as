@@ -125,11 +125,14 @@ class ApiService {
   }
 
   Future<void> registerFcmToken(String token) async {
-    await http.post(
+    final resp = await http.post(
       Uri.parse('$_url/api/fcm-token'),
       headers: {'Content-Type': 'application/json'},
       body: json.encode({'token': token}),
-    );
+    ).timeout(const Duration(seconds: 8));
+    if (resp.statusCode != 200) {
+      throw Exception('Failed to register push token: ${resp.statusCode}');
+    }
   }
 
   Future<void> updateLlmConfig({
@@ -137,7 +140,7 @@ class ApiService {
     required String model,
     String? baseUrl,
   }) async {
-    await http.put(
+    final resp = await http.put(
       Uri.parse('$_url/api/config/llm'),
       headers: {'Content-Type': 'application/json'},
       body: json.encode({
@@ -145,7 +148,10 @@ class ApiService {
         'model': model,
         'base_url': baseUrl,
       }),
-    );
+    ).timeout(const Duration(seconds: 8));
+    if (resp.statusCode != 200) {
+      throw Exception('Failed to update LLM config: ${resp.statusCode}');
+    }
   }
 
   Future<Map<String, dynamic>?> getLlmConfig() async {

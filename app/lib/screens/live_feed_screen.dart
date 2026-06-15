@@ -99,19 +99,34 @@ class _LiveFeedScreenState extends State<LiveFeedScreen>
           // Event feed
           Expanded(
             child: events.isEmpty
-                ? const Center(
+                ? Center(
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        SizedBox(
-                          height: 24, width: 24,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        ),
-                        SizedBox(height: 16),
-                        Text(
-                          'Waiting for agent...',
-                          style: TextStyle(color: Colors.grey),
-                        ),
+                        if (prov.feedError == null) ...[
+                          const SizedBox(
+                            height: 24, width: 24,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                          const SizedBox(height: 16),
+                          const Text(
+                            'Waiting for agent...',
+                            style: TextStyle(color: Colors.grey),
+                          ),
+                        ] else ...[
+                          const Icon(Icons.cloud_off, color: Colors.red, size: 40),
+                          const SizedBox(height: 16),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 32),
+                            child: Text(
+                              prov.feedError!,
+                              style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+                              textAlign: TextAlign.center,
+                              maxLines: 5,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   )

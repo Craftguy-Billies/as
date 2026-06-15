@@ -9,6 +9,7 @@ SDK docs: https://docs.openhands.dev/sdk
 """
 
 import json
+import logging
 import os
 import threading
 import time
@@ -18,6 +19,8 @@ from datetime import datetime, timezone
 from typing import Callable, Optional
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -324,11 +327,11 @@ def run_conversation_sync(
     except httpx.HTTPStatusError as e:
         result["status"] = "failed"
         result["error_message"] = f"API error {e.response.status_code}: {e.response.text[:200]}"
-        traceback.print_exc()
+        logger.error(f"HTTPStatusError: {e.response.status_code} {e.response.text[:200]}\n{traceback.format_exc()}")
     except Exception as e:
         result["status"] = "failed"
         result["error_message"] = f"{type(e).__name__}: {str(e)}"
-        traceback.print_exc()
+        logger.error(f"Exception: {e}\n{traceback.format_exc()}")
 
     if status_callback:
         status_callback(result["status"])

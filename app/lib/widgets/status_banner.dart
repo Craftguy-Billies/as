@@ -7,10 +7,19 @@ class StatusBanner extends StatelessWidget {
   final String taskId;
   const StatusBanner({super.key, required this.taskId});
 
+  String _formatTime(String? iso) {
+    if (iso == null) return '';
+    try {
+      final dt = DateTime.parse(iso).toLocal();
+      return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}';
+    } catch (_) {
+      return iso.length >= 19 ? iso.substring(11, 19) : iso;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final prov = context.watch<TaskProvider>();
-    // Find task in list
     Task? task;
     try {
       task = prov.tasks.firstWhere((t) => t.id == taskId);
@@ -18,6 +27,7 @@ class StatusBanner extends StatelessWidget {
 
     final status = task?.status ?? 'queued';
     final mode = task?.mode ?? 'code';
+    final errorMsg = task?.errorMessage;
 
     IconData icon;
     String text;
@@ -42,7 +52,9 @@ class StatusBanner extends StatelessWidget {
         color = Colors.green;
       case 'failed':
         icon = Icons.error;
-        text = '❌ Failed';
+        text = errorMsg != null && errorMsg.isNotEmpty
+            ? '❌ $errorMsg'
+            : '❌ Failed';
         color = Colors.red;
       default:
         icon = Icons.help;
@@ -62,14 +74,18 @@ class StatusBanner extends StatelessWidget {
                 )
               : Icon(icon, color: color, size: 20),
           const SizedBox(width: 10),
-          Text(
-            text,
-            style: TextStyle(color: color, fontSize: 14, fontWeight: FontWeight.w500),
+          Flexible(
+            child: Text(
+              text,
+              style: TextStyle(color: color, fontSize: 14, fontWeight: FontWeight.w500),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
           const Spacer(),
           if (task?.completedAt != null)
             Text(
-              task!.completedAt!.substring(11, 19),
+              _formatTime(task!.completedAt),
               style: TextStyle(color: Colors.grey[600], fontSize: 12),
             ),
         ],

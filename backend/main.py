@@ -87,16 +87,24 @@ async def create_prompt(req: PromptRequest):
     task_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
 
-    mcp_json = _json.dumps([m.model_dump() for m in req.mcp_servers]) if req.mcp_servers else None
+    try:
+        mcp_json = _json.dumps([m.model_dump() for m in req.mcp_servers]) if req.mcp_servers else None
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid MCP server config: {e}")
 
-    async with get_db_ctx() as db:
-        await db.execute(
-            """INSERT INTO tasks (id, prompt, repo, branch, mode, status, created_at, mcp_config)
-               VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)""",
-            (task_id, req.prompt, req.repo, req.branch, req.mode, now, mcp_json),
-        )
-        await db.commit()
+    try:
+        async with get_db_ctx() as db:
+            await db.execute(
+                """INSERT INTO tasks (id, prompt, repo, branch, mode, status, created_at, mcp_config)
+                   VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)""",
+                (task_id, req.prompt, req.repo, req.branch, req.mode, now, mcp_json),
+            )
+            await db.commit()
+    except Exception as e:
+        logger.error(f"Failed to create prompt: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create task. Please try again.")
 
+    logger.info(f"Task {task_id} created: repo={req.repo}, mode={req.mode}")
     return TaskResponse(
         id=task_id,
         prompt=req.prompt,

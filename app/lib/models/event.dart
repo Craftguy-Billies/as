@@ -25,16 +25,16 @@ class AgentEvent {
 
   factory AgentEvent.fromJson(Map<String, dynamic> json) {
     return AgentEvent(
-      id: json['id'] as int,
-      taskId: json['task_id'] as String,
-      eventIndex: json['event_index'] as int,
-      timestamp: json['timestamp'] as String,
-      kind: json['kind'] as String,
-      source: json['source'] as String?,
-      toolName: json['tool_name'] as String?,
-      actionJson: json['action_json'] as String?,
-      observationJson: json['observation_json'] as String?,
-      messageJson: json['message_json'] as String?,
+      id: (json['id'] ?? 0) as int,
+      taskId: (json['task_id'] ?? '').toString(),
+      eventIndex: (json['event_index'] ?? 0) as int,
+      timestamp: (json['timestamp'] ?? '').toString(),
+      kind: (json['kind'] ?? 'Unknown').toString(),
+      source: json['source']?.toString(),
+      toolName: json['tool_name']?.toString(),
+      actionJson: json['action_json']?.toString(),
+      observationJson: json['observation_json']?.toString(),
+      messageJson: json['message_json']?.toString(),
     );
   }
 
