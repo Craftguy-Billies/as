@@ -30,6 +30,7 @@ class VibeCodeApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
+        Provider.value(value: prefs),
         ChangeNotifierProvider(create: (_) => TaskProvider(api, prefs)),
         ChangeNotifierProvider(create: (_) => SettingsProvider(api, prefs)),
       ],

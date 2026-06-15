@@ -97,6 +97,27 @@ def _build_prompt_text(prompt: str, repo: str, branch: str, mode: str) -> str:
         return base + prompt
 
 
+def _build_default_mcp_servers() -> list[dict]:
+    """Build default MCP servers from environment variables."""
+    servers: list[dict] = []
+    
+    github_token = os.getenv("GITHUB_TOKEN", "")
+    if github_token:
+        servers.append({
+            "name": "github",
+            "config": {"token": github_token},
+        })
+    
+    tavily_key = os.getenv("TAVILY_API_KEY", "")
+    if tavily_key:
+        servers.append({
+            "name": "tavily",
+            "config": {"api_key": tavily_key},
+        })
+    
+    return servers
+
+
 def run_conversation_sync(
     prompt: str,
     repo: str,
@@ -104,11 +125,16 @@ def run_conversation_sync(
     mode: str,
     event_callback: Optional[Callable[[dict], None]] = None,
     status_callback: Optional[Callable[[str], None]] = None,
+    mcp_servers: Optional[list[dict]] = None,
 ) -> dict:
     """Run an agent conversation via OpenHands Cloud REST API.
 
     Called from a background thread. Polls for events every 3 seconds,
     caches them, and returns when the conversation completes or fails.
+
+    Args:
+        mcp_servers: Optional list of MCP server configs (name + config dict).
+                     Defaults to building from GITHUB_TOKEN + TAVILY_API_KEY env vars.
 
     Returns:
         dict with: status, error_message, conversation_id, sandbox_id, events.
@@ -150,6 +176,11 @@ def run_conversation_sync(
             }
             if cfg.base_url:
                 body["llm_config"]["base_url"] = cfg.base_url
+
+        # Include MCP servers (defaults: GITHUB_TOKEN + TAVILY_API_KEY from env)
+        servers = mcp_servers if mcp_servers is not None else _build_default_mcp_servers()
+        if servers:
+            body["mcp_servers"] = servers
 
         resp = httpx.post(
             f"{CLOUD_API_URL}/api/v1/app-conversations",

@@ -21,6 +21,9 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    final prefs = context.read<PreferencesService>();
+    _repoCtrl.text = prefs.lastRepo;
+    _mode = prefs.lastMode;
     WidgetsBinding.instance.addPostFrameCallback((_) => _autoConnect());
   }
 
@@ -29,8 +32,10 @@ class _HomeScreenState extends State<HomeScreen> {
     if (settings.connected == null) {
       try {
         await settings.testConnection().timeout(const Duration(seconds: 12));
+        if (mounted && settings.connected == true) {
+          context.read<TaskProvider>().loadTasks();
+        }
       } catch (_) {
-        // Will show error UI via connected==false from provider
         if (mounted && settings.connected == null) {
           settings.markDisconnected();
         }
@@ -60,6 +65,7 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() => _sending = false);
 
     if (task != null && mounted) {
+      context.read<PreferencesService>().saveLastPrompt(repo, 'main', _mode);
       _promptCtrl.clear();
       Navigator.pushNamed(context, '/tasks/${task.id}');
     }

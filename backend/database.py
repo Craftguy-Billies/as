@@ -30,7 +30,8 @@ async def init_db() -> None:
                 sandbox_id TEXT,
                 created_at TEXT NOT NULL,
                 completed_at TEXT,
-                error_message TEXT
+                error_message TEXT,
+                mcp_config TEXT
             );
 
             CREATE TABLE IF NOT EXISTS events (

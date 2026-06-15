@@ -83,14 +83,17 @@ async def health():
 @app.post("/api/prompts", response_model=TaskResponse, status_code=201)
 async def create_prompt(req: PromptRequest):
     """Submit a new coding prompt. Creates a task and queues it for processing."""
+    import json as _json
     task_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
 
+    mcp_json = _json.dumps([m.model_dump() for m in req.mcp_servers]) if req.mcp_servers else None
+
     async with get_db_ctx() as db:
         await db.execute(
-            """INSERT INTO tasks (id, prompt, repo, branch, mode, status, created_at)
-               VALUES (?, ?, ?, ?, ?, 'queued', ?)""",
-            (task_id, req.prompt, req.repo, req.branch, req.mode, now),
+            """INSERT INTO tasks (id, prompt, repo, branch, mode, status, created_at, mcp_config)
+               VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)""",
+            (task_id, req.prompt, req.repo, req.branch, req.mode, now, mcp_json),
         )
         await db.commit()
 

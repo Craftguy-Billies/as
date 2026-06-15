@@ -5,6 +5,7 @@ persists events to SQLite in real-time, and sends push notifications on completi
 """
 
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -96,6 +97,15 @@ async def _process_task(task_id: str) -> None:
         # Run agent in a background thread
         loop = asyncio.get_running_loop()
 
+        # Parse MCP config from task if present
+        mcp_servers = None
+        mcp_raw = task_dict.get("mcp_config")
+        if mcp_raw:
+            try:
+                mcp_servers = json.loads(mcp_raw)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         def _run() -> dict:
             return run_conversation_sync(
                 prompt=task_dict["prompt"],
@@ -104,6 +114,7 @@ async def _process_task(task_id: str) -> None:
                 mode=task_dict.get("mode", "code"),
                 event_callback=on_event,
                 status_callback=on_status,
+                mcp_servers=mcp_servers,
             )
 
         try:

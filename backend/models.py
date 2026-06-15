@@ -5,11 +5,17 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+class MCPServerConfig(BaseModel):
+    name: str = Field(..., min_length=1)
+    config: dict = Field(default_factory=dict)
+
+
 class PromptRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=10000)
     repo: str = Field(..., min_length=1, pattern=r"^[\w.-]+/[\w.-]+$")
     branch: str = Field(default="main")
     mode: str = Field(default="code", pattern=r"^(code|plan)$")
+    mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
 
 
 class LLMConfigRequest(BaseModel):
