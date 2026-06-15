@@ -1,8 +1,10 @@
 """Chat service — reusable conversation with token-efficient message continuation.
 
-Uses OpenHands Cloud REST API:
-- First message: POST /app-conversations/start-tasks (creates conversation)
-- Subsequent:   POST /conversation/{id}/events/send (reuses conversation)
+Uses OpenHands Cloud REST API (SAME endpoints as agent_runner.py for consistency):
+- First message: POST /api/v1/app-conversations (creates conversation)
+- Subsequent:   POST /api/v1/conversation/{id}/events/send (reuses conversation)
+- Status poll:  GET  /api/v1/app-conversations?ids={id}
+- Events poll:  GET  /api/v1/conversation/{id}/events/search
 
 Thread-safe: _lock serializes access to module-level session state.
 """
@@ -116,41 +118,57 @@ def send(prompt: str, repo: str = "", branch: str = "main") -> dict:
 
 
 def _create_conversation(prompt: str, repo: str, branch: str) -> str:
-    """Create a start-task and extract the conversation_id."""
-    resp = httpx.post(
-        f"{CLOUD_API_URL}/api/v1/app-conversations/start-tasks",
-        headers=_headers(),
-        json={
-            "prompt": prompt,
-            "repo": repo,
-            "branch": branch,
-            "mode": "code",
+    """Create a conversation via POST /api/v1/app-conversations (SAME as agent_runner).
+
+    Returns the conversation_id. Raises on failure.
+    """
+    body: dict = {
+        "initial_message": {
+            "content": [{"type": "text", "text": prompt}],
         },
+        "title": prompt[:80],
+    }
+    # Include repo if provided (general chat omits it)
+    if repo:
+        body["selected_repository"] = repo
+        body["selected_branch"] = branch
+
+    resp = httpx.post(
+        f"{CLOUD_API_URL}/api/v1/app-conversations",
+        headers=_headers(),
+        json=body,
         timeout=30,
     )
     resp.raise_for_status()
-    start_task_id = resp.json().get("id")
+    data = resp.json()
 
-    # Poll for conversation_id
-    for attempt in range(30):
-        time.sleep(2)
-        r = httpx.get(
-            f"{CLOUD_API_URL}/api/v1/app-conversations/start-tasks",
-            headers=_headers(),
-            params={"ids": start_task_id},
-            timeout=10,
-        )
-        r.raise_for_status()
-        data = r.json()
-        items = data if isinstance(data, list) else data.get("items", [])
-        if items and items[0].get("app_conversation_id"):
-            return items[0]["app_conversation_id"]
+    conversation_id = data.get("app_conversation_id")
+    start_task_id = data.get("id")
 
-    raise RuntimeError(f"Could not get conversation_id for start_task {start_task_id}")
+    # If async, poll start-tasks for the conversation_id
+    if not conversation_id and start_task_id:
+        for _ in range(30):  # up to 150 seconds
+            time.sleep(5)
+            r = httpx.get(
+                f"{CLOUD_API_URL}/api/v1/app-conversations/start-tasks",
+                headers=_headers(),
+                params={"ids": start_task_id},
+                timeout=15,
+            )
+            r.raise_for_status()
+            d = r.json()
+            items = d if isinstance(d, list) else d.get("items", [])
+            if items and items[0].get("app_conversation_id"):
+                return items[0]["app_conversation_id"]
+
+    if not conversation_id:
+        raise RuntimeError(f"Could not get conversation_id (start_task={start_task_id})")
+
+    return conversation_id
 
 
 def _wait_for_response(timeout: int = 180) -> str | None:
-    """Poll conversation status + events until the agent finishes."""
+    """Poll conversation status + events until the agent finishes (SAME logic as agent_runner)."""
     global _last_event_index
 
     start = time.time()
@@ -159,7 +177,7 @@ def _wait_for_response(timeout: int = 180) -> str | None:
     while time.time() - start < timeout:
         time.sleep(3)
 
-        # -- Check conversation status --
+        # -- Check conversation status (SAME endpoint as agent_runner) --
         try:
             r = httpx.get(
                 f"{CLOUD_API_URL}/api/v1/app-conversations",
@@ -179,7 +197,7 @@ def _wait_for_response(timeout: int = 180) -> str | None:
 
         status = items[0].get("execution_status", "")
 
-        # -- Get events --
+        # -- Get events (SAME endpoint as agent_runner) --
         try:
             r2 = httpx.get(
                 f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",

@@ -87,7 +87,12 @@ def _serialize_cloud_event(event: dict, index: int) -> dict:
 
 def _build_prompt_text(prompt: str, repo: str, branch: str, mode: str) -> str:
     """Build the full prompt text with repo context and mode instructions."""
-    base = f"Repository: {repo} (branch: {branch}).\n\n"
+    base = (
+        f"Repository: {repo} (branch: {branch}).\n"
+        "IMPORTANT: When you finish making changes, commit them with a descriptive message "
+        "and push to the remote repository. If the user asked to create a pull request, "
+        "use the GitHub CLI (gh) or GitHub API to create one.\n\n"
+    )
 
     if mode == "plan":
         return (
