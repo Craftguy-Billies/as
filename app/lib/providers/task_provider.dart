@@ -36,7 +36,6 @@ class TaskProvider extends ChangeNotifier {
   Future<void> loadTasks({String? statusFilter}) async {
     _loading = true;
     _error = null;
-    notifyListeners();
 
     try {
       _tasks = await _api.listTasks(status: statusFilter);
@@ -95,7 +94,7 @@ class TaskProvider extends ChangeNotifier {
     _pollTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       _fetchEvents();
     });
-    notifyListeners();
+    // notifyListeners() called by _fetchEvents() when data arrives
   }
 
   void stopPolling() {
