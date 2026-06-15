@@ -1,9 +1,11 @@
-"""OpenHands Cloud API integration for VibeCode.
+"""OpenHands Cloud REST API integration for VibeCode.
 
 Uses the OpenHands Cloud REST API (V1) to start conversations, poll events,
-and manage sandboxes. Custom LLM is configured via the Cloud API's LLM settings.
+and manage sandboxes. MCP servers config follows the Model Context Protocol
+format (https://modelcontextprotocol.io/).
 
 API docs: https://docs.openhands.dev/openhands/usage/api/v1
+SDK docs: https://docs.openhands.dev/sdk
 """
 
 import json
@@ -97,25 +99,56 @@ def _build_prompt_text(prompt: str, repo: str, branch: str, mode: str) -> str:
         return base + prompt
 
 
-def _build_default_mcp_servers() -> list[dict]:
-    """Build default MCP servers from environment variables."""
-    servers: list[dict] = []
-    
-    github_token = os.getenv("GITHUB_TOKEN", "")
-    if github_token:
-        servers.append({
-            "name": "github",
-            "config": {"token": github_token},
-        })
-    
+def _build_default_mcp_config(mcp_servers: Optional[list[dict]] = None) -> Optional[dict]:
+    """Build MCP configuration dict in Model Context Protocol format.
+
+    Automatically enables:
+    - Web fetch (mcp-server-fetch): always included for web research
+    - Tavily search: if TAVILY_API_KEY env var is set
+    - User-provided MCP servers merged on top
+
+    Format follows the MCP client config spec:
+    https://modelcontextprotocol.io/docs/concepts/architecture
+    """
+    servers: dict = {}
+
+    # Always include web fetch for research
+    servers["fetch"] = {
+        "command": "uvx",
+        "args": ["mcp-server-fetch"],
+    }
+
+    # Tavily web search if API key provided
     tavily_key = os.getenv("TAVILY_API_KEY", "")
     if tavily_key:
-        servers.append({
-            "name": "tavily",
-            "config": {"api_key": tavily_key},
-        })
-    
-    return servers
+        servers["tavily"] = {
+            "command": "npx",
+            "args": ["-y", "@tavily/mcp-server-tavily"],
+            "env": {"TAVILY_API_KEY": tavily_key},
+        }
+
+    # Merge user-provided MCP servers (override defaults)
+    if mcp_servers:
+        for srv in mcp_servers:
+            name = srv.get("name", "")
+            config = srv.get("config", {})
+            if name and config:
+                if "command" in config:
+                    servers[name] = {
+                        "command": config["command"],
+                        "args": config.get("args", []),
+                    }
+                    if "env" in config:
+                        servers[name]["env"] = config["env"]
+                elif "url" in config:
+                    servers[name] = {"url": config["url"]}
+                    if config.get("auth") == "oauth":
+                        servers[name]["auth"] = "oauth"
+
+    if not servers:
+        return None
+
+    return {"mcpServers": servers}
 
 
 def run_conversation_sync(
@@ -132,9 +165,15 @@ def run_conversation_sync(
     Called from a background thread. Polls for events every 3 seconds,
     caches them, and returns when the conversation completes or fails.
 
+    Features:
+    - Auto MCP servers (web fetch + Tavily search) from env vars
+    - Custom LLM config support
+    - Real-time event polling with deduplication
+    - Auto-clone GitHub repo via selected_repository
+
     Args:
-        mcp_servers: Optional list of MCP server configs (name + config dict).
-                     Defaults to building from GITHUB_TOKEN + TAVILY_API_KEY env vars.
+        mcp_servers: Optional list of MCP server configs. Merged with defaults
+                     from TAVILY_API_KEY env var.
 
     Returns:
         dict with: status, error_message, conversation_id, sandbox_id, events.
@@ -177,10 +216,10 @@ def run_conversation_sync(
             if cfg.base_url:
                 body["llm_config"]["base_url"] = cfg.base_url
 
-        # Include MCP servers (defaults: GITHUB_TOKEN + TAVILY_API_KEY from env)
-        servers = mcp_servers if mcp_servers is not None else _build_default_mcp_servers()
-        if servers:
-            body["mcp_servers"] = servers
+        # Include MCP servers (defaults: fetch + Tavily from env)
+        mcp_config = _build_default_mcp_config(mcp_servers)
+        if mcp_config:
+            body["mcp_servers"] = mcp_config
 
         resp = httpx.post(
             f"{CLOUD_API_URL}/api/v1/app-conversations",
@@ -281,7 +320,6 @@ def run_conversation_sync(
                 break
             elif execution_status == "running":
                 continue
-            # If status is "starting" or unknown, keep polling
 
     except httpx.HTTPStatusError as e:
         result["status"] = "failed"
