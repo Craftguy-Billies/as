@@ -96,6 +96,48 @@ class ApiService {
     }
   }
 
+  // --- Chat ---
+
+  Future<Map<String, dynamic>> sendChatMessage(String prompt) async {
+    final resp = await http
+        .post(
+          Uri.parse('$_url/api/chat'),
+          headers: {'Content-Type': 'application/json'},
+          body: json.encode({'prompt': prompt}),
+        )
+        .timeout(const Duration(seconds: 200));
+    if (resp.statusCode != 200) {
+      final detail = _tryParseError(resp.body);
+      throw Exception(detail ?? 'Chat failed (${resp.statusCode})');
+    }
+    return json.decode(resp.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> getChat() async {
+    final resp = await http
+        .get(Uri.parse('$_url/api/chat'))
+        .timeout(const Duration(seconds: 8));
+    if (resp.statusCode != 200) {
+      throw Exception('Failed to load chat history');
+    }
+    return json.decode(resp.body) as Map<String, dynamic>;
+  }
+
+  Future<void> deleteChat() async {
+    await http
+        .delete(Uri.parse('$_url/api/chat'))
+        .timeout(const Duration(seconds: 8));
+  }
+
+  String? _tryParseError(String body) {
+    try {
+      final d = json.decode(body) as Map<String, dynamic>;
+      return d['detail']?.toString();
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<Map<String, dynamic>> getEvents(
     String taskId, {
     String? sinceTimestamp,

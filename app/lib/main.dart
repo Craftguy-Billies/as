@@ -12,6 +12,8 @@ import 'screens/setup_screen.dart';
 import 'screens/live_feed_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/log_viewer_screen.dart';
+import 'screens/app_shell.dart';
+import 'providers/chat_provider.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -39,6 +41,7 @@ class VibeCodeApp extends StatelessWidget {
         Provider.value(value: prefs),
         ChangeNotifierProvider(create: (_) => TaskProvider(api, prefs)),
         ChangeNotifierProvider(create: (_) => SettingsProvider(api, prefs)),
+        ChangeNotifierProvider(create: (_) => ChatProvider(api)),
       ],
       child: MaterialApp(
         title: 'VibeCode',
@@ -69,10 +72,10 @@ class VibeCodeApp extends StatelessWidget {
             return MaterialPageRoute(builder: (_) => LiveFeedScreen(taskId: m.group(1)!));
           }
           switch (settings.name) {
-            case '/': return MaterialPageRoute(builder: (_) => const HomeScreen());
+            case '/': return MaterialPageRoute(builder: (_) => const AppShell());
             case '/settings': return MaterialPageRoute(builder: (_) => const SettingsScreen());
             case '/logs': return MaterialPageRoute(builder: (_) => const LogViewerScreen());
-            default: return MaterialPageRoute(builder: (_) => const HomeScreen());
+            default: return MaterialPageRoute(builder: (_) => const AppShell());
           }
         },
       ),

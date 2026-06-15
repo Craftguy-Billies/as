@@ -103,6 +103,43 @@ async def stream_logs():
 
 
 # ---------------------------------------------------------------------------
+# Chat (token-efficient conversation reuse)
+# ---------------------------------------------------------------------------
+
+from chat_service import send as chat_send, reset as chat_reset, get_state as chat_state
+
+
+class ChatRequest(BaseModel):
+    prompt: str
+    repo: str = ""
+    branch: str = "main"
+
+
+@app.post("/api/chat")
+async def chat_send_message(req: ChatRequest):
+    """Send a chat message. Reuses conversation across requests for token savings."""
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, chat_send, req.prompt, req.repo, req.branch)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result["error"])
+    return result
+
+
+@app.get("/api/chat")
+async def chat_get():
+    """Return current chat session state (messages + conversation_id)."""
+    return chat_state()
+
+
+@app.delete("/api/chat")
+async def chat_clear():
+    """Reset the chat session (start fresh conversation next time)."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, chat_reset)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
 # Prompts (Tasks)
 # ---------------------------------------------------------------------------
 

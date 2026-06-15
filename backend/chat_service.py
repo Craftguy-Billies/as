@@ -1,0 +1,204 @@
+"""Chat service — reusable conversation with token-efficient message continuation.
+
+Uses OpenHands Cloud REST API:
+- First message: POST /app-conversations/start-tasks (creates conversation)
+- Subsequent:   POST /conversation/{id}/events/send (reuses conversation)
+"""
+import httpx
+import json
+import logging
+import os
+import time
+from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
+
+CLOUD_API_URL = os.getenv("OPENHANDS_CLOUD_API_URL", "https://app.all-hands.dev")
+CLOUD_API_KEY = os.getenv("OPENHANDS_CLOUD_API_KEY", "")
+
+# -- Session state (persists across requests, lost on restart) --
+_conversation_id: str | None = None
+_last_event_index: int = 0
+_messages: list[dict] = []
+
+
+def _headers() -> dict:
+    return {
+        "Authorization": f"Bearer {CLOUD_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def reset() -> None:
+    """Clear the current chat session."""
+    global _conversation_id, _last_event_index, _messages
+    _conversation_id = None
+    _last_event_index = 0
+    _messages = []
+    logger.info("Chat session reset")
+
+
+def get_state() -> dict:
+    """Return current chat state for API consumers."""
+    return {
+        "messages": list(_messages),
+        "conversation_id": _conversation_id,
+    }
+
+
+def send(prompt: str, repo: str = "", branch: str = "main") -> dict:
+    """Send a chat message and wait for the agent response (synchronous)."""
+    global _conversation_id, _last_event_index
+
+    if not CLOUD_API_KEY:
+        return {"error": "OPENHANDS_CLOUD_API_KEY not configured on server"}
+
+    logger.info("Chat send: prompt=%.80s...", prompt)
+
+    try:
+        if _conversation_id is None:
+            # -- First message: create a task → get conversation_id ---
+            _conversation_id = _create_conversation(prompt, repo, branch)
+            logger.info("Created conversation %s", _conversation_id)
+        else:
+            # -- Subsequent message: send to existing conversation ---
+            resp = httpx.post(
+                f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/send",
+                headers=_headers(),
+                json={"message": prompt},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            logger.info("Sent to conversation %s", _conversation_id)
+
+        # Save user message
+        _messages.append({"role": "user", "content": prompt})
+
+        # Wait for agent response
+        response = _wait_for_response()
+        if response:
+            _messages.append({"role": "assistant", "content": response})
+
+        return {
+            "response": response or "(agent produced no text response)",
+            "conversation_id": _conversation_id,
+        }
+
+    except httpx.HTTPStatusError as e:
+        logger.error("HTTP error: %s %s", e.response.status_code, e.response.text[:200])
+        return {"error": f"Cloud API error: {e.response.status_code}"}
+    except Exception as e:
+        logger.error("Chat error: %s", e)
+        return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _create_conversation(prompt: str, repo: str, branch: str) -> str:
+    """Create a start-task and extract the conversation_id."""
+    resp = httpx.post(
+        f"{CLOUD_API_URL}/api/v1/app-conversations/start-tasks",
+        headers=_headers(),
+        json={
+            "prompt": prompt,
+            "repo": repo,
+            "branch": branch,
+            "mode": "code",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    start_task_id = resp.json().get("id")
+
+    # Poll for conversation_id
+    for attempt in range(30):
+        time.sleep(2)
+        r = httpx.get(
+            f"{CLOUD_API_URL}/api/v1/app-conversations/start-tasks",
+            headers=_headers(),
+            params={"ids": start_task_id},
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        items = data if isinstance(data, list) else data.get("items", [])
+        if items and items[0].get("app_conversation_id"):
+            return items[0]["app_conversation_id"]
+
+    raise RuntimeError(f"Could not get conversation_id for start_task {start_task_id}")
+
+
+def _wait_for_response(timeout: int = 180) -> str | None:
+    """Poll conversation status + events until the agent finishes."""
+    global _last_event_index
+
+    start = time.time()
+    all_new_msgs: list[str] = []
+
+    while time.time() - start < timeout:
+        time.sleep(3)
+
+        # -- Check conversation status --
+        try:
+            r = httpx.get(
+                f"{CLOUD_API_URL}/api/v1/app-conversations",
+                headers=_headers(),
+                params={"ids": _conversation_id},
+                timeout=10,
+            )
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            logger.warning("Status poll error: %s", e)
+            continue
+
+        items = data if isinstance(data, list) else data.get("items", [])
+        if not items:
+            continue
+
+        status = items[0].get("execution_status", "")
+
+        # -- Get events --
+        try:
+            r2 = httpx.get(
+                f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
+                headers=_headers(),
+                params={"limit": 500},
+                timeout=10,
+            )
+            r2.raise_for_status()
+            events_data = r2.json()
+        except Exception as e:
+            logger.warning("Events poll error: %s", e)
+            continue
+
+        all_events = events_data if isinstance(events_data, list) else events_data.get("items", [])
+
+        # Collect assistant messages from events we haven't seen yet
+        for evt in all_events[_last_event_index:]:
+            kind = evt.get("kind", "")
+            source = evt.get("source", "")
+            if kind == "MessageEvent" and source in ("agent", "assistant"):
+                msg = evt.get("message", "")
+                if isinstance(msg, str) and msg.strip():
+                    all_new_msgs.append(msg.strip())
+                elif isinstance(msg, dict) and msg.get("content"):
+                    all_new_msgs.append(str(msg["content"]).strip())
+
+        # Advance the seen index
+        _last_event_index = len(all_events)
+
+        if status in ("completed", "finished"):
+            break
+        elif status in ("failed", "error", "stopped"):
+            err_detail = items[0].get("error_message", "unknown error")
+            logger.warning("Conversation %s: %s", status, err_detail)
+            return None
+
+    if not all_new_msgs:
+        logger.warning("No assistant messages found after %.0fs", time.time() - start)
+
+    return "\n\n".join(all_new_msgs) if all_new_msgs else None
