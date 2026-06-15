@@ -135,7 +135,7 @@ class ChatProvider extends ChangeNotifier {
       }
       await _saveToCache(); // persist full conversation after success
     } catch (e) {
-      _error = _api.friendlyError(e);
+      _error = ApiService.friendlyError(e);
     } finally {
       _loading = false;
       _loadingSince = null;

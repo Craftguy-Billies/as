@@ -7,6 +7,7 @@ class NotificationService {
   final ApiService _api;
   final List<StreamSubscription> _subscriptions = [];
   void Function(String taskId)? onTaskTap;
+  void Function(String title, String body)? onForegroundMessage;
 
   NotificationService(this._api);
 
@@ -62,7 +63,9 @@ class NotificationService {
   }
 
   void _handleForegroundMessage(RemoteMessage message) {
-    // Show in-app banner handled by the UI layer
+    final title = message.notification?.title ?? 'Task Update';
+    final body = message.notification?.body ?? '';
+    onForegroundMessage?.call(title, body);
   }
 
   void _handleNotificationTap(RemoteMessage message) {

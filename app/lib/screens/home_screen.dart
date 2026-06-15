@@ -85,7 +85,7 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       _showError(e is TimeoutException
           ? 'Server not responding. Check VM.'
-          : _api.friendlyError(e));
+          : ApiService.friendlyError(e));
     }
     if (mounted) setState(() => _sending = false);
   }

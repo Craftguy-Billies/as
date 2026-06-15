@@ -53,6 +53,18 @@ class _VibeCodeAppState extends State<VibeCodeApp> {
       ns.onTaskTap = (taskId) {
         _navKey.currentState?.pushNamed('/tasks/$taskId');
       };
+      ns.onForegroundMessage = (title, body) {
+        final ctx = _navKey.currentState?.overlay?.context;
+        if (ctx != null) {
+          ScaffoldMessenger.of(ctx).showSnackBar(
+            SnackBar(
+              content: Text('$title: $body', maxLines: 2),
+              behavior: SnackBarBehavior.floating,
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
+      };
     }
   }
 

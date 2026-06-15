@@ -241,6 +241,29 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
         body["selected_repository"] = repo
         body["selected_branch"] = branch
 
+    # Apply custom LLM config if set (same as agent_runner)
+    try:
+        from agent_runner import get_llm_config
+        cfg = get_llm_config()
+        if cfg.api_key:
+            body["llm_config"] = {
+                "model": cfg.model,
+                "api_key": cfg.api_key,
+            }
+            if cfg.base_url:
+                body["llm_config"]["base_url"] = cfg.base_url
+    except Exception:
+        pass
+
+    # Add MCP servers (Tavily web search etc.)
+    try:
+        from agent_runner import _build_default_mcp_config
+        mcp = _build_default_mcp_config()
+        if mcp:
+            body["mcp_servers"] = mcp
+    except Exception:
+        pass
+
     resp = httpx.post(
         f"{CLOUD_API_URL}/api/v1/app-conversations",
         headers=_headers(),

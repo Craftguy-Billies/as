@@ -73,6 +73,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _send() {
     final text = _inputCtrl.text.trim();
+    final loading = context.read<ChatProvider>().loading;
     if (text.isEmpty || loading) return;
     _inputCtrl.clear();
     try {

@@ -94,6 +94,11 @@ async def init_db() -> None:
                 token TEXT UNIQUE NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS kv_store (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
         """)
         # Migration: add mcp_config column to existing DBs from older versions
         cursor = await db.execute("PRAGMA table_info(tasks)")

@@ -15,7 +15,7 @@ class ApiService {
   String get _url => _baseUrl ?? defaultUrl;
 
   /// Wrap network errors in user-friendly messages
-  String friendlyError(Object e) {
+  static String friendlyError(Object e) {
     final s = e.toString().toLowerCase();
     if (s.contains('socketexception') || s.contains('connection refused')) {
       return 'Cannot reach server. Check your internet connection and server URL.';
