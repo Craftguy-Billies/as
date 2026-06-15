@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from database import get_db_ctx, init_db
 from models import (
+    BaseModel,
     PromptRequest,
     LLMConfigRequest,
     FCMTokenRequest,
