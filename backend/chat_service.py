@@ -222,6 +222,7 @@ def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "main", mode
 
     Returns immediately. Processing happens in a background thread.
     Call get_state() to track progress.
+    If a batch is already running, appends to it.
     """
     global _batch_prompts, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _batch_running
 
@@ -231,7 +232,11 @@ def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "main", mode
 
     with _lock:
         if _batch_running:
-            return {"error": "Batch already running. Cancel first or wait."}
+            # Append to running batch
+            _batch_prompts.extend(cleaned)
+            _batch_total = len(_batch_prompts)
+            logger.info("Batch appended: +%d prompts (now %d total)", len(cleaned), _batch_total)
+            return {"status": "appended", "added": len(cleaned), "total": _batch_total}
 
         _batch_prompts = cleaned
         _batch_position = 0
@@ -420,6 +425,9 @@ def _wait_for_response(timeout: int = 300) -> str | None:
     """Poll conversation status + events until the agent finishes (SAME logic as agent_runner).
     
     Timeout: 300s (5 min). Complex tasks may need this — the agent may be thinking/typing.
+    
+    Also appends live events (tool calls, observations) to _messages so the client
+    can see what the agent is doing via polling get_state().
     """
     global _last_event_index
 
@@ -465,16 +473,30 @@ def _wait_for_response(timeout: int = 300) -> str | None:
 
         all_events = events_data if isinstance(events_data, list) else events_data.get("items", [])
 
-        # Collect assistant messages from events we haven't seen yet
+        # Collect ALL events for live display (tool calls, observations, messages)
         for evt in all_events[_last_event_index:]:
             kind = evt.get("kind", "")
             source = evt.get("source", "")
+            tool = evt.get("tool_name", "")
+
             if kind == "MessageEvent" and source in ("agent", "assistant"):
                 msg = evt.get("message", "")
                 if isinstance(msg, str) and msg.strip():
                     all_new_msgs.append(msg.strip())
                 elif isinstance(msg, dict) and msg.get("content"):
                     all_new_msgs.append(str(msg["content"]).strip())
+
+            # Stream tool calls and observations as live events in chat
+            event_preview = _format_event_preview(evt)
+            if event_preview:
+                with _lock:
+                    _messages.append({
+                        "role": "event",
+                        "content": event_preview,
+                        "kind": kind,
+                        "tool_name": tool,
+                        "timestamp": int(time.time() * 1000),
+                    })
 
         # Advance the seen index
         _last_event_index = len(all_events)
@@ -490,3 +512,86 @@ def _wait_for_response(timeout: int = 300) -> str | None:
         logger.warning("No assistant messages found after %.0fs", time.time() - start)
 
     return "\n\n".join(all_new_msgs) if all_new_msgs else None
+
+
+def _format_event_preview(evt: dict) -> str | None:
+    """Format a Cloud API event as a concise preview string for chat display.
+    
+    Returns None for events that shouldn't be shown (e.g., user messages, empty actions).
+    """
+    kind = evt.get("kind", "")
+    tool = evt.get("tool_name", "")
+    source = evt.get("source", "")
+
+    # Skip user messages and agent text messages (handled separately)
+    if kind == "MessageEvent":
+        return None
+
+    if kind == "ActionEvent":
+        action = evt.get("action") or {}
+        if isinstance(action, str):
+            try:
+                action = json.loads(action)
+            except Exception:
+                action = {}
+
+        if tool in ("terminal", "execute_bash_command"):
+            cmd = action.get("command", "") or action.get("content", "")
+            if cmd:
+                return f"💻 $ {str(cmd)[:200]}"
+        elif tool in ("file_editor", "str_replace_editor"):
+            path = action.get("path", "") or action.get("file", "")
+            if path:
+                return f"📝 Editing: {path}"
+        elif tool in ("tavily_search", "tavily_tavily_search"):
+            q = action.get("query", "") or action.get("content", "")
+            if q:
+                return f"🔍 Searching: {str(q)[:120]}"
+        elif tool == "browser_navigate":
+            url = action.get("url", "")
+            if url:
+                return f"🌐 Navigate: {url}"
+        else:
+            return f"🔧 {tool}"
+
+    elif kind == "ObservationEvent":
+        obs = evt.get("observation") or {}
+        if isinstance(obs, str):
+            try:
+                obs = json.loads(obs)
+            except Exception:
+                obs = {"output": str(obs)[:200]}
+
+        if tool in ("terminal", "execute_bash_command"):
+            stdout = obs.get("stdout", "") or obs.get("output", "") or obs.get("content", "")
+            if stdout:
+                return f"📤 {str(stdout)[:300]}"
+        elif tool in ("file_editor", "str_replace_editor"):
+            diff = obs.get("diff", "")
+            if diff:
+                return f"📄 Diff: {str(diff)[:300]}"
+            content = obs.get("content", "")
+            if content:
+                return f"📄 {str(content)[:300]}"
+            path = obs.get("path", "")
+            if path:
+                return f"📄 Saved: {path}"
+        elif tool in ("tavily_search", "tavily_tavily_search"):
+            results = obs.get("results", [])
+            if isinstance(results, list) and results:
+                return f"📊 {len(results)} search results"
+        elif tool == "browser_get_content":
+            text = obs.get("text", "") or obs.get("content", "")
+            if text:
+                return f"🌐 Page content ({len(str(text))} chars)"
+        else:
+            snippet = str(obs)[:200]
+            if snippet.strip():
+                return f"→ {snippet}"
+
+    elif kind == "ErrorEvent":
+        msg = evt.get("message", "") or str(evt.get("observation", ""))
+        if msg:
+            return f"❌ {str(msg)[:300]}"
+
+    return None

@@ -170,7 +170,7 @@ async def chat_batch(req: BatchRequest):
         None, chat_enqueue_batch, req.prompts, req.repo, req.branch, req.mode
     )
     if "error" in result:
-        raise HTTPException(status_code=409, detail=result["error"])
+        raise HTTPException(status_code=400, detail=result["error"])
     return result
 
 

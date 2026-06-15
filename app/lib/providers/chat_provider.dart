@@ -199,8 +199,10 @@ class ChatProvider extends ChangeNotifier {
       _queuePosition = 0;
       notifyListeners();
 
-      // Start polling for progress + new messages
-      _pollBatchProgress(repo: repo, branch: branch, mode: mode);
+      // Only start polling if this was a new batch (not appended to existing)
+      if (result['status'] == 'queued') {
+        _pollBatchProgress(repo: repo, branch: branch, mode: mode);
+      }
     } catch (e) {
       _error = ApiService.friendlyError(e);
       _loading = false;

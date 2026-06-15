@@ -558,6 +558,10 @@ class _ChatBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isUser = msg.role == 'user';
+    final isEvent = msg.role == 'event';
+
+    if (isEvent) return _buildEvent(context);
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
@@ -604,6 +608,44 @@ class _ChatBubble extends StatelessWidget {
             ),
           ),
           if (isUser) const SizedBox(width: 8),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEvent(BuildContext context) {
+    // Compact inline event display — tool calls, observations, etc.
+    Color accent;
+    IconData icon;
+    if (msg.content.startsWith('💻')) { accent = const Color(0xFF00FF88); icon = Icons.terminal; }
+    else if (msg.content.startsWith('📝')) { accent = const Color(0xFFF59E0B); icon = Icons.edit; }
+    else if (msg.content.startsWith('🔍')) { accent = const Color(0xFF3B82F6); icon = Icons.search; }
+    else if (msg.content.startsWith('🌐')) { accent = const Color(0xFF06B6D4); icon = Icons.public; }
+    else if (msg.content.startsWith('📤')) { accent = Colors.grey; icon = Icons.output; }
+    else if (msg.content.startsWith('📄')) { accent = const Color(0xFF10B981); icon = Icons.description; }
+    else if (msg.content.startsWith('📊')) { accent = const Color(0xFF8B5CF6); icon = Icons.bar_chart; }
+    else if (msg.content.startsWith('❌')) { accent = Colors.red; icon = Icons.error; }
+    else { accent = Colors.grey; icon = Icons.settings; }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 16),
+      child: Row(
+        children: [
+          Icon(icon, size: 12, color: accent),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              msg.content,
+              style: TextStyle(
+                color: accent.withAlpha(200),
+                fontSize: 11,
+                fontFamily: 'monospace',
+                height: 1.3,
+              ),
+              maxLines: 4,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
         ],
       ),
     );
