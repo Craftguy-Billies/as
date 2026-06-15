@@ -3,11 +3,14 @@
 Uses OpenHands Cloud REST API:
 - First message: POST /app-conversations/start-tasks (creates conversation)
 - Subsequent:   POST /conversation/{id}/events/send (reuses conversation)
+
+Thread-safe: _lock serializes access to module-level session state.
 """
 import httpx
 import json
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -20,6 +23,7 @@ CLOUD_API_KEY = os.getenv("OPENHANDS_CLOUD_API_KEY", "")
 _conversation_id: str | None = None
 _last_event_index: int = 0
 _messages: list[dict] = []
+_lock = threading.Lock()
 
 
 def _headers() -> dict:
@@ -32,18 +36,20 @@ def _headers() -> dict:
 def reset() -> None:
     """Clear the current chat session."""
     global _conversation_id, _last_event_index, _messages
-    _conversation_id = None
-    _last_event_index = 0
-    _messages = []
+    with _lock:
+        _conversation_id = None
+        _last_event_index = 0
+        _messages = []
     logger.info("Chat session reset")
 
 
 def get_state() -> dict:
     """Return current chat state for API consumers."""
-    return {
-        "messages": list(_messages),
-        "conversation_id": _conversation_id,
-    }
+    with _lock:
+        return {
+            "messages": list(_messages),
+            "conversation_id": _conversation_id,
+        }
 
 
 def send(prompt: str, repo: str = "", branch: str = "main") -> dict:
@@ -55,41 +61,53 @@ def send(prompt: str, repo: str = "", branch: str = "main") -> dict:
 
     logger.info("Chat send: prompt=%.80s...", prompt)
 
-    try:
-        if _conversation_id is None:
-            # -- First message: create a task → get conversation_id ---
-            _conversation_id = _create_conversation(prompt, repo, branch)
-            logger.info("Created conversation %s", _conversation_id)
-        else:
-            # -- Subsequent message: send to existing conversation ---
-            resp = httpx.post(
-                f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/send",
-                headers=_headers(),
-                json={"message": prompt},
-                timeout=30,
-            )
-            resp.raise_for_status()
-            logger.info("Sent to conversation %s", _conversation_id)
+    with _lock:
+        try:
+            if _conversation_id is None:
+                # -- First message: create a task → get conversation_id ---
+                _conversation_id = _create_conversation(prompt, repo, branch)
+                logger.info("Created conversation %s", _conversation_id)
+            else:
+                # -- Subsequent message: send to existing conversation ---
+                resp = httpx.post(
+                    f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/send",
+                    headers=_headers(),
+                    json={"message": prompt},
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                logger.info("Sent to conversation %s", _conversation_id)
 
-        # Save user message
-        _messages.append({"role": "user", "content": prompt})
+            # Save user message
+            _messages.append({
+                "role": "user",
+                "content": prompt,
+                "timestamp": int(time.time() * 1000),
+            })
 
-        # Wait for agent response
-        response = _wait_for_response()
-        if response:
-            _messages.append({"role": "assistant", "content": response})
+            # Wait for agent response
+            response = _wait_for_response()
+            if response:
+                _messages.append({
+                    "role": "assistant",
+                    "content": response,
+                    "timestamp": int(time.time() * 1000),
+                })
 
-        return {
-            "response": response or "(agent produced no text response)",
-            "conversation_id": _conversation_id,
-        }
+            return {
+                "response": response or "(agent produced no text response)",
+                "conversation_id": _conversation_id,
+            }
 
-    except httpx.HTTPStatusError as e:
-        logger.error("HTTP error: %s %s", e.response.status_code, e.response.text[:200])
-        return {"error": f"Cloud API error: {e.response.status_code}"}
-    except Exception as e:
-        logger.error("Chat error: %s", e)
-        return {"error": str(e)}
+        except httpx.HTTPStatusError as e:
+            logger.error("HTTP error: %s %s", e.response.status_code, e.response.text[:200])
+            if e.response.status_code in (404, 410):
+                _conversation_id = None  # conversation gone — start fresh next time
+            return {"error": f"Cloud API error: {e.response.status_code}"}
+        except Exception as e:
+            logger.error("Chat error: %s", e)
+            _conversation_id = None  # reset on any unexpected failure
+            return {"error": str(e)}
 
 
 # ---------------------------------------------------------------------------

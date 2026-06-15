@@ -82,24 +82,22 @@ class ChatProvider extends ChangeNotifier {
       timestamp: DateTime.now().millisecondsSinceEpoch,
     );
     _messages.add(userMsg);
+    await _saveToCache(); // persist user message immediately (survives crash)
     notifyListeners();
-    await _saveToCache();
 
     try {
       final data = await _api.sendChatMessage(prompt.trim());
       final response = (data['response'] ?? '').toString();
       if (response.isNotEmpty) {
-        final assistantMsg = ChatMessage(
+        _messages.add(ChatMessage(
           role: 'assistant',
           content: response,
           timestamp: DateTime.now().millisecondsSinceEpoch,
-        );
-        _messages.add(assistantMsg);
-        await _saveToCache();
+        ));
       }
+      await _saveToCache(); // persist full conversation after success
     } catch (e) {
       _error = e.toString();
-      // Remove the user message that failed? No — keep it so user sees what they sent.
     } finally {
       _loading = false;
       notifyListeners();
