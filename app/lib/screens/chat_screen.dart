@@ -600,6 +600,7 @@ class _TypingIndicatorState extends State<_TypingIndicator>
       ),
     );
   }
+}
 
 // ---------------------------------------------------------------------------
 // Task queue bottom sheet

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/task_provider.dart';
 import '../providers/settings_provider.dart';
+import '../services/api_service.dart';
 import '../services/preferences_service.dart';
 import '../widgets/task_tile.dart';
 
