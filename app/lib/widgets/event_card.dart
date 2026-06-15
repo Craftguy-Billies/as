@@ -1,0 +1,249 @@
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import '../models/event.dart';
+
+class EventCard extends StatelessWidget {
+  final AgentEvent event;
+  const EventCard({super.key, required this.event});
+
+  @override
+  Widget build(BuildContext context) {
+    if (event.isUserMessage) return _buildUserMessage();
+    if (event.isAgentMessage) return _buildAgentMessage();
+    if (event.isTerminalAction) return _buildTerminalCommand();
+    if (event.isFileEditAction) return _buildFileEdit();
+    if (event.isSearchAction) return _buildSearchResult();
+    if (event.isError) return _buildError();
+    if (event.isObservation) return const SizedBox.shrink(); // shown inline with action
+
+    // Generic fallback
+    return _buildGeneric();
+  }
+
+  Widget _buildUserMessage() {
+    return Align(
+      alignment: Alignment.centerRight,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        padding: const EdgeInsets.all(12),
+        constraints: const BoxConstraints(maxWidth: 300),
+        decoration: BoxDecoration(
+          color: const Color(0xFF2563EB),
+          borderRadius: BorderRadius.circular(16).copyWith(
+            bottomRight: const Radius.circular(4),
+          ),
+        ),
+        child: Text(
+          event.messageJson ?? '',
+          style: const TextStyle(color: Colors.white, fontSize: 15),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAgentMessage() {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      padding: const EdgeInsets.all(12),
+      constraints: const BoxConstraints(maxWidth: 320),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A2E),
+        borderRadius: BorderRadius.circular(16).copyWith(
+          bottomLeft: const Radius.circular(4),
+        ),
+        border: Border.all(color: const Color(0xFF2A2A4E)),
+      ),
+      child: Text(
+        event.messageJson ?? '',
+        style: const TextStyle(color: Colors.white70, fontSize: 14),
+      ),
+    );
+  }
+
+  Widget _buildTerminalCommand() {
+    Map<String, dynamic>? action;
+    try {
+      action = event.actionJson != null
+          ? json.decode(event.actionJson!) as Map<String, dynamic>
+          : null;
+    } catch (_) {}
+
+    final command = action?['command'] as String? ?? '';
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0A0A0A),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF333333)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.terminal, color: Color(0xFF00FF88), size: 16),
+              const SizedBox(width: 8),
+              const Text(
+                'Terminal',
+                style: TextStyle(color: Color(0xFF00FF88), fontSize: 12, fontWeight: FontWeight.w600),
+              ),
+              const Spacer(),
+              GestureDetector(
+                onTap: () {
+                  // Copy to clipboard would go here
+                },
+                child: const Icon(Icons.copy, color: Colors.grey, size: 14),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF111111),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: SelectableText(
+              '\$ $command',
+              style: const TextStyle(
+                color: Color(0xFF00FF88),
+                fontSize: 13,
+                fontFamily: 'monospace',
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFileEdit() {
+    Map<String, dynamic>? action;
+    try {
+      action = event.actionJson != null
+          ? json.decode(event.actionJson!) as Map<String, dynamic>
+          : null;
+    } catch (_) {}
+
+    final path = action?['path'] as String? ?? action?['file'] as String? ?? '';
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A2E),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF2A2A4E)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.edit, color: Color(0xFFF59E0B), size: 18),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              path,
+              style: const TextStyle(color: Colors.white70, fontSize: 13, fontFamily: 'monospace'),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF59E0B).withAlpha(30),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: const Text(
+              'editing',
+              style: TextStyle(color: Color(0xFFF59E0B), fontSize: 11),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSearchResult() {
+    Map<String, dynamic>? action;
+    try {
+      action = event.actionJson != null
+          ? json.decode(event.actionJson!) as Map<String, dynamic>
+          : null;
+    } catch (_) {}
+
+    final query = action?['query'] as String? ?? '';
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A2E),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF2A2A4E)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.public, color: Color(0xFF3B82F6), size: 18),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              query,
+              style: const TextStyle(color: Colors.white70, fontSize: 13),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const Icon(Icons.search, color: Colors.grey, size: 16),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildError() {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF3B1010),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF5B2020)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.error_outline, color: Colors.red, size: 18),
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Text(
+              'An error occurred',
+              style: TextStyle(color: Colors.redAccent, fontSize: 13),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGeneric() {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: Row(
+        children: [
+          Icon(Icons.circle, size: 6, color: Colors.grey[700]),
+          const SizedBox(width: 8),
+          Text(
+            event.kind,
+            style: TextStyle(color: Colors.grey[600], fontSize: 11),
+          ),
+          if (event.toolName != null) ...[
+            const SizedBox(width: 8),
+            Text(
+              event.toolName!,
+              style: TextStyle(color: Colors.grey[700], fontSize: 11),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
