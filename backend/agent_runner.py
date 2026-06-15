@@ -248,7 +248,7 @@ def run_conversation_sync(
                 )
                 task_resp.raise_for_status()
                 task_data = task_resp.json()
-                items = task_data.get("items", [])
+                items = task_data if isinstance(task_data, list) else task_data.get("items", [])
                 if items and items[0].get("app_conversation_id"):
                     conversation_id = items[0]["app_conversation_id"]
                     break
@@ -279,7 +279,7 @@ def run_conversation_sync(
             )
             status_resp.raise_for_status()
             status_data = status_resp.json()
-            items = status_data.get("items", [])
+            items = status_data if isinstance(status_data, list) else status_data.get("items", [])
 
             if not items:
                 continue
@@ -298,7 +298,7 @@ def run_conversation_sync(
                 )
                 events_resp.raise_for_status()
                 events_data = events_resp.json()
-                all_events = events_data.get("items", [])
+                all_events = events_data if isinstance(events_data, list) else events_data.get("items", [])
             except Exception:
                 all_events = []
 
