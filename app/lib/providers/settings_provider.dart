@@ -31,6 +31,7 @@ class SettingsProvider extends ChangeNotifier {
   }
 
   Future<bool> testConnection() async {
+    if (_testing) return _connected == true;
     _testing = true;
     _connected = null;
     notifyListeners();
@@ -64,12 +65,16 @@ class SettingsProvider extends ChangeNotifier {
     required String model,
     String? baseUrl,
   }) async {
-    await _api.updateLlmConfig(
-      apiKey: apiKey,
-      model: model,
-      baseUrl: baseUrl,
-    );
-    _modelName = model;
-    notifyListeners();
+    try {
+      await _api.updateLlmConfig(
+        apiKey: apiKey,
+        model: model,
+        baseUrl: baseUrl,
+      );
+      _modelName = model;
+      notifyListeners();
+    } catch (e) {
+      throw Exception('Failed to update LLM config: $e');
+    }
   }
 }

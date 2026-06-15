@@ -20,19 +20,23 @@ void main() async {
   if (!kIsWeb) {
     try { await Firebase.initializeApp(); } catch (_) {}
   }
-  final prefs = PreferencesService(); await prefs.init();
+  final prefs = PreferencesService();
+  try { await prefs.init(); } catch (_) { /* prefs unavailable — defaults used */ }
   final api = ApiService();
   api.setBaseUrl(prefs.serverUrl);
+  NotificationService? ns;
   if (!kIsWeb) {
-    final ns = NotificationService(api); await ns.initialize();
+    ns = NotificationService(api);
+    try { await ns.initialize(); } catch (_) {}
   }
-  runApp(VibeCodeApp(api: api, prefs: prefs));
+  runApp(VibeCodeApp(api: api, prefs: prefs, ns: ns));
 }
 
 class VibeCodeApp extends StatelessWidget {
   final ApiService api;
   final PreferencesService prefs;
-  const VibeCodeApp({super.key, required this.api, required this.prefs});
+  final NotificationService? ns;
+  const VibeCodeApp({super.key, required this.api, required this.prefs, this.ns});
 
   @override
   Widget build(BuildContext context) {

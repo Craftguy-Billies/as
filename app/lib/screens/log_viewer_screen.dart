@@ -13,20 +13,28 @@ class LogViewerScreen extends StatefulWidget {
 
 class _LogViewerScreenState extends State<LogViewerScreen> {
   final _scrollCtrl = ScrollController();
-  final _prefs = PreferencesService();
   List<String> _lines = [];
   bool _autoScroll = true;
   Timer? _timer;
-  bool _init = false;
+  bool _fetching = false;
+  bool _initFailed = false;
 
   @override
   void initState() {
     super.initState();
-    _prefs.init().then((_) {
-      _init = true;
-      _fetch();
-      _timer = Timer.periodic(const Duration(seconds: 3), (_) => _fetch());
-    });
+    _initPrefs();
+  }
+
+  Future<void> _initPrefs() async {
+    try {
+      final prefs = PreferencesService();
+      await prefs.init();
+      final url = prefs.serverUrl;
+      _fetch(url);
+      _timer = Timer.periodic(const Duration(seconds: 3), (_) => _fetch(url));
+    } catch (_) {
+      if (mounted) setState(() => _initFailed = true);
+    }
   }
 
   @override
@@ -36,34 +44,48 @@ class _LogViewerScreenState extends State<LogViewerScreen> {
     super.dispose();
   }
 
-  Future<void> _fetch() async {
-    if (!_init) return;
+  Future<void> _fetch(String baseUrl) async {
+    if (_fetching) return;
+    _fetching = true;
     try {
-      final resp = await http
-          .get(Uri.parse('${_prefs.serverUrl}/api/logs'))
-          .timeout(const Duration(seconds: 5));
-      if (resp.statusCode == 200) {
-        final data = json.decode(resp.body) as Map<String, dynamic>;
-        final newLines = (data['lines'] as List).cast<String>();
-        if (mounted) {
-          setState(() => _lines = newLines);
-          if (_autoScroll && _lines.isNotEmpty) {
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
-            });
+      try {
+        final resp = await http
+            .get(Uri.parse('$baseUrl/api/logs'))
+            .timeout(const Duration(seconds: 5));
+        if (resp.statusCode == 200) {
+          final data = json.decode(resp.body) as Map<String, dynamic>;
+          final newLines = (data['lines'] as List).cast<String>();
+          if (mounted) {
+            setState(() => _lines = newLines);
+            if (_autoScroll && _lines.isNotEmpty) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (_scrollCtrl.hasClients) {
+                  _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
+                }
+              });
+            }
           }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    } finally {
+      _fetching = false;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFF0D0D0D),
-      appBar: AppBar(
-        title: const Text('Server Logs', style: TextStyle(fontWeight: FontWeight.bold)),
+    if (_initFailed) {
+      return Scaffold(
         backgroundColor: const Color(0xFF0D0D0D),
+        appBar: AppBar(
+          title: const Text('Server Logs', style: TextStyle(fontWeight: FontWeight.bold)),
+          backgroundColor: const Color(0xFF0D0D0D),
+        ),
+        body: const Center(
+          child: Text('Failed to load preferences', style: TextStyle(color: Colors.grey)),
+        ),
+      );
+    }
         actions: [
           IconButton(
             icon: Icon(_autoScroll ? Icons.lock : Icons.lock_open, color: Colors.grey),

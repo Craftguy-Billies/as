@@ -273,8 +273,10 @@ def run_conversation_sync(
         seen_event_ids: set = set()
         event_index = 0
         poll_interval = 3  # seconds
+        poll_timeout = 900  # 15 min hard timeout
+        poll_start = time.time()
 
-        while True:
+        while time.time() - poll_start < poll_timeout:
             time.sleep(poll_interval)
 
             # Check conversation status
@@ -317,7 +319,7 @@ def run_conversation_sync(
                     serialized = _serialize_cloud_event(evt, event_index)
                     event_index += 1
                     result["events"].append(serialized)
-                    if event_callback:
+                    if event_callback and callable(event_callback):
                         event_callback(serialized)
 
             # Check if done
@@ -338,6 +340,16 @@ def run_conversation_sync(
                 break
             elif execution_status == "running":
                 continue
+            else:
+                logger.warning("run_conversation_sync: conv=%s unknown status=%s, continuing poll",
+                               conversation_id, execution_status)
+
+        else:
+            # Polling timeout (while loop exited without break)
+            result["status"] = "failed"
+            result["error_message"] = f"Task timed out after {poll_timeout}s"
+            logger.warning("run_conversation_sync: conv=%s timed out after %.0fs",
+                           conversation_id, time.time() - poll_start)
 
     except httpx.HTTPStatusError as e:
         result["status"] = "failed"

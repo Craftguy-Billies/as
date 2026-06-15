@@ -26,6 +26,7 @@ class _LiveFeedScreenState extends State<LiveFeedScreen>
     _prov!.startPolling(widget.taskId);
 
     _scrollCtrl.addListener(() {
+      if (!_scrollCtrl.hasClients) return;
       final atBottom =
           _scrollCtrl.position.pixels >= _scrollCtrl.position.maxScrollExtent - 50;
       if (atBottom) {

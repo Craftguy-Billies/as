@@ -21,8 +21,10 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _init() async {
-    final prov = context.read<ChatProvider>();
-    await prov.loadFromCache();
+    try {
+      final prov = context.read<ChatProvider>();
+      await prov.loadFromCache();
+    } catch (_) {}
     if (mounted) setState(() => _hasLoaded = true);
   }
 
@@ -37,7 +39,9 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _inputCtrl.text.trim();
     if (text.isEmpty) return;
     _inputCtrl.clear();
-    context.read<ChatProvider>().sendMessage(text);
+    try {
+      context.read<ChatProvider>().sendMessage(text);
+    } catch (_) {}
   }
 
   void _scrollDown() {
@@ -57,8 +61,10 @@ class _ChatScreenState extends State<ChatScreen> {
     final prov = context.watch<ChatProvider>();
     final msgs = prov.messages;
 
-    // Auto-scroll when new messages arrive
-    if (msgs.isNotEmpty) _scrollDown();
+    // Auto-scroll when new messages arrive (post-build, not during build)
+    if (msgs.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollDown());
+    }
 
     return Scaffold(
       backgroundColor: const Color(0xFF0D0D0D),
@@ -184,17 +190,22 @@ class _ChatScreenState extends State<ChatScreen> {
           SizedBox(
             height: 44,
             width: 44,
-            child: FloatingActionButton(
-              heroTag: 'chat_send',
-              backgroundColor: const Color(0xFF7C3AED),
-              onPressed: loading ? null : _send,
-              child: loading
-                  ? const SizedBox(
-                      height: 20,
-                      width: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                    )
-                  : const Icon(Icons.send_rounded, color: Colors.white, size: 20),
+            child: Material(
+              color: loading ? const Color(0xFF7C3AED).withValues(alpha: 0.5) : const Color(0xFF7C3AED),
+              shape: const CircleBorder(),
+              child: InkWell(
+                onTap: loading ? null : _send,
+                customBorder: const CircleBorder(),
+                child: Center(
+                  child: loading
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                        )
+                      : const Icon(Icons.send_rounded, color: Colors.white, size: 20),
+                ),
+              ),
             ),
           ),
         ],

@@ -42,5 +42,5 @@ class PreferencesService {
     ]);
   }
 
-  bool get hasServerUrl => true;
+  bool get hasServerUrl => _prefs.getString(_serverUrlKey)?.isNotEmpty == true;
 }

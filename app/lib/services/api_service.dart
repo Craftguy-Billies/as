@@ -124,9 +124,12 @@ class ApiService {
   }
 
   Future<void> deleteChat() async {
-    await http
+    final resp = await http
         .delete(Uri.parse('$_url/api/chat'))
         .timeout(const Duration(seconds: 8));
+    if (resp.statusCode != 200) {
+      throw Exception('Failed to clear chat: ${resp.statusCode}');
+    }
   }
 
   String? _tryParseError(String body) {
@@ -151,7 +154,7 @@ class ApiService {
     if (sinceTimestamp != null) params['since_timestamp'] = sinceTimestamp;
     final uri =
         Uri.parse('$_url/api/tasks/$taskId/events').replace(queryParameters: params);
-    final resp = await http.get(uri);
+    final resp = await http.get(uri).timeout(const Duration(seconds: 15));
     if (resp.statusCode == 200) {
       return json.decode(resp.body) as Map<String, dynamic>;
     }

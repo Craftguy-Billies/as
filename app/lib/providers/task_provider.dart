@@ -156,13 +156,16 @@ class TaskProvider extends ChangeNotifier {
 
   Future<void> _fetchEvents() async {
     if (_currentTaskId == null) return;
+    final taskId = _currentTaskId!; // snapshot for this fetch cycle
     try {
       final lastTs = _prefs.lastSeenTimestamp;
       final data = await _api.getEvents(
-        _currentTaskId!,
+        taskId,
         sinceTimestamp: lastTs,
         limit: 200,
       );
+      // Guard: only apply if still polling the same task
+      if (_currentTaskId != taskId) return;
       final newEvents = (data['events'] as List)
           .map((e) => AgentEvent.fromJson(e as Map<String, dynamic>))
           .toList();
@@ -183,6 +186,8 @@ class TaskProvider extends ChangeNotifier {
 
       _safeNotify();
     } catch (e) {
+      // Guard: only apply if still polling the same task
+      if (_currentTaskId != taskId) return;
       _consecutiveFailures++;
       _feedError = e.toString();
       _safeNotify();

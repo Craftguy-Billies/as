@@ -13,6 +13,11 @@ class TaskTile extends StatelessWidget {
     required this.onDelete,
   });
 
+  static String _safeTime(String iso) {
+    if (iso.length >= 19) return iso.substring(11, 19);
+    return iso;
+  }
+
   IconData get _statusIcon {
     switch (task.status) {
       case 'queued': return Icons.hourglass_empty;
@@ -105,7 +110,7 @@ class TaskTile extends StatelessWidget {
                           ),
                           const SizedBox(width: 6),
                           Text(
-                            task.createdAt.substring(11, 19),
+                            _safeTime(task.createdAt),
                             style: TextStyle(color: Colors.grey[700], fontSize: 11),
                           ),
                         ],

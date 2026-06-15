@@ -8,8 +8,12 @@ DB_PATH = os.getenv("VIBECODE_DB_PATH", os.path.join(os.path.dirname(os.path.abs
 
 
 async def _get_db_path() -> str:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    return DB_PATH
+    path = DB_PATH
+    # Ensure path is absolute so os.path.dirname works even for bare filenames
+    if not os.path.isabs(path):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
 
 
 async def init_db() -> None:

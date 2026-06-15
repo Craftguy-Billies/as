@@ -71,7 +71,7 @@ class ChatProvider extends ChangeNotifier {
   }
 
   Future<void> sendMessage(String prompt) async {
-    if (prompt.trim().isEmpty) return;
+    if (prompt.trim().isEmpty || _loading) return;
 
     _loading = true;
     _error = null;

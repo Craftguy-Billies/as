@@ -37,12 +37,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 # In-memory rotating log buffer for /api/logs endpoint
+import threading as _threading
 _log_buffer: deque[str] = deque(maxlen=500)
+_log_buffer_lock = _threading.Lock()
 
 
 class _BufferHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
-        _log_buffer.append(self.format(record))
+        with _log_buffer_lock:
+            _log_buffer.append(self.format(record))
 
 
 _buffer_handler = _BufferHandler()
@@ -94,13 +97,15 @@ async def health():
 @app.get("/api/logs")
 async def view_logs(lines: int = Query(200, ge=1, le=500)):
     """Return the last N lines of server logs."""
-    return {"lines": list(_log_buffer)[-lines:]}
+    with _log_buffer_lock:
+        return {"lines": list(_log_buffer)[-lines:]}
 
 
 @app.get("/api/logs/stream")
 async def stream_logs():
     """Return all buffered logs (up to 500 lines)."""
-    return {"lines": list(_log_buffer)}
+    with _log_buffer_lock:
+        return {"lines": list(_log_buffer)}
 
 
 # ---------------------------------------------------------------------------
