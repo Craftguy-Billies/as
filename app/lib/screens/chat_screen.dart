@@ -20,6 +20,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _showRepoBar = false;
   String _mode = 'code';
   String _activeModel = '';
+  bool _batchMode = false;
 
   @override
   void initState() {
@@ -83,7 +84,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _send() {
     final text = _inputCtrl.text.trim();
-    final loading = context.read<ChatProvider>().loading;
+    final prov = context.read<ChatProvider>();
+    final loading = prov.loading;
     if (text.isEmpty || loading) return;
 
     final repo = _repoCtrl.text.trim();
@@ -98,15 +100,18 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     _inputCtrl.clear();
-    _saveRepoPrefs(); // save before send so branch persists
-    try {
-      context.read<ChatProvider>().sendMessage(
-        text,
-        repo: _repoCtrl.text.trim(),
-        branch: _branchCtrl.text.trim().isEmpty ? 'main' : _branchCtrl.text.trim(),
-        mode: _mode,
-      );
-    } catch (_) {}
+    _saveRepoPrefs();
+
+    final branch = _branchCtrl.text.trim().isEmpty ? 'main' : _branchCtrl.text.trim();
+
+    if (_batchMode) {
+      // Split by newlines, each non-empty line is a separate queued prompt
+      final lines = text.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList();
+      if (lines.isEmpty) return;
+      prov.enqueueBatch(lines, repo: repo, branch: branch, mode: _mode);
+    } else {
+      prov.sendMessage(text, repo: repo, branch: branch, mode: _mode);
+    }
   }
 
   void _scrollDown() {
@@ -215,7 +220,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
 
           // Input bar
-          _buildInput(prov.loading),
+          _buildInput(prov),
         ],
       ),
     );
@@ -379,57 +384,136 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _buildInput(bool loading) {
+  Widget _buildInput(ChatProvider prov) {
+    final loading = prov.loading;
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 8, 8, 12),
       decoration: const BoxDecoration(
         color: Color(0xFF121212),
         border: Border(top: BorderSide(color: Color(0xFF2A2A2A))),
       ),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Expanded(
-            child: TextField(
-              controller: _inputCtrl,
-              style: const TextStyle(color: Colors.white, fontSize: 15),
-              minLines: 1,
-              maxLines: 4,
-              textInputAction: TextInputAction.send,
-              onSubmitted: (_) => _send(),
-              decoration: InputDecoration(
-                hintText: 'Send a message...',
-                hintStyle: TextStyle(color: Colors.grey[700]),
-                filled: true,
-                fillColor: const Color(0xFF1A1A2E),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(24),
-                  borderSide: BorderSide.none,
-                ),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          // Queue progress bar
+          if (prov.isProcessingQueue)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              color: const Color(0xFF1A1A2E),
+              child: Row(
+                children: [
+                  const Icon(Icons.queue_play_next, color: Color(0xFF7C3AED), size: 16),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Processing ${prov.queuePosition}/${prov.queueTotal}',
+                          style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600),
+                        ),
+                        const SizedBox(height: 4),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(2),
+                          child: LinearProgressIndicator(
+                            value: prov.queuePosition / prov.queueTotal,
+                            backgroundColor: const Color(0xFF2A2A2A),
+                            valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF7C3AED)),
+                            minHeight: 3,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  GestureDetector(
+                    onTap: () => prov.cancelQueue(),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withValues(alpha: 0.2),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Text('Cancel', style: TextStyle(color: Colors.red, fontSize: 11)),
+                    ),
+                  ),
+                ],
               ),
             ),
-          ),
-          const SizedBox(width: 8),
-          SizedBox(
-            height: 44,
-            width: 44,
-            child: Material(
-              color: loading ? const Color(0xFF7C3AED).withValues(alpha: 0.5) : const Color(0xFF7C3AED),
-              shape: const CircleBorder(),
-              child: InkWell(
-                onTap: loading ? null : _send,
-                customBorder: const CircleBorder(),
-                child: Center(
-                  child: loading
-                      ? const SizedBox(
-                          height: 20,
-                          width: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                        )
-                      : const Icon(Icons.send_rounded, color: Colors.white, size: 20),
+          // Input row
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _inputCtrl,
+                  style: const TextStyle(color: Colors.white, fontSize: 15),
+                  minLines: 1,
+                  maxLines: 4,
+                  textInputAction: TextInputAction.send,
+                  onSubmitted: (_) => _send(),
+                  decoration: InputDecoration(
+                    hintText: _batchMode ? 'Paste multiple prompts, one per line...' : 'Send a message...',
+                    hintStyle: TextStyle(color: Colors.grey[700]),
+                    filled: true,
+                    fillColor: const Color(0xFF1A1A2E),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(24),
+                      borderSide: BorderSide.none,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  ),
                 ),
               ),
-            ),
+              const SizedBox(width: 8),
+              // Batch toggle chip
+              GestureDetector(
+                onTap: () => setState(() => _batchMode = !_batchMode),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: _batchMode ? const Color(0xFF7C3AED).withValues(alpha: 0.25) : const Color(0xFF1A1A2E),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: _batchMode ? const Color(0xFF7C3AED) : const Color(0xFF2A2A2A),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.list_alt, size: 14, color: _batchMode ? const Color(0xFFA78BFA) : Colors.grey),
+                      const SizedBox(width: 3),
+                      Text('Batch', style: TextStyle(fontSize: 11, color: _batchMode ? const Color(0xFFA78BFA) : Colors.grey[600])),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              SizedBox(
+                height: 44,
+                width: 44,
+                child: Material(
+                  color: loading ? const Color(0xFF7C3AED).withValues(alpha: 0.5) : const Color(0xFF7C3AED),
+                  shape: const CircleBorder(),
+                  child: InkWell(
+                    onTap: loading ? null : _send,
+                    customBorder: const CircleBorder(),
+                    child: Center(
+                      child: loading
+                          ? const SizedBox(
+                              height: 20,
+                              width: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                            )
+                          : Icon(
+                              _batchMode ? Icons.queue_play_next : Icons.send_rounded,
+                              color: Colors.white,
+                              size: 20,
+                            ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ),
