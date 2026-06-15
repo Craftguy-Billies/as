@@ -110,16 +110,26 @@ class _ChatScreenState extends State<ChatScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFF0D0D0D),
       appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('Chat', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-            if (_repoCtrl.text.isNotEmpty)
-              Text(
-                '${_repoCtrl.text.trim()} · ${_mode.toUpperCase()}',
-                style: TextStyle(color: Colors.grey[500], fontSize: 11),
-              ),
-          ],
+        title: Consumer<ChatProvider>(
+          builder: (_, chatProv, __) {
+            final activeRepo = chatProv.serverRepo.isNotEmpty
+                ? chatProv.serverRepo
+                : _repoCtrl.text.trim();
+            final activeMode = chatProv.serverMode.isNotEmpty
+                ? chatProv.serverMode
+                : _mode;
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Chat', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                if (activeRepo.isNotEmpty)
+                  Text(
+                    '$activeRepo · ${activeMode.toUpperCase()}',
+                    style: TextStyle(color: Colors.grey[500], fontSize: 11),
+                  ),
+              ],
+            );
+          },
         ),
         backgroundColor: const Color(0xFF0D0D0D),
         actions: [

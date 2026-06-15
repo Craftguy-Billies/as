@@ -42,6 +42,13 @@ class ChatProvider extends ChangeNotifier {
   bool get loading => _loading;
   String? get error => _error;
 
+  Map<String, dynamic>? _serverState;
+  Map<String, dynamic>? get serverState => _serverState;
+  String _serverRepo = '';
+  String get serverRepo => _serverRepo;
+  String _serverMode = 'code';
+  String get serverMode => _serverMode;
+
   Future<void> loadFromCache() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_cacheKey);
@@ -61,6 +68,9 @@ class ChatProvider extends ChangeNotifier {
     // Also try loading from server (restores session if backend still has it)
     try {
       final data = await _api.getChat();
+      _serverState = data;
+      _serverRepo = data['repo']?.toString() ?? '';
+      _serverMode = data['mode']?.toString() ?? 'code';
       final serverMsgs = (data['messages'] as List?)
               ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
               .toList() ??
