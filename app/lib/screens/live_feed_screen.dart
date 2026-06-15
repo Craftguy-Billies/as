@@ -22,7 +22,9 @@ class _LiveFeedScreenState extends State<LiveFeedScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     final prov = context.read<TaskProvider>();
-    prov.startPolling(widget.taskId);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      prov.startPolling(widget.taskId);
+    });
 
     _scrollCtrl.addListener(() {
       final atBottom =
