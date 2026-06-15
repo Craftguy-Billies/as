@@ -16,23 +16,24 @@ class _LiveFeedScreenState extends State<LiveFeedScreen>
     with WidgetsBindingObserver {
   final _scrollCtrl = ScrollController();
   bool _showScrollFab = false;
+  TaskProvider? _prov;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    final prov = context.read<TaskProvider>();
-    prov.startPolling(widget.taskId);
+    _prov = context.read<TaskProvider>();
+    _prov!.startPolling(widget.taskId);
 
     _scrollCtrl.addListener(() {
       final atBottom =
           _scrollCtrl.position.pixels >= _scrollCtrl.position.maxScrollExtent - 50;
       if (atBottom) {
-        prov.autoScroll = true;
+        _prov!.autoScroll = true;
         if (mounted) setState(() => _showScrollFab = false);
       } else if (_scrollCtrl.position.pixels <
           _scrollCtrl.position.maxScrollExtent - 200) {
-        prov.autoScroll = false;
+        _prov!.autoScroll = false;
         if (mounted) setState(() => _showScrollFab = true);
       }
     });
@@ -41,7 +42,7 @@ class _LiveFeedScreenState extends State<LiveFeedScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    context.read<TaskProvider>().stopPolling();
+    _prov?.stopPolling();
     _scrollCtrl.dispose();
     super.dispose();
   }
