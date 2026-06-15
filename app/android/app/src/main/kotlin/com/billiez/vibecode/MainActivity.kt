@@ -1,4 +1,4 @@
-package com.vibecode.vibecode
+package com.billiez.vibecode
 
 import io.flutter.embedding.android.FlutterActivity
 
