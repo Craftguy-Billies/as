@@ -25,7 +25,7 @@ class TaskProvider extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    _pollTimer?.cancel();
+    stopPolling();
     super.dispose();
   }
 
@@ -168,9 +168,4 @@ class TaskProvider extends ChangeNotifier {
     } catch (_) {}
   }
 
-  @override
-  void dispose() {
-    stopPolling();
-    super.dispose();
-  }
 }
