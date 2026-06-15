@@ -14,7 +14,7 @@ class EventCard extends StatelessWidget {
     if (event.isFileEditAction) return _buildFileEdit();
     if (event.isSearchAction) return _buildSearchResult();
     if (event.isError) return _buildError();
-    if (event.isObservation) return const SizedBox.shrink(); // shown inline with action
+    if (event.isObservation) return _buildObservation();
 
     // Generic fallback
     return _buildGeneric();
@@ -194,6 +194,76 @@ class EventCard extends StatelessWidget {
             ),
           ),
           const Icon(Icons.search, color: Colors.grey, size: 16),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildObservation() {
+    // Parse observation data
+    String text = '';
+    final toolName = event.toolName ?? '';
+    try {
+      if (event.observationJson != null) {
+        final obs = json.decode(event.observationJson!) as Map<String, dynamic>;
+        if (toolName == 'terminal' || toolName == 'execute_bash_command') {
+          final stdout = obs['stdout'] as String? ?? '';
+          final stderr = obs['stderr'] as String? ?? '';
+          final exitCode = obs['exit_code'];
+          if (stdout.isNotEmpty) text = stdout;
+          if (stderr.isNotEmpty) text += '\n[stderr] $stderr';
+          if (exitCode != null && exitCode != 0) {
+            text += '\n(exit code: $exitCode)';
+          }
+        } else if (toolName == 'file_editor' || toolName == 'str_replace_editor') {
+          text = obs['path'] as String? ?? '';
+          final diff = obs['diff'] as String?;
+          final content = obs['content'] as String?;
+          if (diff != null && diff.isNotEmpty) {
+            text += '\n$diff';
+          } else if (content != null && content.isNotEmpty) {
+            text += '\n$content';
+          }
+        } else {
+          text = event.observationJson!;
+        }
+      }
+    } catch (_) {
+      text = event.observationJson ?? '';
+    }
+
+    if (text.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 2),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A2E),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFF2A2A3E)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.output, color: Colors.grey[500], size: 14),
+              const SizedBox(width: 6),
+              Text(
+                toolName.isNotEmpty ? '→ $toolName' : '→ result',
+                style: TextStyle(color: Colors.grey[500], fontSize: 11),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            text.length > 500 ? '${text.substring(0, 500)}...' : text,
+            style: const TextStyle(
+              color: Color(0xFFA0A0B0),
+              fontSize: 12,
+              fontFamily: 'monospace',
+            ),
+          ),
         ],
       ),
     );

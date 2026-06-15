@@ -69,74 +69,68 @@ async def _update_task_status(db, task_id: str, status: str, **kwargs) -> None:
 
 async def _process_task(task_id: str) -> None:
     """Process a single task: run agent, save events, update status."""
-    async with get_db_ctx() as db:
-        # Load task
-        cursor = await db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
-        task = await cursor.fetchone()
-        if not task:
-            return
+    try:
+        async with get_db_ctx() as db:
+            cursor = await db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+            task = await cursor.fetchone()
+            if not task:
+                return
 
-        task_dict = dict(task)
-        logger.info(f"Processing task {task_id}: mode={task_dict['mode']}, repo={task_dict['repo']}")
+            task_dict = dict(task)
+            logger.info(f"Processing task {task_id}: mode={task_dict['mode']}, repo={task_dict['repo']}")
 
-        # Mark as starting
-        await _update_task_status(db, task_id, "starting")
+            await _update_task_status(db, task_id, "starting")
 
-        # Event queue for thread-safe collection
-        event_queue: list[dict] = []
-        queue_lock = threading.Lock()
-        last_flush = time.time()
-        FLUSH_INTERVAL = 10  # seconds
-
-        loop = asyncio.get_running_loop()
-
-        def _flush_events() -> None:
-            """Thread-safe: schedule async flush on the event loop."""
-            nonlocal last_flush
-            with queue_lock:
-                if not event_queue:
-                    return
-                batch = list(event_queue)
-                event_queue.clear()
+            event_queue: list[dict] = []
+            queue_lock = threading.Lock()
             last_flush = time.time()
-            asyncio.run_coroutine_threadsafe(_save_events(db, task_id, batch), loop)
+            FLUSH_INTERVAL = 10
 
-        def on_event(event: dict) -> None:
-            with queue_lock:
-                event_queue.append(event)
-                should_flush = (time.time() - last_flush) >= FLUSH_INTERVAL
-            if should_flush:
-                _flush_events()
+            loop = asyncio.get_running_loop()
 
-        def on_status(status: str) -> None:
-            logger.info(f"Task {task_id} status: {status}")
+            def _flush_events() -> None:
+                nonlocal last_flush
+                with queue_lock:
+                    if not event_queue:
+                        return
+                    batch = list(event_queue)
+                    event_queue.clear()
+                last_flush = time.time()
+                asyncio.run_coroutine_threadsafe(_save_events(db, task_id, batch), loop)
 
-        # Parse MCP config from task if present
-        mcp_servers = None
-        mcp_raw = task_dict.get("mcp_config")
-        if mcp_raw:
-            try:
-                mcp_servers = json.loads(mcp_raw)
-            except (json.JSONDecodeError, TypeError):
-                pass
+            def on_event(event: dict) -> None:
+                with queue_lock:
+                    event_queue.append(event)
+                    should_flush = (time.time() - last_flush) >= FLUSH_INTERVAL
+                if should_flush:
+                    _flush_events()
 
-        def _run() -> dict:
-            return run_conversation_sync(
-                prompt=task_dict["prompt"],
-                repo=task_dict["repo"],
-                branch=task_dict.get("branch", "main"),
-                mode=task_dict.get("mode", "code"),
-                event_callback=on_event,
-                status_callback=on_status,
-                mcp_servers=mcp_servers,
-            )
+            def on_status(status: str) -> None:
+                logger.info(f"Task {task_id} status: {status}")
 
-        try:
+            mcp_servers = None
+            mcp_raw = task_dict.get("mcp_config")
+            if mcp_raw:
+                try:
+                    mcp_servers = json.loads(mcp_raw)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            def _run() -> dict:
+                return run_conversation_sync(
+                    prompt=task_dict["prompt"],
+                    repo=task_dict["repo"],
+                    branch=task_dict.get("branch", "main"),
+                    mode=task_dict.get("mode", "code"),
+                    event_callback=on_event,
+                    status_callback=on_status,
+                    mcp_servers=mcp_servers,
+                )
+
             await _update_task_status(db, task_id, "running")
 
             result = await loop.run_in_executor(None, _run)
 
-            # Flush remaining events
             with queue_lock:
                 remaining = list(event_queue)
                 event_queue.clear()
@@ -150,14 +144,8 @@ async def _process_task(task_id: str) -> None:
                     conversation_id=result.get("conversation_id"),
                     sandbox_id=result.get("sandbox_id"),
                 )
-                # Send push notification
                 prompt_preview = task_dict["prompt"][:80] + ("..." if len(task_dict["prompt"]) > 80 else "")
-                await send_push_notification(
-                    db,
-                    task_id,
-                    "✅ Task Complete",
-                    prompt_preview,
-                )
+                await send_push_notification(db, task_id, "✅ Task Complete", prompt_preview)
             else:
                 await _update_task_status(
                     db, task_id, "failed",
@@ -166,22 +154,24 @@ async def _process_task(task_id: str) -> None:
                     sandbox_id=result.get("sandbox_id"),
                 )
                 await send_push_notification(
-                    db,
-                    task_id,
-                    "❌ Task Failed",
+                    db, task_id, "❌ Task Failed",
                     result.get("error_message", "Task failed")[:120],
                 )
 
-        except Exception as e:
-            import traceback
-            err_detail = f"{type(e).__name__}: {e}"
-            if not str(e):
-                err_detail = f"{type(e).__name__} (no detail)"
-            logger.error(f"Task {task_id} failed: {err_detail}\n{traceback.format_exc()}")
-            await _update_task_status(db, task_id, "failed", error_message=err_detail)
+    except Exception as e:
+        import traceback
+        err_detail = f"{type(e).__name__}: {e}"
+        if not str(e):
+            err_detail = f"{type(e).__name__} (no detail)"
+        logger.error(f"Task {task_id} failed: {err_detail}\n{traceback.format_exc()}")
+        try:
+            async with get_db_ctx() as db2:
+                await _update_task_status(db2, task_id, "failed", error_message=err_detail)
+        except Exception:
+            logger.error(f"Failed to update task {task_id} status after exception")
 
-        finally:
-            _active_tasks.pop(task_id, None)
+    finally:
+        _active_tasks.pop(task_id, None)
 
 
 async def _worker_loop() -> None:
