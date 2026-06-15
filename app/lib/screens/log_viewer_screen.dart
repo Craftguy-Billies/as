@@ -18,6 +18,7 @@ class _LogViewerScreenState extends State<LogViewerScreen> {
   Timer? _timer;
   bool _fetching = false;
   bool _initFailed = false;
+  String _baseUrl = '';
 
   @override
   void initState() {
@@ -29,9 +30,9 @@ class _LogViewerScreenState extends State<LogViewerScreen> {
     try {
       final prefs = PreferencesService();
       await prefs.init();
-      final url = prefs.serverUrl;
-      _fetch(url);
-      _timer = Timer.periodic(const Duration(seconds: 3), (_) => _fetch(url));
+      _baseUrl = prefs.serverUrl;
+      _doFetch();
+      _timer = Timer.periodic(const Duration(seconds: 3), (_) => _doFetch());
     } catch (_) {
       if (mounted) setState(() => _initFailed = true);
     }
@@ -44,13 +45,13 @@ class _LogViewerScreenState extends State<LogViewerScreen> {
     super.dispose();
   }
 
-  Future<void> _fetch(String baseUrl) async {
-    if (_fetching) return;
+  Future<void> _doFetch() async {
+    if (_fetching || _baseUrl.isEmpty) return;
     _fetching = true;
     try {
       try {
         final resp = await http
-            .get(Uri.parse('$baseUrl/api/logs'))
+            .get(Uri.parse('$_baseUrl/api/logs'))
             .timeout(const Duration(seconds: 5));
         if (resp.statusCode == 200) {
           final data = json.decode(resp.body) as Map<String, dynamic>;
@@ -86,6 +87,11 @@ class _LogViewerScreenState extends State<LogViewerScreen> {
         ),
       );
     }
+    return Scaffold(
+      backgroundColor: const Color(0xFF0D0D0D),
+      appBar: AppBar(
+        title: const Text('Server Logs', style: TextStyle(fontWeight: FontWeight.bold)),
+        backgroundColor: const Color(0xFF0D0D0D),
         actions: [
           IconButton(
             icon: Icon(_autoScroll ? Icons.lock : Icons.lock_open, color: Colors.grey),
@@ -94,7 +100,7 @@ class _LogViewerScreenState extends State<LogViewerScreen> {
           ),
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: _fetch,
+            onPressed: _doFetch,
           ),
         ],
       ),
