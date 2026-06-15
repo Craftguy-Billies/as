@@ -34,7 +34,12 @@ class _HomeScreenState extends State<HomeScreen> {
       try {
         await settings.testConnection().timeout(const Duration(seconds: 12));
         if (mounted && settings.connected == true) {
-          context.read<TaskProvider>().loadTasks();
+          await context.read<TaskProvider>().loadTasks();
+          // Check for load errors after loading
+          if (mounted) {
+            final err = context.read<TaskProvider>().error;
+            if (err != null) _showError('Failed to load tasks: $err');
+          }
         }
       } catch (_) {
         if (mounted && settings.connected == null) {

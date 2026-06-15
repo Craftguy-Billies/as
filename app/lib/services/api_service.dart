@@ -60,7 +60,7 @@ class ApiService {
     final params = <String, String>{'limit': limit.toString()};
     if (status != null) params['status'] = status;
     final uri = Uri.parse('$_url/api/tasks').replace(queryParameters: params);
-    final resp = await http.get(uri);
+    final resp = await http.get(uri).timeout(const Duration(seconds: 8));
     if (resp.statusCode == 200) {
       final data = json.decode(resp.body);
       return (data['tasks'] as List)
@@ -71,7 +71,8 @@ class ApiService {
   }
 
   Future<Task> getTask(String id) async {
-    final resp = await http.get(Uri.parse('$_url/api/tasks/$id'));
+    final resp = await http.get(Uri.parse('$_url/api/tasks/$id'))
+        .timeout(const Duration(seconds: 8));
     if (resp.statusCode == 200) {
       return Task.fromJson(json.decode(resp.body));
     }
@@ -79,7 +80,8 @@ class ApiService {
   }
 
   Future<void> deleteTask(String id) async {
-    final resp = await http.delete(Uri.parse('$_url/api/tasks/$id'));
+    final resp = await http.delete(Uri.parse('$_url/api/tasks/$id'))
+        .timeout(const Duration(seconds: 8));
     if (resp.statusCode != 200) {
       throw Exception('Failed to delete task');
     }
