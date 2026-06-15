@@ -118,13 +118,24 @@ class TaskProvider extends ChangeNotifier {
     _consecutiveFailures = 0;
     _autoScroll = true;
     _prefs.clearLastSeenTimestamp();
-    _fetchEvents();
+    _startPollTimer();
+    _fetchEvents(); // immediate first fetch
+  }
 
+  void _startPollTimer() {
     _pollTimer?.cancel();
     _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       _fetchEvents();
     });
-    // notifyListeners() called by _fetchEvents() when data arrives
+  }
+
+  void resumePolling() {
+    // Called when phone reopens — catch up without wiping events
+    if (_currentTaskId == null) return;
+    _consecutiveFailures = 0;
+    _feedError = null;
+    _fetchEvents(); // catch up on missed events
+    _startPollTimer();
   }
 
   void stopPolling() {

@@ -52,7 +52,7 @@ class _LiveFeedScreenState extends State<LiveFeedScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final prov = context.read<TaskProvider>();
     if (state == AppLifecycleState.resumed) {
-      prov.startPolling(widget.taskId);
+      prov.resumePolling(); // catch up without wiping events
     } else if (state == AppLifecycleState.paused) {
       prov.stopPolling();
     }
