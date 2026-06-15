@@ -54,22 +54,46 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _sendPrompt() async {
     final prompt = _promptCtrl.text.trim();
     final repo = _repoCtrl.text.trim();
-    if (prompt.isEmpty || repo.isEmpty) return;
+    if (prompt.isEmpty || repo.isEmpty) {
+      _showError(prompt.isEmpty ? 'Enter a prompt' : 'Enter a GitHub repo (owner/repo)');
+      return;
+    }
+    if (!RegExp(r'^[\w.-]+/[\w.-]+$').hasMatch(repo)) {
+      _showError('Invalid repo format. Use: owner/repo');
+      return;
+    }
 
     setState(() => _sending = true);
-    final taskProv = context.read<TaskProvider>();
-    final task = await taskProv.createPrompt(
-      prompt: prompt,
-      repo: repo,
-      mode: _mode,
-    );
-    setState(() => _sending = false);
-
-    if (task != null && mounted) {
-      context.read<PreferencesService>().saveLastPrompt(repo, 'main', _mode);
-      _promptCtrl.clear();
-      Navigator.pushNamed(context, '/tasks/${task.id}');
+    try {
+      final taskProv = context.read<TaskProvider>();
+      final task = await taskProv
+          .createPrompt(prompt: prompt, repo: repo, mode: _mode)
+          .timeout(const Duration(seconds: 15));
+      if (task != null && mounted) {
+        context.read<PreferencesService>().saveLastPrompt(repo, 'main', _mode);
+        _promptCtrl.clear();
+        Navigator.pushNamed(context, '/tasks/${task.id}');
+      } else {
+        _showError('Failed to create task. Check backend logs.');
+      }
+    } catch (e) {
+      _showError(e is TimeoutException
+          ? 'Server not responding. Check VM.'
+          : 'Error: ${e.toString().split('\n').first}');
     }
+    if (mounted) setState(() => _sending = false);
+  }
+
+  void _showError(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: Colors.red,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 4),
+      ),
+    );
   }
 
   @override

@@ -49,7 +49,7 @@ class ApiService {
         'branch': branch,
         'mode': mode,
       }),
-    );
+    ).timeout(const Duration(seconds: 10));
     if (resp.statusCode == 201) {
       return Task.fromJson(json.decode(resp.body));
     }
