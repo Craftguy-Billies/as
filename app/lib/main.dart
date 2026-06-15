@@ -11,6 +11,7 @@ import 'screens/home_screen.dart';
 import 'screens/setup_screen.dart';
 import 'screens/live_feed_screen.dart';
 import 'screens/settings_screen.dart';
+import 'screens/log_viewer_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -70,6 +71,7 @@ class VibeCodeApp extends StatelessWidget {
           switch (settings.name) {
             case '/': return MaterialPageRoute(builder: (_) => const HomeScreen());
             case '/settings': return MaterialPageRoute(builder: (_) => const SettingsScreen());
+            case '/logs': return MaterialPageRoute(builder: (_) => const LogViewerScreen());
             default: return MaterialPageRoute(builder: (_) => const HomeScreen());
           }
         },

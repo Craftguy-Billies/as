@@ -103,7 +103,13 @@ class _LiveFeedScreenState extends State<LiveFeedScreen>
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        _WaitingIndicator(feedError: prov.feedError),
+                        _WaitingIndicator(
+                          feedError: prov.feedError,
+                          taskStatus: prov.tasks
+                              .where((t) => t.id == widget.taskId)
+                              .map((t) => t.status)
+                              .firstOrNull,
+                        ),
                       ],
                     ),
                   )
@@ -148,7 +154,8 @@ class _LiveFeedScreenState extends State<LiveFeedScreen>
 
 class _WaitingIndicator extends StatefulWidget {
   final String? feedError;
-  const _WaitingIndicator({this.feedError});
+  final String? taskStatus;
+  const _WaitingIndicator({this.feedError, this.taskStatus});
 
   @override
   State<_WaitingIndicator> createState() => _WaitingIndicatorState();
@@ -193,6 +200,46 @@ class _WaitingIndicatorState extends State<_WaitingIndicator>
               maxLines: 5,
               overflow: TextOverflow.ellipsis,
             ),
+          ),
+        ],
+      );
+    }
+
+    final status = widget.taskStatus;
+
+    // Completed with no events
+    if (status == 'completed') {
+      return Column(
+        children: [
+          const Icon(Icons.check_circle_outline, color: Colors.green, size: 48),
+          const SizedBox(height: 16),
+          const Text(
+            'Task completed',
+            style: TextStyle(color: Colors.white70, fontSize: 15),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'No event log recorded for this task',
+            style: TextStyle(color: Colors.grey[600], fontSize: 12),
+          ),
+        ],
+      );
+    }
+
+    // Failed with no events
+    if (status == 'failed') {
+      return Column(
+        children: [
+          const Icon(Icons.error_outline, color: Colors.red, size: 48),
+          const SizedBox(height: 16),
+          const Text(
+            'Task failed',
+            style: TextStyle(color: Colors.redAccent, fontSize: 15),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Check the status banner above for details',
+            style: TextStyle(color: Colors.grey[600], fontSize: 12),
           ),
         ],
       );

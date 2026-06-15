@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -33,6 +34,19 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+# In-memory rotating log buffer for /api/logs endpoint
+_log_buffer: deque[str] = deque(maxlen=500)
+
+
+class _BufferHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        _log_buffer.append(self.format(record))
+
+
+_buffer_handler = _BufferHandler()
+_buffer_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s %(message)s"))
+logging.getLogger().addHandler(_buffer_handler)
 
 
 @asynccontextmanager
@@ -74,6 +88,18 @@ async def health():
         model=cfg.model,
         version="1.0.0",
     )
+
+
+@app.get("/api/logs")
+async def view_logs(lines: int = Query(200, ge=1, le=500)):
+    """Return the last N lines of server logs."""
+    return {"lines": list(_log_buffer)[-lines:]}
+
+
+@app.get("/api/logs/stream")
+async def stream_logs():
+    """Return all buffered logs (up to 500 lines)."""
+    return {"lines": list(_log_buffer)}
 
 
 # ---------------------------------------------------------------------------

@@ -174,13 +174,14 @@ class TaskProvider extends ChangeNotifier {
       if (newEvents.isNotEmpty) {
         _events = [..._events, ...newEvents];
         _prefs.setLastSeenTimestamp(newEvents.last.timestamp);
-        _safeNotify();
       }
 
       if (taskStatus == 'completed' || taskStatus == 'failed') {
         stopPolling();
         await loadTasks();
       }
+
+      _safeNotify();
     } catch (e) {
       _consecutiveFailures++;
       _feedError = e.toString();

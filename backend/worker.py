@@ -46,6 +46,7 @@ async def _save_events(db, task_id: str, events: list[dict]) -> None:
             ),
         )
     await db.commit()
+    logger.info("Saved %d events for task %s", len(events), task_id[-8:])
 
 
 async def _update_task_status(db, task_id: str, status: str, **kwargs) -> None:

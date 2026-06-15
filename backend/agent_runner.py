@@ -254,10 +254,12 @@ def run_conversation_sync(
                     break
 
         if not conversation_id:
+            logger.warning("run_conversation_sync: no conversation_id for task=%s", start_task_id)
             result["error_message"] = "Failed to get conversation ID from start task"
             return result
 
         result["conversation_id"] = conversation_id
+        logger.info("run_conversation_sync: conv=%s for task=%s, polling for completion", conversation_id, start_task_id)
 
         if status_callback:
             status_callback("running")
@@ -316,10 +318,18 @@ def run_conversation_sync(
             # Check if done
             if execution_status in ("completed", "finished"):
                 result["status"] = "completed"
+                logger.info(
+                    "run_conversation_sync: conv=%s completed with %d events (seen=%d)",
+                    conversation_id, len(result["events"]), len(seen_event_ids),
+                )
                 break
             elif execution_status in ("failed", "error", "stopped"):
                 result["status"] = "failed"
                 result["error_message"] = conv.get("error_message") or f"Execution status: {execution_status}"
+                logger.warning(
+                    "run_conversation_sync: conv=%s %s — %s",
+                    conversation_id, execution_status, result["error_message"],
+                )
                 break
             elif execution_status == "running":
                 continue

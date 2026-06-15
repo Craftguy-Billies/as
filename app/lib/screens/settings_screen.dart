@@ -159,6 +159,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           const SizedBox(height: 32),
 
+          // Diagnostics
+          _SectionTitle(title: 'Diagnostics'),
+          const SizedBox(height: 8),
+          ElevatedButton.icon(
+            onPressed: () => Navigator.pushNamed(context, '/logs'),
+            icon: const Icon(Icons.terminal),
+            label: const Text('View Server Logs'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF1A1A2E),
+            ),
+          ),
+
+          const SizedBox(height: 32),
+
           // Presets
           _SectionTitle(title: 'Quick Setup'),
           const SizedBox(height: 8),
