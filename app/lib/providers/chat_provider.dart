@@ -5,7 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api_service.dart';
 
 class ChatMessage {
-  final String role; // "user" | "assistant"
+  final String role; // "user" | "assistant" | "event"
   final String content;
   final int timestamp;
 
@@ -28,6 +28,9 @@ class ChatMessage {
       );
 }
 
+/// Single-mode chat: everything goes through the server-side batch queue.
+/// Send → enqueue on server → poll for live events + progress.
+/// Survives phone close — reconnects and resumes polling.
 class ChatProvider extends ChangeNotifier {
   static const _cacheKey = 'chat_messages';
 
@@ -35,35 +38,25 @@ class ChatProvider extends ChangeNotifier {
   List<ChatMessage> _messages = [];
   bool _loading = false;
   String? _error;
-  DateTime? _loadingSince;  // safety: detect stuck loading
-  String _status = '';      // live status: "Connecting...", "Agent is working..."
+  DateTime? _loadingSince;
 
-  // Batch queue
-  final List<String> _pendingPrompts = [];
+  // Queue progress (updated from server every poll)
   int _queuePosition = 0;
   int _queueTotal = 0;
-  int _batchPollFailures = 0;
+  int _pollFailures = 0;
+  Timer? _pollTimer;
 
   ChatProvider(this._api);
 
+  // -- Getters --
   List<ChatMessage> get messages => List.unmodifiable(_messages);
   bool get loading => _loading;
   String? get error => _error;
-  String get status => _status;
-
-  // Queue state
-  List<String> get pendingPrompts => List.unmodifiable(_pendingPrompts);
   int get queuePosition => _queuePosition;
   int get queueTotal => _queueTotal;
-  bool get isProcessingQueue => _queueTotal > 0 && _queuePosition < _queueTotal;
+  bool get isProcessing => _queueTotal > 0;
 
-  Map<String, dynamic>? _serverState;
-  Map<String, dynamic>? get serverState => _serverState;
-  String _serverRepo = '';
-  String get serverRepo => _serverRepo;
-  String _serverMode = 'code';
-  String get serverMode => _serverMode;
-
+  // -- Init: restore from cache + server, resume batch if running --
   Future<void> loadFromCache() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_cacheKey);
@@ -80,18 +73,15 @@ class ChatProvider extends ChangeNotifier {
         await prefs.remove(_cacheKey);
       }
     }
-    // Also try loading from server (restores session if backend still has it)
+
+    // Merge server messages (survives server restart)
     try {
       final data = await _api.getChat();
-      _serverState = data;
-      _serverRepo = data['repo']?.toString() ?? '';
-      _serverMode = data['mode']?.toString() ?? 'code';
       final serverMsgs = (data['messages'] as List?)
               ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
               .toList() ??
           [];
       if (serverMsgs.isNotEmpty) {
-        // Merge: server messages + cache messages, deduplicated
         final merged = <ChatMessage>[];
         final seen = <String>{};
         for (final m in [...serverMsgs, ..._messages]) {
@@ -103,62 +93,45 @@ class ChatProvider extends ChangeNotifier {
         notifyListeners();
       }
     } catch (e) {
-      debugPrint('ChatProvider: server message merge failed: $e');
+      debugPrint('ChatProvider.loadFromCache: server merge failed: $e');
     }
 
-    // Resume batch polling if a batch is running on the server
+    // Resume polling if a batch is running on the server
     try {
       final state = await _api.getChat();
       final batch = state?['batch'] as Map<String, dynamic>?;
       final isRunning = batch?['running'] == true;
       final total = (batch?['total'] as int?) ?? 0;
-      debugPrint('ChatProvider.loadFromCache: batch state running=$isRunning total=$total position=${batch?['position']}');
-      // Only resume if there are actual prompts queued (guard against stale state)
+      debugPrint('ChatProvider.loadFromCache: batch running=$isRunning total=$total pos=${batch?['position']}');
       if (isRunning && total > 0) {
         _queuePosition = (batch?['position'] as int?) ?? 0;
         _queueTotal = total;
         _loading = true;
         _loadingSince = DateTime.now();
-        debugPrint('ChatProvider.loadFromCache: RESUME batch poll total=$total');
         notifyListeners();
-        _pollBatchProgress(
-          repo: state?['repo']?.toString() ?? '',
-          branch: 'main',
-          mode: state?['mode']?.toString() ?? 'code',
-        );
+        _startPolling(repo: state?['repo']?.toString() ?? '',
+                      branch: 'main',
+                      mode: state?['mode']?.toString() ?? 'code');
       }
     } catch (e) {
-      debugPrint('ChatProvider: batch resume check failed: $e');
-    }
-
-    // Safety: clear stuck loading from a previous crash
-    if (_loading && _loadingSince != null &&
-        DateTime.now().difference(_loadingSince!) > const Duration(seconds: 210)) {
-      _loading = false;
-      _loadingSince = null;
+      debugPrint('ChatProvider.loadFromCache: batch resume failed: $e');
     }
   }
 
-  Timer? _livePollTimer;
-
-  Future<void> sendMessage(
+  // -- Send: queue prompt(s) on server, then poll for progress --
+  Future<void> send(
     String prompt, {
     String repo = '',
     String branch = 'main',
     String mode = 'code',
   }) async {
     final trimmed = prompt.trim();
-    if (trimmed.isEmpty || _loading) {
-      debugPrint('ChatProvider.sendMessage: blocked (empty=$trimmed.isEmpty loading=$_loading)');
-      return;
-    }
+    if (trimmed.isEmpty) return;
 
-    debugPrint('ChatProvider.sendMessage: START prompt="..." repo=$repo mode=$mode');
-    _loading = true;
-    _loadingSince = DateTime.now();
+    debugPrint('ChatProvider.send: START repo=$repo mode=$mode');
     _error = null;
-    _status = 'Connecting to agent…';
 
+    // Add user message to chat immediately
     final userMsg = ChatMessage(
       role: 'user',
       content: trimmed,
@@ -168,134 +141,49 @@ class ChatProvider extends ChangeNotifier {
     await _saveToCache();
     notifyListeners();
 
-    // -- Live polling: merge server events in real-time while POST is in-flight --
-    _livePollTimer?.cancel();
-    final _seen = <String>{};
-    for (final m in _messages) {
-      _seen.add('${m.role}:${m.content}');
-    }
-    _livePollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
-      if (!_loading) {
-        _livePollTimer?.cancel();
-        return;
-      }
-      try {
-        final state = await _api.getChat();
-        if (state == null) return;
-        final serverMsgs = (state['messages'] as List?)
-                ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
-                .toList() ??
-            [];
-        var changed = false;
-        for (final m in serverMsgs) {
-          final key = '${m.role}:${m.content}';
-          if (_seen.add(key)) {
-            _messages.add(m);
-            changed = true;
-          }
-        }
-        if (changed) {
-          _status = 'Agent is working…';
-          await _saveToCache();
-          notifyListeners();
-        }
-      } catch (_) {
-        // Polling failures are non-fatal — POST is the source of truth
-      }
-    });
-
-    try {
-      final data = await _api.sendChatMessage(
-        trimmed,
-        repo: repo,
-        branch: branch,
-        mode: mode,
-      );
-      final response = (data['response'] ?? '').toString();
-      if (response.isNotEmpty) {
-        _messages.add(ChatMessage(
-          role: 'assistant',
-          content: response,
-          timestamp: DateTime.now().millisecondsSinceEpoch,
-        ));
-      }
-      await _saveToCache();
-    } catch (e) {
-      debugPrint('ChatProvider.sendMessage: ERROR ${ApiService.friendlyError(e)}');
-      _error = ApiService.friendlyError(e);
-    } finally {
-      _livePollTimer?.cancel();
-      _loading = false;
-      _loadingSince = null;
-      _status = '';
-      debugPrint('ChatProvider.sendMessage: DONE loading=$_loading error=$_error');
-      notifyListeners();
-    }
-  }
-
-  /// Send all prompts to backend — processed sequentially in one conversation.
-  /// Survives phone close. Polls for new messages + progress every 2 seconds.
-  Future<void> enqueueBatch(List<String> prompts, {
-    String repo = '',
-    String branch = 'main',
-    String mode = 'code',
-  }) async {
-    final cleaned = prompts.map((p) => p.trim()).where((p) => p.isNotEmpty).toList();
-    if (cleaned.isEmpty) return;
-
-    debugPrint('ChatProvider.enqueueBatch: START prompts=${cleaned.length} repo=$repo mode=$mode');
-    // Don't block on _loading — batch appends should always go through
-    _error = null;
-    notifyListeners();
-
     try {
       final result = await _api.sendChatBatch(
-        prompts: cleaned,
+        prompts: [trimmed],
         repo: repo,
         branch: branch,
         mode: mode,
       );
-      debugPrint('ChatProvider.enqueueBatch: result=$result');
-      _queueTotal = (result['total'] as int?) ?? cleaned.length;
-      // Don't reset position — polling already tracks it
+      debugPrint('ChatProvider.send: result=$result');
+
       if (result['status'] == 'queued') {
-        _queuePosition = 0;
-        _batchPollFailures = 0;
+        _queuePosition = (result['position'] as int?) ?? 0;
+        _queueTotal = (result['total'] as int?) ?? 1;
+        _pollFailures = 0;
         _loading = true;
         _loadingSince = DateTime.now();
-        debugPrint('ChatProvider.enqueueBatch: queued, starting poll (total=$_queueTotal)');
+        debugPrint('ChatProvider.send: queued pos=$_queuePosition total=$_queueTotal — polling');
         notifyListeners();
-        _pollBatchProgress(repo: repo, branch: branch, mode: mode);
+        _startPolling(repo: repo, branch: branch, mode: mode);
       } else {
-        // Server returned 200 but no 'queued' status — reset totals to avoid phantom progress bar
-        debugPrint('ChatProvider.enqueueBatch: unexpected status=${result['status']}, resetting queue');
+        debugPrint('ChatProvider.send: unexpected status=${result['status']}');
+        _error = (result['error']?.toString()) ?? 'Server did not accept the request';
         _queueTotal = 0;
-        _queuePosition = 0;
-        _error = (result['error']?.toString()) ?? 'Batch not queued by server';
         notifyListeners();
       }
     } catch (e) {
-      debugPrint('ChatProvider.enqueueBatch: ERROR ${ApiService.friendlyError(e)}');
+      debugPrint('ChatProvider.send: ERROR ${ApiService.friendlyError(e)}');
       _error = ApiService.friendlyError(e);
-      _queueTotal = 0;  // reset to avoid phantom progress bar
-      _loading = false;
-      _loadingSince = null;
+      _queueTotal = 0;
       notifyListeners();
     }
   }
 
-  Timer? _batchPollTimer;
-
-  void _pollBatchProgress({required String repo, required String branch, required String mode}) {
-    _batchPollTimer?.cancel();
-    final _pollStarted = DateTime.now();
-    _batchPollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
-      // 30-minute max polling duration
-      if (DateTime.now().difference(_pollStarted).inMinutes >= 30) {
-        _batchPollTimer?.cancel();
+  // -- Polling: fetch messages + progress every 2 seconds --
+  void _startPolling({required String repo, required String branch, required String mode}) {
+    _pollTimer?.cancel();
+    final pollStarted = DateTime.now();
+    _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      if (DateTime.now().difference(pollStarted).inMinutes >= 30) {
+        _pollTimer?.cancel();
         _loading = false;
         _loadingSince = null;
         _error = 'Polling timed out (30 min). Queue may still run on server.';
+        debugPrint('ChatProvider.poll: TIMEOUT');
         notifyListeners();
         return;
       }
@@ -303,7 +191,7 @@ class ChatProvider extends ChangeNotifier {
         final state = await _api.getChat();
         if (state == null) return;
 
-        // Merge any new server messages into local messages
+        // Merge server messages (events, responses) into local chat
         final serverMsgs = (state['messages'] as List?)
                 ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
                 .toList() ??
@@ -315,81 +203,82 @@ class ChatProvider extends ChangeNotifier {
             final key = '${m.role}:${m.content}';
             if (seen.add(key)) merged.add(m);
           }
-          _messages = merged;
-          await _saveToCache();
-        }
-
-        // Update batch progress
-        final batch = state['batch'] as Map<String, dynamic>?;
-        if (batch != null) {
-          _loading = batch['running'] == true;
-          _queuePosition = (batch['position'] as int?) ?? 0;
-          _queueTotal = (batch['total'] as int?) ?? 0;
-
-          if (!_loading && _loadingSince != null) {
-            _loadingSince = null;
-            _batchPollTimer?.cancel();
+          if (merged.length != _messages.length) {
+            _messages = merged;
+            await _saveToCache();
           }
         }
 
-        _batchPollFailures = 0;  // reset on every successful poll
+        // Update progress from server
+        final batch = state['batch'] as Map<String, dynamic>?;
+        if (batch != null) {
+          final wasLoading = _loading;
+          _loading = batch['running'] == true;
+          _queuePosition = (batch['position'] as int?) ?? _queuePosition;
+          _queueTotal = (batch['total'] as int?) ?? _queueTotal;
+
+          if (wasLoading && !_loading) {
+            _loadingSince = null;
+            _pollTimer?.cancel();
+            debugPrint('ChatProvider.poll: DONE');
+          }
+        }
+
+        _pollFailures = 0;
         notifyListeners();
-      } catch (_) {
-        _batchPollFailures++;
-        if (_batchPollFailures >= 10) {
-          _error = 'Lost connection to server. Batch may still be running.';
+      } catch (e) {
+        debugPrint('ChatProvider.poll: fail #$_pollFailures: $e');
+        _pollFailures++;
+        if (_pollFailures >= 10) {
+          _error = 'Lost connection to server. Queue may still be running.';
           _loading = false;
           _loadingSince = null;
-          _batchPollTimer?.cancel();
+          _pollTimer?.cancel();
           notifyListeners();
         }
       }
     });
   }
 
-  void cancelQueue() {
-    _livePollTimer?.cancel();
-    _batchPollTimer?.cancel();
-    _api.cancelChatBatch(); // fire-and-forget
-    _status = '';
+  // -- Cancel / Clear --
+  void cancel() {
+    _pollTimer?.cancel();
+    _api.cancelChatBatch();
     _loading = false;
     _loadingSince = null;
     _queuePosition = 0;
     _queueTotal = 0;
+    debugPrint('ChatProvider.cancel');
     notifyListeners();
-  }
-
-  @override
-  void dispose() {
-    _livePollTimer?.cancel();
-    _batchPollTimer?.cancel();
-    super.dispose();
   }
 
   Future<void> clearChat() async {
-    _livePollTimer?.cancel();
+    _pollTimer?.cancel();
     _messages.clear();
     _error = null;
-    _status = '';
     _loading = false;
     _loadingSince = null;
     _queuePosition = 0;
     _queueTotal = 0;
     notifyListeners();
 
-    // Delete from server first, then clear local cache
     try {
       await _api.deleteChat();
     } catch (e) {
-      debugPrint('ChatProvider.clearChat: server delete failed: $e');
+      debugPrint('ChatProvider.clearChat: $e');
     }
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_cacheKey);
   }
 
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    super.dispose();
+  }
+
   Future<void> _saveToCache() async {
     final prefs = await SharedPreferences.getInstance();
-    final list = _messages.map((m) => m.toJson()).toList();
-    await prefs.setString(_cacheKey, json.encode(list));
+    await prefs.setString(_cacheKey, json.encode(_messages.map((m) => m.toJson()).toList()));
   }
 }

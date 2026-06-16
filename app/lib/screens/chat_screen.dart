@@ -20,7 +20,6 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _showRepoBar = false;
   String _mode = 'code';
   String _activeModel = '';
-  bool _batchMode = false;
 
   @override
   void initState() {
@@ -88,11 +87,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _send() {
     final text = _inputCtrl.text.trim();
-    final prov = context.read<ChatProvider>();
-    final loading = prov.loading;
     if (text.isEmpty) return;
-    // In normal mode, block send while loading. In batch mode, allow append.
-    if (!_batchMode && loading) return;
 
     final repo = _repoCtrl.text.trim();
     if (repo.isNotEmpty && !RegExp(r'^[\w.-]+/[\w.-]+$').hasMatch(repo)) {
@@ -109,14 +104,10 @@ class _ChatScreenState extends State<ChatScreen> {
     _saveRepoPrefs();
 
     final branch = _branchCtrl.text.trim().isEmpty ? 'main' : _branchCtrl.text.trim();
+    final prov = context.read<ChatProvider>();
 
-    debugPrint('ChatScreen._send: batchMode=$_batchMode mode=$_mode repo=$repo');
-    if (_batchMode) {
-      // Send as single prompt to cloud queue (append if batch running)
-      prov.enqueueBatch([text], repo: repo, branch: branch, mode: _mode);
-    } else {
-      prov.sendMessage(text, repo: repo, branch: branch, mode: _mode);
-    }
+    debugPrint('ChatScreen._send: mode=$_mode repo=$repo');
+    prov.send(text, repo: repo, branch: branch, mode: _mode);
   }
 
   void _scrollDown() {
@@ -203,7 +194,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                         itemCount: msgs.length + (prov.loading ? 1 : 0),
                         itemBuilder: (_, i) {
-                          if (i >= msgs.length) return _buildTyping(prov.status);
+                          if (i >= msgs.length) return _buildTyping();
                           return _ChatBubble(msg: msgs[i]);
                         },
                       ))
@@ -379,36 +370,19 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _buildTyping(String status) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 12),
+  Widget _buildTyping() {
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 12),
       child: Align(
         alignment: Alignment.centerLeft,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const _TypingIndicator(),
-            if (status.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 6, left: 8),
-                child: Text(
-                  status,
-                  style: const TextStyle(
-                    color: Color(0xFF888899),
-                    fontSize: 12,
-                    fontStyle: FontStyle.italic,
-                  ),
-                ),
-              ),
-          ],
-        ),
+        child: _TypingIndicator(),
       ),
     );
   }
 
   Widget _buildInput(ChatProvider prov) {
     final loading = prov.loading;
+    final processing = prov.isProcessing;
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 8, 8, 12),
       decoration: const BoxDecoration(
@@ -418,8 +392,8 @@ class _ChatScreenState extends State<ChatScreen> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Queue progress bar
-          if (prov.isProcessingQueue)
+          // Queue progress bar — always visible when processing
+          if (processing)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
               color: const Color(0xFF1A1A2E),
@@ -432,25 +406,29 @@ class _ChatScreenState extends State<ChatScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Processing ${prov.queuePosition}/${prov.queueTotal}',
+                          prov.queueTotal > 0
+                              ? 'Processing ${prov.queuePosition}/${prov.queueTotal}'
+                              : 'Processing…',
                           style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600),
                         ),
-                        const SizedBox(height: 4),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(2),
-                          child: LinearProgressIndicator(
-                            value: prov.queuePosition / prov.queueTotal,
-                            backgroundColor: const Color(0xFF2A2A2A),
-                            valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF7C3AED)),
-                            minHeight: 3,
+                        if (prov.queueTotal > 0) ...[
+                          const SizedBox(height: 4),
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(2),
+                            child: LinearProgressIndicator(
+                              value: prov.queuePosition / prov.queueTotal,
+                              backgroundColor: const Color(0xFF2A2A2A),
+                              valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF7C3AED)),
+                              minHeight: 3,
+                            ),
                           ),
-                        ),
+                        ],
                       ],
                     ),
                   ),
                   const SizedBox(width: 8),
                   GestureDetector(
-                    onTap: () => prov.cancelQueue(),
+                    onTap: () => prov.cancel(),
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                       decoration: BoxDecoration(
@@ -475,7 +453,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   textInputAction: TextInputAction.send,
                   onSubmitted: (_) => _send(),
                   decoration: InputDecoration(
-                    hintText: _batchMode ? 'Type a prompt to add to queue...' : 'Send a message...',
+                    hintText: 'Send a message…',
                     hintStyle: TextStyle(color: Colors.grey[700]),
                     filled: true,
                     fillColor: const Color(0xFF1A1A2E),
@@ -484,29 +462,6 @@ class _ChatScreenState extends State<ChatScreen> {
                       borderSide: BorderSide.none,
                     ),
                     contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              // Batch toggle chip
-              GestureDetector(
-                onTap: () => setState(() => _batchMode = !_batchMode),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: _batchMode ? const Color(0xFF7C3AED).withValues(alpha: 0.25) : const Color(0xFF1A1A2E),
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: _batchMode ? const Color(0xFF7C3AED) : const Color(0xFF2A2A2A),
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.list_alt, size: 14, color: _batchMode ? const Color(0xFFA78BFA) : Colors.grey),
-                      const SizedBox(width: 3),
-                      Text('Batch', style: TextStyle(fontSize: 11, color: _batchMode ? const Color(0xFFA78BFA) : Colors.grey[600])),
-                    ],
                   ),
                 ),
               ),
@@ -527,11 +482,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               width: 20,
                               child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                             )
-                          : Icon(
-                              _batchMode ? Icons.queue_play_next : Icons.send_rounded,
-                              color: Colors.white,
-                              size: 20,
-                            ),
+                          : const Icon(Icons.send_rounded, color: Colors.white, size: 20),
                     ),
                   ),
                 ),
