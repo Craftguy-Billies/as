@@ -210,8 +210,8 @@ async def create_prompt(req: PromptRequest):
             )
             await db.commit()
     except Exception as e:
-        logger.error(f"Failed to create prompt: {e}")
-        raise HTTPException(status_code=500, detail="Failed to create task. Please try again.")
+        logger.error(f"Failed to create prompt: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
     logger.info(f"Task {task_id} created: repo={req.repo}, mode={req.mode}")
     return TaskResponse(

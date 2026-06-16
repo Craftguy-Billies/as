@@ -100,7 +100,9 @@ class ChatProvider extends ChangeNotifier {
         await _saveToCache();
         notifyListeners();
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('ChatProvider: server message merge failed: $e');
+    }
 
     // Resume batch polling if a batch is running on the server
     try {
@@ -118,7 +120,9 @@ class ChatProvider extends ChangeNotifier {
           mode: state?['mode']?.toString() ?? 'code',
         );
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('ChatProvider: batch resume check failed: $e');
+    }
 
     // Safety: clear stuck loading from a previous crash
     if (_loading && _loadingSince != null &&
@@ -302,7 +306,9 @@ class ChatProvider extends ChangeNotifier {
     // Delete from server first, then clear local cache
     try {
       await _api.deleteChat();
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('ChatProvider.clearChat: server delete failed: $e');
+    }
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_cacheKey);
   }

@@ -72,7 +72,7 @@ class ApiService {
     if (resp.statusCode == 201) {
       return Task.fromJson(json.decode(resp.body));
     }
-    throw Exception('Failed to create prompt: ${resp.statusCode} ${resp.body}');
+    throw Exception(_parseError(resp.statusCode, resp.body));
   }
 
   Future<List<Task>> listTasks({String? status, int limit = 50}) async {
@@ -86,7 +86,7 @@ class ApiService {
           .map((t) => Task.fromJson(t as Map<String, dynamic>))
           .toList();
     }
-    throw Exception('Failed to list tasks: ${resp.statusCode}');
+    throw Exception(_parseError(resp.statusCode, resp.body));
   }
 
   Future<Task> getTask(String id) async {
@@ -95,14 +95,14 @@ class ApiService {
     if (resp.statusCode == 200) {
       return Task.fromJson(json.decode(resp.body));
     }
-    throw Exception('Task not found');
+    throw Exception(_parseError(resp.statusCode, resp.body));
   }
 
   Future<void> deleteTask(String id) async {
     final resp = await http.delete(Uri.parse('$_url/api/tasks/$id'))
         .timeout(const Duration(seconds: 8));
     if (resp.statusCode != 200) {
-      throw Exception('Failed to delete task');
+      throw Exception(_parseError(resp.statusCode, resp.body));
     }
   }
 
@@ -110,7 +110,7 @@ class ApiService {
     final resp = await http.post(Uri.parse('$_url/api/tasks/$id/retry'))
         .timeout(const Duration(seconds: 8));
     if (resp.statusCode != 200) {
-      throw Exception('Failed to retry task');
+      throw Exception(_parseError(resp.statusCode, resp.body));
     }
   }
 
@@ -119,7 +119,7 @@ class ApiService {
       Uri.parse('$_url/api/tasks').replace(queryParameters: {'status': status}),
     ).timeout(const Duration(seconds: 8));
     if (resp.statusCode != 200) {
-      throw Exception('Failed to clear history');
+      throw Exception(_parseError(resp.statusCode, resp.body));
     }
   }
 
@@ -144,8 +144,7 @@ class ApiService {
         )
         .timeout(const Duration(seconds: 310));
     if (resp.statusCode != 200) {
-      final detail = _tryParseError(resp.body);
-      throw Exception(detail ?? 'Chat failed (${resp.statusCode})');
+      throw Exception(_parseError(resp.statusCode, resp.body));
     }
     return json.decode(resp.body) as Map<String, dynamic>;
   }
@@ -171,8 +170,7 @@ class ApiService {
         )
         .timeout(const Duration(seconds: 10));
     if (resp.statusCode != 200) {
-      final detail = _tryParseError(resp.body);
-      throw Exception(detail ?? 'Batch failed (${resp.statusCode})');
+      throw Exception(_parseError(resp.statusCode, resp.body));
     }
     return json.decode(resp.body) as Map<String, dynamic>;
   }
@@ -196,7 +194,7 @@ class ApiService {
         .get(Uri.parse('$_url/api/chat'))
         .timeout(const Duration(seconds: 8));
     if (resp.statusCode != 200) {
-      throw Exception('Failed to load chat history');
+      throw Exception(_parseError(resp.statusCode, resp.body));
     }
     return json.decode(resp.body) as Map<String, dynamic>;
   }
@@ -206,8 +204,23 @@ class ApiService {
         .delete(Uri.parse('$_url/api/chat'))
         .timeout(const Duration(seconds: 8));
     if (resp.statusCode != 200) {
-      throw Exception('Failed to clear chat: ${resp.statusCode}');
+      throw Exception(_parseError(resp.statusCode, resp.body));
     }
+  }
+
+  /// Extract a human-readable error from an API response body.
+  /// FastAPI returns {"detail": "..."} for validation/HTTP errors.
+  String _parseError(int statusCode, String body) {
+    try {
+      final d = json.decode(body) as Map<String, dynamic>;
+      final detail = d['detail']?.toString();
+      if (detail != null && detail.isNotEmpty) return detail;
+    } catch (_) {}
+    // Fallback: return first 200 chars of body, or just the status code
+    final clean = body.trim();
+    if (clean.isNotEmpty && clean.length <= 200) return '$statusCode: $clean';
+    if (clean.isNotEmpty) return '$statusCode: ${clean.substring(0, 200)}...';
+    return 'HTTP $statusCode';
   }
 
   String? _tryParseError(String body) {
@@ -236,7 +249,7 @@ class ApiService {
     if (resp.statusCode == 200) {
       return json.decode(resp.body) as Map<String, dynamic>;
     }
-    throw Exception('Failed to get events: ${resp.statusCode}');
+    throw Exception(_parseError(resp.statusCode, resp.body));
   }
 
   Future<List<AgentEvent>> fetchEvents(
@@ -263,7 +276,7 @@ class ApiService {
       body: json.encode({'token': token}),
     ).timeout(const Duration(seconds: 8));
     if (resp.statusCode != 200) {
-      throw Exception('Failed to register push token: ${resp.statusCode}');
+      throw Exception(_parseError(resp.statusCode, resp.body));
     }
   }
 
@@ -282,7 +295,7 @@ class ApiService {
       }),
     ).timeout(const Duration(seconds: 8));
     if (resp.statusCode != 200) {
-      throw Exception('Failed to update LLM config: ${resp.statusCode}');
+      throw Exception(_parseError(resp.statusCode, resp.body));
     }
   }
 
@@ -305,7 +318,7 @@ class ApiService {
       body: json.encode({'name': name, 'email': email}),
     ).timeout(const Duration(seconds: 8));
     if (resp.statusCode != 200) {
-      throw Exception('Failed to update git config: ${resp.statusCode}');
+      throw Exception(_parseError(resp.statusCode, resp.body));
     }
   }
 

@@ -69,8 +69,8 @@ def _restore_from_db() -> None:
             logger.info("Restored chat session: conv=%s repo=%s mode=%s msgs=%d batch=%d/%d",
                          _conversation_id, _conversation_repo, _conversation_mode, len(_messages),
                          _batch_position, _batch_total)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to restore chat session from DB: %s", e)
 
 def _persist_to_db() -> None:
     if _DB is None:
@@ -102,8 +102,8 @@ def _persist_to_db() -> None:
                 "CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT)"
             )
             _DB.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to persist chat session (kv_store missing): %s", e)
 
 _restore_from_db()
 
@@ -197,7 +197,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                 _persist_to_db()
         return {"error": f"Cloud API error: {e.response.status_code}"}
     except Exception as e:
-        logger.error("Chat error (keeping conversation): %s", e)
+        logger.error("Chat error (keeping conversation): %s", e, exc_info=True)
         return {"error": str(e)}
 
     # Phase 1c: Update state + save user message under lock
@@ -218,7 +218,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
     try:
         response = _wait_for_response()
     except Exception as e:
-        logger.error("Wait for response crashed: %s", e)
+        logger.error("Wait for response crashed: %s", e, exc_info=True)
         response = None
 
     # Phase 3: Save result under lock
