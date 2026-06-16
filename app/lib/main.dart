@@ -97,11 +97,8 @@ class _VibeCodeAppState extends State<VibeCodeApp> {
             ),
           ),
         ),
-        initialRoute: widget.prefs.hasServerUrl ? '/' : '/setup',
+        initialRoute: '/',
         onGenerateRoute: (settings) {
-          if (settings.name == '/setup') {
-            return MaterialPageRoute(builder: (_) => const SetupScreen());
-          }
           final m = RegExp(r'^/tasks/(.+)$').firstMatch(settings.name ?? '');
           if (m != null) {
             return MaterialPageRoute(builder: (_) => LiveFeedScreen(taskId: m.group(1)!));
