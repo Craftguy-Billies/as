@@ -110,6 +110,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
     final branch = _branchCtrl.text.trim().isEmpty ? 'main' : _branchCtrl.text.trim();
 
+    debugPrint('ChatScreen._send: batchMode=$_batchMode mode=$_mode repo=$repo');
     if (_batchMode) {
       // Send as single prompt to cloud queue (append if batch running)
       prov.enqueueBatch([text], repo: repo, branch: branch, mode: _mode);

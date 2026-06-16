@@ -112,12 +112,14 @@ class ChatProvider extends ChangeNotifier {
       final batch = state?['batch'] as Map<String, dynamic>?;
       final isRunning = batch?['running'] == true;
       final total = (batch?['total'] as int?) ?? 0;
+      debugPrint('ChatProvider.loadFromCache: batch state running=$isRunning total=$total position=${batch?['position']}');
       // Only resume if there are actual prompts queued (guard against stale state)
       if (isRunning && total > 0) {
         _queuePosition = (batch?['position'] as int?) ?? 0;
         _queueTotal = total;
         _loading = true;
         _loadingSince = DateTime.now();
+        debugPrint('ChatProvider.loadFromCache: RESUME batch poll total=$total');
         notifyListeners();
         _pollBatchProgress(
           repo: state?['repo']?.toString() ?? '',
@@ -146,8 +148,12 @@ class ChatProvider extends ChangeNotifier {
     String mode = 'code',
   }) async {
     final trimmed = prompt.trim();
-    if (trimmed.isEmpty || _loading) return;
+    if (trimmed.isEmpty || _loading) {
+      debugPrint('ChatProvider.sendMessage: blocked (empty=$trimmed.isEmpty loading=$_loading)');
+      return;
+    }
 
+    debugPrint('ChatProvider.sendMessage: START prompt="..." repo=$repo mode=$mode');
     _loading = true;
     _loadingSince = DateTime.now();
     _error = null;
@@ -215,12 +221,14 @@ class ChatProvider extends ChangeNotifier {
       }
       await _saveToCache();
     } catch (e) {
+      debugPrint('ChatProvider.sendMessage: ERROR ${ApiService.friendlyError(e)}');
       _error = ApiService.friendlyError(e);
     } finally {
       _livePollTimer?.cancel();
       _loading = false;
       _loadingSince = null;
       _status = '';
+      debugPrint('ChatProvider.sendMessage: DONE loading=$_loading error=$_error');
       notifyListeners();
     }
   }
@@ -235,6 +243,7 @@ class ChatProvider extends ChangeNotifier {
     final cleaned = prompts.map((p) => p.trim()).where((p) => p.isNotEmpty).toList();
     if (cleaned.isEmpty) return;
 
+    debugPrint('ChatProvider.enqueueBatch: START prompts=${cleaned.length} repo=$repo mode=$mode');
     // Don't block on _loading — batch appends should always go through
     _error = null;
     notifyListeners();
@@ -246,6 +255,7 @@ class ChatProvider extends ChangeNotifier {
         branch: branch,
         mode: mode,
       );
+      debugPrint('ChatProvider.enqueueBatch: result=$result');
       _queueTotal = (result['total'] as int?) ?? cleaned.length;
       // Don't reset position — polling already tracks it
       if (result['status'] == 'queued') {
@@ -253,11 +263,21 @@ class ChatProvider extends ChangeNotifier {
         _batchPollFailures = 0;
         _loading = true;
         _loadingSince = DateTime.now();
+        debugPrint('ChatProvider.enqueueBatch: queued, starting poll (total=$_queueTotal)');
         notifyListeners();
         _pollBatchProgress(repo: repo, branch: branch, mode: mode);
+      } else {
+        // Server returned 200 but no 'queued' status — reset totals to avoid phantom progress bar
+        debugPrint('ChatProvider.enqueueBatch: unexpected status=${result['status']}, resetting queue');
+        _queueTotal = 0;
+        _queuePosition = 0;
+        _error = (result['error']?.toString()) ?? 'Batch not queued by server';
+        notifyListeners();
       }
     } catch (e) {
+      debugPrint('ChatProvider.enqueueBatch: ERROR ${ApiService.friendlyError(e)}');
       _error = ApiService.friendlyError(e);
+      _queueTotal = 0;  // reset to avoid phantom progress bar
       _loading = false;
       _loadingSince = null;
       notifyListeners();
