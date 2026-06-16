@@ -149,7 +149,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
     """Send a chat message and wait for the agent response (synchronous).
 
     Creates a new conversation when repo or mode changes.
-    Lock is released during _wait_for_response() so get_state() polling works.
+    HTTP calls (create/send) happen OUTSIDE _lock so get_state() polling is never blocked.
     """
     global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index
 
@@ -158,52 +158,61 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
 
     logger.info("Chat send: prompt=%.80s... repo=%s mode=%s", prompt, repo, mode)
 
-    # Phase 1: Quick setup under lock (create/send + save user msg)
+    # Phase 1a: Quick check under lock — do we need a new conversation?
+    with _lock:
+        ctx_changed = (
+            _conversation_id is not None
+            and (repo != _conversation_repo or mode != _conversation_mode)
+        )
+        if ctx_changed:
+            logger.info("Context changed: repo %s→%s mode %s→%s — starting new conversation",
+                        _conversation_repo, repo, _conversation_mode, mode)
+            _conversation_id = None
+            _last_event_index = 0
+        need_new_conv = _conversation_id is None
+        if not need_new_conv:
+            current_conv_id = _conversation_id  # snapshot to use outside lock
+
+    # Phase 1b: HTTP calls OUTSIDE lock (create may poll start-tasks for up to 150s)
     try:
-        with _lock:
-            ctx_changed = (
-                _conversation_id is not None
-                and (repo != _conversation_repo or mode != _conversation_mode)
+        if need_new_conv:
+            new_conv_id = _create_conversation(prompt, repo, branch, mode)
+            logger.info("Created conversation %s (repo=%s mode=%s)",
+                        new_conv_id, repo, mode)
+        else:
+            resp = httpx.post(
+                f"{CLOUD_API_URL}/api/v1/conversation/{current_conv_id}/events/send",
+                headers=_headers(),
+                json={"message": prompt},
+                timeout=30,
             )
-            if ctx_changed:
-                logger.info("Context changed: repo %s→%s mode %s→%s — starting new conversation",
-                            _conversation_repo, repo, _conversation_mode, mode)
-                _conversation_id = None
-                _last_event_index = 0
-
-            if _conversation_id is None:
-                _conversation_id = _create_conversation(prompt, repo, branch, mode)
-                _conversation_repo = repo
-                _conversation_mode = mode
-                _last_event_index = 0
-                logger.info("Created conversation %s (repo=%s mode=%s)",
-                            _conversation_id, repo, mode)
-            else:
-                resp = httpx.post(
-                    f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/send",
-                    headers=_headers(),
-                    json={"message": prompt},
-                    timeout=30,
-                )
-                resp.raise_for_status()
-                logger.info("Sent to conversation %s", _conversation_id)
-
-            _messages.append({
-                "role": "user",
-                "content": prompt,
-                "timestamp": int(time.time() * 1000),
-            })
-            _persist_to_db()
+            resp.raise_for_status()
+            logger.info("Sent to conversation %s", current_conv_id)
     except httpx.HTTPStatusError as e:
         logger.error("HTTP error: %s %s", e.response.status_code, e.response.text[:200])
         if e.response.status_code in (404, 410):
-            _conversation_id = None
-            _last_event_index = 0
-            _persist_to_db()
+            with _lock:
+                _conversation_id = None
+                _last_event_index = 0
+                _persist_to_db()
         return {"error": f"Cloud API error: {e.response.status_code}"}
     except Exception as e:
         logger.error("Chat error (keeping conversation): %s", e)
         return {"error": str(e)}
+
+    # Phase 1c: Update state + save user message under lock
+    with _lock:
+        if need_new_conv:
+            _conversation_id = new_conv_id
+            _conversation_repo = repo
+            _conversation_mode = mode
+            _last_event_index = 0
+        _messages.append({
+            "role": "user",
+            "content": prompt,
+            "timestamp": int(time.time() * 1000),
+        })
+        _persist_to_db()
 
     # Phase 2: Long wait — NO LOCK, get_state() can read events live
     try:
