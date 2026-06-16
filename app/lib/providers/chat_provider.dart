@@ -222,7 +222,9 @@ class ChatProvider extends ChangeNotifier {
           if (wasLoading && !_loading) {
             _loadingSince = null;
             _pollTimer?.cancel();
-            debugPrint('ChatProvider.poll: DONE');
+            _queuePosition = 0;
+            _queueTotal = 0;  // hide progress bar
+            debugPrint('ChatProvider.poll: DONE pos=$_queuePosition total=$_queueTotal');
           }
         }
 

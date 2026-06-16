@@ -349,6 +349,13 @@ def _process_batch_worker() -> None:
             time.sleep(1)  # brief pause between prompts
     except BaseException as e:
         logger.error("Batch worker FATAL crash: %s", e, exc_info=True)
+        with _lock:
+            _messages.append({
+                "role": "event",
+                "content": f"❌ Worker crashed\nType: {type(e).__name__}\nMessage: {e}",
+                "kind": "ErrorEvent",
+                "timestamp": int(time.time() * 1000),
+            })
     finally:
         with _lock:
             _batch_running = False
