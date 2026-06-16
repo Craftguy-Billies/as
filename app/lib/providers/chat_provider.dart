@@ -55,6 +55,8 @@ class ChatProvider extends ChangeNotifier {
   int get queuePosition => _queuePosition;
   int get queueTotal => _queueTotal;
   bool get isProcessing => _queueTotal > 0;
+  String serverRepo = '';
+  String serverMode = 'code';
 
   // -- Init: restore from cache + server, resume batch if running --
   Future<void> loadFromCache() async {
