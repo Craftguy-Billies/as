@@ -198,6 +198,7 @@ class ChatProvider extends ChangeNotifier {
                 ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
                 .toList() ??
             [];
+        debugPrint('ChatProvider.poll: serverMsgs=${serverMsgs.length} localMsgs=${_messages.length}');
         if (serverMsgs.isNotEmpty) {
           final merged = <ChatMessage>[];
           final seen = <String>{};
@@ -206,6 +207,7 @@ class ChatProvider extends ChangeNotifier {
             if (seen.add(key)) merged.add(m);
           }
           if (merged.length != _messages.length) {
+            debugPrint('ChatProvider.poll: merged ${_messages.length}→${merged.length} messages');
             _messages = merged;
             await _saveToCache();
           }
@@ -215,6 +217,7 @@ class ChatProvider extends ChangeNotifier {
         final batch = state['batch'] as Map<String, dynamic>?;
         if (batch != null) {
           final wasLoading = _loading;
+          debugPrint('ChatProvider.poll: batch running=${batch['running']} pos=${batch['position']} total=${batch['total']} wasLoading=$wasLoading');
           _loading = batch['running'] == true;
           _queuePosition = (batch['position'] as int?) ?? _queuePosition;
           _queueTotal = (batch['total'] as int?) ?? _queueTotal;

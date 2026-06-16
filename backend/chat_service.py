@@ -359,6 +359,8 @@ def _process_batch_worker() -> None:
     finally:
         with _lock:
             _batch_running = False
+            _batch_position = 0
+            _batch_total = 0
         _persist_to_db()
 
 
