@@ -591,7 +591,8 @@ class _ChatBubble extends StatelessWidget {
     // Compact inline event display — tool calls, observations, etc.
     Color accent;
     IconData icon;
-    if (msg.content.startsWith('💻')) { accent = const Color(0xFF00FF88); icon = Icons.terminal; }
+    if (msg.content.startsWith('💬')) { accent = Colors.white70; icon = Icons.chat_bubble_outline; }
+    else if (msg.content.startsWith('💻')) { accent = const Color(0xFF00FF88); icon = Icons.terminal; }
     else if (msg.content.startsWith('📝')) { accent = const Color(0xFFF59E0B); icon = Icons.edit; }
     else if (msg.content.startsWith('🔍')) { accent = const Color(0xFF3B82F6); icon = Icons.search; }
     else if (msg.content.startsWith('🌐')) { accent = const Color(0xFF06B6D4); icon = Icons.public; }

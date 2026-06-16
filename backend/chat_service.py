@@ -533,7 +533,7 @@ def _wait_for_response(timeout: int = 300) -> str | None:
 
         all_events = events_data if isinstance(events_data, list) else events_data.get("items", [])
 
-        # Collect ALL events for live display (tool calls, observations, messages)
+        # Stream EVERYTHING the agent does as live events (text, tools, observations)
         for evt in all_events[_last_event_index:]:
             kind = evt.get("kind", "")
             source = evt.get("source", "")
@@ -541,12 +541,23 @@ def _wait_for_response(timeout: int = 300) -> str | None:
 
             if kind == "MessageEvent" and source in ("agent", "assistant"):
                 msg = evt.get("message", "")
+                text = ""
                 if isinstance(msg, str) and msg.strip():
-                    all_new_msgs.append(msg.strip())
+                    text = msg.strip()
                 elif isinstance(msg, dict) and msg.get("content"):
-                    all_new_msgs.append(str(msg["content"]).strip())
+                    text = str(msg["content"]).strip()
+                if text:
+                    all_new_msgs.append(text)
+                    # Stream agent text as live event so Flutter sees it in real-time
+                    with _lock:
+                        _messages.append({
+                            "role": "event",
+                            "content": f"💬 {text}",
+                            "kind": kind,
+                            "timestamp": int(time.time() * 1000),
+                        })
 
-            # Stream tool calls and observations as live events in chat
+            # Stream tool calls, observations, errors as live events
             event_preview = _format_event_preview(evt)
             if event_preview:
                 with _lock:
