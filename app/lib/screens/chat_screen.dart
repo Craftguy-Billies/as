@@ -39,7 +39,11 @@ class _ChatScreenState extends State<ChatScreen> {
       final prefs = await _loadPrefs();
       _repoCtrl.text = prefs['repo'] ?? '';
       _branchCtrl.text = prefs['branch'] ?? 'main';
-      setState(() => _mode = prefs['mode'] ?? 'code');
+      setState(() {
+        _mode = prefs['mode'] ?? 'code';
+        // Auto-show repo bar if a repo was previously configured
+        if ((prefs['repo'] ?? '').isNotEmpty) _showRepoBar = true;
+      });
     } catch (_) {}
     // Load model from server
     try {

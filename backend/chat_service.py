@@ -44,6 +44,7 @@ _batch_repo: str = ""
 _batch_branch: str = "main"
 _batch_mode: str = "code"
 _batch_running: bool = False
+_batch_cancelled: bool = False
 
 # -- Restore state from DB on module load --
 def _restore_from_db() -> None:

@@ -97,7 +97,7 @@ class _VibeCodeAppState extends State<VibeCodeApp> {
             ),
           ),
         ),
-        initialRoute: '/',
+        initialRoute: prefs.hasServerUrl ? '/' : '/setup',
         onGenerateRoute: (settings) {
           if (settings.name == '/setup') {
             return MaterialPageRoute(builder: (_) => const SetupScreen());
