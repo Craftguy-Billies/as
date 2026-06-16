@@ -36,6 +36,7 @@ class ChatProvider extends ChangeNotifier {
   bool _loading = false;
   String? _error;
   DateTime? _loadingSince;  // safety: detect stuck loading
+  String _status = '';      // live status: "Connecting...", "Agent is working..."
 
   // Batch queue
   final List<String> _pendingPrompts = [];
@@ -48,6 +49,7 @@ class ChatProvider extends ChangeNotifier {
   List<ChatMessage> get messages => List.unmodifiable(_messages);
   bool get loading => _loading;
   String? get error => _error;
+  String get status => _status;
 
   // Queue state
   List<String> get pendingPrompts => List.unmodifiable(_pendingPrompts);
@@ -108,9 +110,12 @@ class ChatProvider extends ChangeNotifier {
     try {
       final state = await _api.getChat();
       final batch = state?['batch'] as Map<String, dynamic>?;
-      if (batch != null && batch['running'] == true) {
-        _queuePosition = (batch['position'] as int?) ?? 0;
-        _queueTotal = (batch['total'] as int?) ?? 0;
+      final isRunning = batch?['running'] == true;
+      final total = (batch?['total'] as int?) ?? 0;
+      // Only resume if there are actual prompts queued (guard against stale state)
+      if (isRunning && total > 0) {
+        _queuePosition = (batch?['position'] as int?) ?? 0;
+        _queueTotal = total;
         _loading = true;
         _loadingSince = DateTime.now();
         notifyListeners();
@@ -132,30 +137,70 @@ class ChatProvider extends ChangeNotifier {
     }
   }
 
+  Timer? _livePollTimer;
+
   Future<void> sendMessage(
     String prompt, {
     String repo = '',
     String branch = 'main',
     String mode = 'code',
   }) async {
-    if (prompt.trim().isEmpty || _loading) return;
+    final trimmed = prompt.trim();
+    if (trimmed.isEmpty || _loading) return;
 
     _loading = true;
     _loadingSince = DateTime.now();
     _error = null;
+    _status = 'Connecting to agent…';
 
     final userMsg = ChatMessage(
       role: 'user',
-      content: prompt.trim(),
+      content: trimmed,
       timestamp: DateTime.now().millisecondsSinceEpoch,
     );
     _messages.add(userMsg);
-    await _saveToCache(); // persist user message immediately (survives crash)
+    await _saveToCache();
     notifyListeners();
+
+    // -- Live polling: merge server events in real-time while POST is in-flight --
+    _livePollTimer?.cancel();
+    final _seen = <String>{};
+    for (final m in _messages) {
+      _seen.add('${m.role}:${m.content}');
+    }
+    _livePollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      if (!_loading) {
+        _livePollTimer?.cancel();
+        return;
+      }
+      try {
+        final state = await _api.getChat();
+        if (state == null) return;
+        final serverMsgs = (state['messages'] as List?)
+                ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
+                .toList() ??
+            [];
+        var changed = false;
+        for (final m in serverMsgs) {
+          final key = '${m.role}:${m.content}';
+          if (_seen.add(key)) {
+            _messages.add(m);
+            changed = true;
+          }
+        }
+        if (changed) {
+          _status = 'Agent is working…';
+          await _saveToCache();
+          notifyListeners();
+        }
+      } catch (_) {
+        // Polling failures are non-fatal — POST is the source of truth
+      }
+    });
 
     try {
       final data = await _api.sendChatMessage(
-        prompt.trim(),
+        trimmed,
         repo: repo,
         branch: branch,
         mode: mode,
@@ -168,12 +213,14 @@ class ChatProvider extends ChangeNotifier {
           timestamp: DateTime.now().millisecondsSinceEpoch,
         ));
       }
-      await _saveToCache(); // persist full conversation after success
+      await _saveToCache();
     } catch (e) {
       _error = ApiService.friendlyError(e);
     } finally {
+      _livePollTimer?.cancel();
       _loading = false;
       _loadingSince = null;
+      _status = '';
       notifyListeners();
     }
   }
@@ -281,8 +328,10 @@ class ChatProvider extends ChangeNotifier {
   }
 
   void cancelQueue() {
+    _livePollTimer?.cancel();
     _batchPollTimer?.cancel();
     _api.cancelChatBatch(); // fire-and-forget
+    _status = '';
     _loading = false;
     _loadingSince = null;
     _queuePosition = 0;
@@ -292,15 +341,20 @@ class ChatProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _livePollTimer?.cancel();
     _batchPollTimer?.cancel();
     super.dispose();
   }
 
   Future<void> clearChat() async {
+    _livePollTimer?.cancel();
     _messages.clear();
     _error = null;
+    _status = '';
     _loading = false;
     _loadingSince = null;
+    _queuePosition = 0;
+    _queueTotal = 0;
     notifyListeners();
 
     // Delete from server first, then clear local cache

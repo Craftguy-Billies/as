@@ -202,7 +202,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                         itemCount: msgs.length + (prov.loading ? 1 : 0),
                         itemBuilder: (_, i) {
-                          if (i >= msgs.length) return _buildTyping();
+                          if (i >= msgs.length) return _buildTyping(prov.status);
                           return _ChatBubble(msg: msgs[i]);
                         },
                       ))
@@ -378,12 +378,30 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _buildTyping() {
-    return const Padding(
-      padding: EdgeInsets.symmetric(vertical: 12),
+  Widget _buildTyping(String status) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
       child: Align(
         alignment: Alignment.centerLeft,
-        child: _TypingIndicator(),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const _TypingIndicator(),
+            if (status.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 6, left: 8),
+                child: Text(
+                  status,
+                  style: const TextStyle(
+                    color: Color(0xFF888899),
+                    fontSize: 12,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
