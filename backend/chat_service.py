@@ -576,25 +576,42 @@ def _wait_for_response(timeout: int = 300) -> str | None:
             break
         elif status in ("failed", "error", "stopped"):
             err_detail = items[0].get("error_message", "unknown error")
-            logger.warning("Conversation %s: %s", status, err_detail)
+            err_type = items[0].get("error_type", "")
+            logger.warning("Conversation %s: type=%s detail=%s", status, err_type, err_detail)
+            # Stream the failure as a visible event
+            parts = [f"❌ Conversation {status}"]
+            if err_type:
+                parts.append(f"Type: {err_type}")
+            parts.append(f"Message: {err_detail}")
+            with _lock:
+                _messages.append({
+                    "role": "event",
+                    "content": "\n".join(parts),
+                    "kind": "ErrorEvent",
+                    "timestamp": int(time.time() * 1000),
+                })
             return None
 
     if not all_new_msgs:
         logger.warning("No assistant messages found after %.0fs", time.time() - start)
+        with _lock:
+            _messages.append({
+                "role": "event",
+                "content": "⚠️ No response from agent (timeout or empty result)",
+                "kind": "SystemEvent",
+                "timestamp": int(time.time() * 1000),
+            })
 
     return "\n\n".join(all_new_msgs) if all_new_msgs else None
 
 
 def _format_event_preview(evt: dict) -> str | None:
-    """Format a Cloud API event as a concise preview string for chat display.
-    
-    Returns None for events that shouldn't be shown (e.g., user messages, empty actions).
-    """
+    """Format a Cloud API event for chat display — NO TRUNCATION, pass raw details."""
     kind = evt.get("kind", "")
     tool = evt.get("tool_name", "")
     source = evt.get("source", "")
 
-    # Skip user messages and agent text messages (handled separately)
+    # Skip user messages and agent text messages (handled separately in _wait_for_response)
     if kind == "MessageEvent":
         return None
 
@@ -609,7 +626,7 @@ def _format_event_preview(evt: dict) -> str | None:
         if tool in ("bash", "terminal", "execute_bash_command"):
             cmd = action.get("command", "") or action.get("content", "")
             if cmd:
-                return f"💻 $ {str(cmd)[:200]}"
+                return f"💻 $ {cmd}"
         elif tool in ("file_editor", "str_replace_editor"):
             path = action.get("path", "") or action.get("file", "")
             if path:
@@ -617,13 +634,14 @@ def _format_event_preview(evt: dict) -> str | None:
         elif tool in ("tavily_search", "tavily_tavily_search"):
             q = action.get("query", "") or action.get("content", "")
             if q:
-                return f"🔍 Searching: {str(q)[:120]}"
+                return f"🔍 Searching: {q}"
         elif tool == "browser_navigate":
             url = action.get("url", "")
             if url:
                 return f"🌐 Navigate: {url}"
         else:
-            return f"🔧 {tool}"
+            # Unknown tool — show tool name + first action key for visibility
+            return f"🔧 {tool}: {str(action)[:120]}"
 
     elif kind == "ObservationEvent":
         obs = evt.get("observation") or {}
@@ -631,38 +649,70 @@ def _format_event_preview(evt: dict) -> str | None:
             try:
                 obs = json.loads(obs)
             except Exception:
-                obs = {"output": str(obs)[:200]}
+                obs = {"output": str(obs)}
 
         if tool in ("bash", "terminal", "execute_bash_command"):
             stdout = obs.get("stdout", "") or obs.get("output", "") or obs.get("content", "")
+            stderr = obs.get("stderr", "")
+            exit_code = obs.get("exit_code")
+            parts = []
             if stdout:
-                return f"📤 {str(stdout)[:300]}"
+                parts.append(f"📤 stdout:\n{stdout}")
+            if stderr:
+                parts.append(f"📤 stderr:\n{stderr}")
+            if exit_code is not None and exit_code != 0:
+                parts.append(f"📤 exit_code={exit_code}")
+            if parts:
+                return "\n".join(parts)
         elif tool in ("file_editor", "str_replace_editor"):
             diff = obs.get("diff", "")
             if diff:
-                return f"📄 Diff: {str(diff)[:300]}"
+                return f"📄 Diff:\n{diff}"
             content = obs.get("content", "")
             if content:
-                return f"📄 {str(content)[:300]}"
+                return f"📄 {content}"
             path = obs.get("path", "")
             if path:
                 return f"📄 Saved: {path}"
         elif tool in ("tavily_search", "tavily_tavily_search"):
             results = obs.get("results", [])
             if isinstance(results, list) and results:
-                return f"📊 {len(results)} search results"
+                lines = [f"📊 {len(results)} search results:"]
+                for r in results[:5]:
+                    title = r.get("title", "")
+                    url = r.get("url", "")
+                    if title:
+                        lines.append(f"  • {title}")
+                    if url:
+                        lines.append(f"    {url}")
+                return "\n".join(lines)
         elif tool == "browser_get_content":
             text = obs.get("text", "") or obs.get("content", "")
             if text:
                 return f"🌐 Page content ({len(str(text))} chars)"
         else:
-            snippet = str(obs)[:200]
-            if snippet.strip():
-                return f"→ {snippet}"
+            # Unknown observation — dump raw keys
+            return f"→ {tool}: {str(obs)}"
 
     elif kind == "ErrorEvent":
-        msg = evt.get("message", "") or str(evt.get("observation", ""))
+        msg = evt.get("message", "")
+        obs = evt.get("observation", "")
+        error_type = evt.get("error_type", "") or evt.get("type", "")
+        parts = [f"❌ ERROR"]
+        if error_type:
+            parts.append(f"Type: {error_type}")
         if msg:
-            return f"❌ {str(msg)[:300]}"
+            parts.append(f"Message: {msg}")
+        if obs:
+            obs_str = str(obs)
+            if obs_str.strip():
+                parts.append(f"Details: {obs_str}")
+        # Also dump any other useful fields
+        for key in ("traceback", "stack_trace", "cause"):
+            val = evt.get(key, "")
+            if val:
+                parts.append(f"{key}: {val}")
+        return "\n".join(parts)
 
-    return None
+    # Catch-all: dump raw event (with emoji prefix for visibility)
+    return f"📋 [{kind}] {json.dumps(evt, default=str)}"

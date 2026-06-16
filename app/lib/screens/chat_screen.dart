@@ -599,26 +599,34 @@ class _ChatBubble extends StatelessWidget {
     else if (msg.content.startsWith('📤')) { accent = Colors.grey; icon = Icons.output; }
     else if (msg.content.startsWith('📄')) { accent = const Color(0xFF10B981); icon = Icons.description; }
     else if (msg.content.startsWith('📊')) { accent = const Color(0xFF8B5CF6); icon = Icons.bar_chart; }
-    else if (msg.content.startsWith('❌')) { accent = Colors.red; icon = Icons.error; }
+    else if (msg.content.startsWith('❌')) { accent = Colors.redAccent; icon = Icons.error; }
+    else if (msg.content.startsWith('⚠')) { accent = Colors.orangeAccent; icon = Icons.warning_amber; }
+    else if (msg.content.startsWith('📋')) { accent = Colors.grey; icon = Icons.code; }
     else { accent = Colors.grey; icon = Icons.settings; }
 
+    // Error/warning events get full visibility — no line limit
+    final isError = msg.content.startsWith('❌') || msg.content.startsWith('⚠');
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 16),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 12, color: accent),
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Icon(icon, size: 12, color: accent),
+          ),
           const SizedBox(width: 6),
           Flexible(
             child: Text(
               msg.content,
               style: TextStyle(
-                color: accent.withAlpha(200),
+                color: accent.withAlpha(isError ? 255 : 200),
                 fontSize: 11,
                 fontFamily: 'monospace',
                 height: 1.3,
               ),
-              maxLines: 4,
-              overflow: TextOverflow.ellipsis,
+              maxLines: isError ? 50 : 8,
+              overflow: isError ? TextOverflow.visible : TextOverflow.ellipsis,
             ),
           ),
         ],
