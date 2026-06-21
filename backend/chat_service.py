@@ -173,6 +173,7 @@ def _headers() -> dict:
 def reset() -> None:
     """Clear the current chat session AND cancel any running batch."""
     global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_prompt_branches, _batch_position, _batch_total, _batch_skip_prompt
+    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key, _seen_event_ids
     with _lock:
         # Cancel running batch
         if _batch_running:
@@ -263,6 +264,8 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
 
     if not CLOUD_API_KEY:
         return {"error": "OPENHANDS_CLOUD_API_KEY not configured on server"}
+
+    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _sandbox_id, _seen_event_ids
 
     logger.info("Chat send: prompt=%.80s... repo=%s branch=%s mode=%s", prompt, repo, branch, mode)
 
@@ -873,6 +876,8 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
     if timeout is None:
         timeout = _CHAT_TIMEOUT
+
+    global _conversation_status, _sandbox_id, _seen_event_ids
 
     start = time.time()
     all_new_msgs: list[str] = []
