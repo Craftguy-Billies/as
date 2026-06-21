@@ -575,6 +575,7 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     elif repo:
         full_prompt = (
             f"Repository: {repo} (branch: {branch}).\n"
+            "IMPORTANT: First run `git pull` to get the latest code. "
             "When implementing changes: review relevant files, make edits, "
             "commit with a descriptive message, and push.\n\n"
             f"{prompt}"

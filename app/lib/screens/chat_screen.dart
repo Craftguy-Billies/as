@@ -242,6 +242,10 @@ class _ChatScreenState extends State<ChatScreen> {
                         controller: _repoCtrl,
                         style: const TextStyle(color: Colors.white, fontSize: 13),
                         onChanged: (_) => _saveRepoPrefs(),
+                        onSubmitted: (_) {
+                          final r = _repoCtrl.text.trim();
+                          if (r.isNotEmpty) prov.switchRepo(r, _mode);
+                        },
                         decoration: InputDecoration(
                           hintText: 'owner/repo',
                           hintStyle: TextStyle(color: Colors.grey[700], fontSize: 12),
