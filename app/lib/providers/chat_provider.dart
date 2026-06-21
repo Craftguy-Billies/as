@@ -66,7 +66,7 @@ class ChatProvider extends ChangeNotifier {
   // Lazy message loading: show latest N first, "load earlier" button at top
   // Set high because each user turn spawns ~10-15 internal events ([MSG], [START],
   // [TOOL], etc.) which all count as separate items in _messages.
-  static const _pageSize = 200;
+  final _pageSize = 200;
   int _showFromIndex = 0;  // index into _messages to start displaying from
   int get showFromIndex => _showFromIndex;
   bool get hasMoreMessages => _showFromIndex > 0;
@@ -233,6 +233,7 @@ class ChatProvider extends ChangeNotifier {
       serverBranch = branch;
       serverMode = mode;
       _messages.clear();
+      _showFromIndex = 0;
       _queuePosition = 0;
       _queueTotal = 0;
       _pollTimer?.cancel();
@@ -251,7 +252,7 @@ class ChatProvider extends ChangeNotifier {
     );
     _messages.add(userMsg);
     await _saveToCache();
-    _notify();
+    _resetShowIndex();
 
     try {
       final result = await _api.sendChatBatch(
@@ -474,6 +475,7 @@ class ChatProvider extends ChangeNotifier {
   Future<void> clearChat() async {
     _pollTimer?.cancel();
     _messages.clear();
+    _showFromIndex = 0;
     _error = null;
     _loading = false;
     _loadingSince = null;
