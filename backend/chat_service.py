@@ -47,6 +47,7 @@ def _repo_key(repo: str) -> str:
 
 # Batch queue — server-side, survives client disconnect
 _batch_prompts: list[str] = []
+_batch_prompt_modes: list[str] = []  # per-prompt mode (plan/code)
 _batch_position: int = 0
 _batch_total: int = 0
 _batch_repo: str = ""
@@ -62,7 +63,7 @@ _CHAT_TIMEOUT = int(os.getenv("VIBECODE_CHAT_TIMEOUT", "600"))  # 10 min default
 # -- Restore state from DB on module load --
 def _restore_from_db() -> None:
     global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages_by_repo, _current_repo_key
-    global _batch_prompts, _batch_position, _batch_total, _batch_running
+    global _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_running
     try:
         db = get_sync_db()
     except Exception:
@@ -79,6 +80,7 @@ def _restore_from_db() -> None:
             _current_repo_key = data.get("current_repo_key", _repo_key(_conversation_repo))
             # Restore batch queue if server restarted mid-batch
             _batch_prompts = data.get("batch_prompts", [])
+            _batch_prompt_modes = data.get("batch_prompt_modes", [])
             _batch_position = data.get("batch_position", 0)
             _batch_total = data.get("batch_total", 0)
             _batch_running = False  # never auto-resume — user must re-trigger
@@ -107,6 +109,7 @@ def _persist_to_db() -> None:
             "current_repo_key": _current_repo_key,
             # Batch state for survival across restarts
             "batch_prompts": _batch_prompts,
+            "batch_prompt_modes": _batch_prompt_modes,
             "batch_position": _batch_position,
             "batch_total": _batch_total,
             "batch_running": _batch_running,
@@ -139,13 +142,14 @@ def _headers() -> dict:
 def reset() -> None:
     """Clear the current chat session AND cancel any running batch."""
     global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
-    global _batch_cancelled, _batch_running, _batch_prompts, _batch_position, _batch_total
+    global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total
     with _lock:
         # Cancel running batch
         if _batch_running:
             _batch_cancelled = True
             _batch_running = False
             _batch_prompts = []
+            _batch_prompt_modes = []
             _batch_position = 0
             _batch_total = 0
             logger.info("Batch cancelled by chat reset")
@@ -336,22 +340,25 @@ def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "main", mode
 
     with _lock:
         if _batch_running:
-            # Reject append if repo/mode changed — prevents cross-repo contamination
-            if repo != _batch_repo or mode != _batch_mode:
+            # Reject append if repo changed — prevents cross-repo contamination
+            if repo != _batch_repo:
                 return {
                     "error": (
-                        f"Batch already running with repo={_batch_repo or '(none)'} mode={_batch_mode}. "
+                        f"Batch already running with repo={_batch_repo or '(none)'}. "
                         "Wait for it to finish or tap 'New conversation' to start fresh."
                     )
                 }
-            # Append to running batch (same repo/mode)
+            # Append to running batch (cross-mode allowed: plan+code share same chat)
             _batch_prompts.extend(cleaned)
+            _batch_prompt_modes.extend([mode] * len(cleaned))
             _batch_total = len(_batch_prompts)
-            logger.info("Batch appended: +%d prompts (now %d total)", len(cleaned), _batch_total)
+            _batch_mode = mode  # update default mode
+            logger.info("Batch appended: +%d prompts (now %d total, mode=%s)", len(cleaned), _batch_total, mode)
             return {"status": "appended", "added": len(cleaned), "total": _batch_total}
 
         _batch_cancelled = False  # reset from any previous cancellation
         _batch_prompts = cleaned
+        _batch_prompt_modes = [mode] * len(cleaned)
         _batch_position = 0
         _batch_total = len(cleaned)
         _batch_repo = repo
@@ -375,7 +382,7 @@ def _process_batch_worker() -> None:
     _batch_running=True (which would freeze the client forever).
     Also enforce a 30-minute global timeout per batch.
     """
-    global _batch_cancelled, _batch_running, _batch_prompts, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode
+    global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode
     _batch_started_at = time.time()
 
     try:
@@ -384,6 +391,7 @@ def _process_batch_worker() -> None:
                 if _batch_cancelled or not _batch_running or _batch_position >= _batch_total:
                     _batch_running = False
                     _batch_prompts = []
+                    _batch_prompt_modes = []
                     _batch_position = 0
                     _batch_total = 0
                     _persist_to_db()
@@ -398,6 +406,7 @@ def _process_batch_worker() -> None:
                     })
                     _batch_running = False
                     _batch_prompts = []
+                    _batch_prompt_modes = []
                     _batch_position = 0
                     _batch_total = 0
                     _persist_to_db()
@@ -408,7 +417,7 @@ def _process_batch_worker() -> None:
                 total = _batch_total
                 repo = _batch_repo
                 branch = _batch_branch
-                mode = _batch_mode
+                mode = _batch_prompt_modes[_batch_position] if _batch_position < len(_batch_prompt_modes) else _batch_mode
 
             # Send the prompt (this blocks — uses the same send() function)
             logger.info("Batch [%d/%d]: %.80s...", pos, total, prompt)
@@ -455,7 +464,7 @@ def _process_batch_worker() -> None:
 
 def cancel_batch() -> dict:
     """Cancel the running batch queue. Non-blocking — sets flag for worker."""
-    global _batch_cancelled, _batch_running, _batch_prompts, _batch_position, _batch_total, _conversation_status
+    global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _conversation_status
     _batch_cancelled = True  # non-blocking flag, worker checks each iteration
     _conversation_status = "idle"
     with _lock:
@@ -463,6 +472,7 @@ def cancel_batch() -> dict:
         _batch_running = False
         remaining = _batch_total - _batch_position
         _batch_prompts = []
+        _batch_prompt_modes = []
         _batch_position = 0
         _batch_total = 0
     if was_running:

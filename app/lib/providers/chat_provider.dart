@@ -60,6 +60,21 @@ class ChatProvider extends ChangeNotifier {
   List<Map<String, dynamic>> _savedRepos = [];
   List<Map<String, dynamic>> get savedRepos => _savedRepos;
 
+  // -- In-app log buffer (visible on mobile where debugPrint is hidden) --
+  final List<String> _logLines = [];
+  List<String> get logLines => List.unmodifiable(_logLines);
+  static const _maxLogs = 500;
+
+  void logViewer(String msg) {
+    final ts = DateTime.now().toIso8601String().substring(11, 19); // HH:mm:ss
+    _logLines.add('[$ts] $msg');
+    while (_logLines.length > _maxLogs) {
+      _logLines.removeAt(0);
+    }
+    debugPrint(msg);
+    notifyListeners();
+  }
+
   // -- Init: restore from cache + server, resume batch if running --
   Future<void> loadFromCache() async {
     final prefs = await SharedPreferences.getInstance();
@@ -108,7 +123,7 @@ class ChatProvider extends ChangeNotifier {
         notifyListeners();
       }
     } catch (e) {
-      debugPrint('ChatProvider.loadFromCache: server merge failed: $e');
+      logViewer('ChatProvider.loadFromCache: server merge failed: $e');
     }
 
     // Resume polling if a batch is running on the server
@@ -117,7 +132,7 @@ class ChatProvider extends ChangeNotifier {
       final batch = state?['batch'] as Map<String, dynamic>?;
       final isRunning = batch?['running'] == true;
       final total = (batch?['total'] as int?) ?? 0;
-      debugPrint('ChatProvider.loadFromCache: batch running=$isRunning total=$total pos=${batch?['position']}');
+      logViewer('ChatProvider.loadFromCache: batch running=$isRunning total=$total pos=${batch?['position']}');
       if (isRunning && total > 0) {
         _queuePosition = (batch?['position'] as int?) ?? 0;
         _queueTotal = total;
@@ -129,15 +144,15 @@ class ChatProvider extends ChangeNotifier {
                       mode: state?['mode']?.toString() ?? 'code');
       }
     } catch (e) {
-      debugPrint('ChatProvider.loadFromCache: batch resume failed: $e');
+      logViewer('ChatProvider.loadFromCache: batch resume failed: $e');
     }
 
     // Fetch saved repos
     try {
       _savedRepos = await _api.getChatRepos();
-      debugPrint('ChatProvider.loadFromCache: loaded ${_savedRepos.length} repos');
+      logViewer('ChatProvider.loadFromCache: loaded ${_savedRepos.length} repos');
     } catch (e) {
-      debugPrint('ChatProvider.loadFromCache: repo fetch failed: $e');
+      logViewer('ChatProvider.loadFromCache: repo fetch failed: $e');
     }
   }
 
@@ -151,7 +166,7 @@ class ChatProvider extends ChangeNotifier {
     final trimmed = prompt.trim();
     if (trimmed.isEmpty) return;
 
-    debugPrint('ChatProvider.send: START repo=$repo mode=$mode');
+    logViewer('ChatProvider.send: START repo=$repo mode=$mode');
     _error = null;
 
     // If repo changed, switch to new repo's history
@@ -187,7 +202,7 @@ class ChatProvider extends ChangeNotifier {
         branch: branch,
         mode: mode,
       );
-      debugPrint('ChatProvider.send: result=$result');
+      logViewer('ChatProvider.send: result=$result');
 
       if (result['status'] == 'queued') {
         _queuePosition = (result['position'] as int?) ?? 0;
@@ -195,17 +210,17 @@ class ChatProvider extends ChangeNotifier {
         _pollFailures = 0;
         _loading = true;
         _loadingSince = DateTime.now();
-        debugPrint('ChatProvider.send: queued pos=$_queuePosition total=$_queueTotal — polling');
+        logViewer('ChatProvider.send: queued pos=$_queuePosition total=$_queueTotal — polling');
         notifyListeners();
         _startPolling(repo: repo, branch: branch, mode: mode);
       } else {
-        debugPrint('ChatProvider.send: unexpected status=${result['status']}');
+        logViewer('ChatProvider.send: unexpected status=${result['status']}');
         _error = (result['error']?.toString()) ?? 'Server did not accept the request';
         _queueTotal = 0;
         notifyListeners();
       }
     } catch (e) {
-      debugPrint('ChatProvider.send: ERROR ${ApiService.friendlyError(e)}');
+      logViewer('ChatProvider.send: ERROR ${ApiService.friendlyError(e)}');
       _error = ApiService.friendlyError(e);
       _queueTotal = 0;
       notifyListeners();
@@ -222,7 +237,7 @@ class ChatProvider extends ChangeNotifier {
         _loading = false;
         _loadingSince = null;
         _error = 'Polling timed out (30 min). Queue may still run on server.';
-        debugPrint('ChatProvider.poll: TIMEOUT');
+        logViewer('ChatProvider.poll: TIMEOUT');
         notifyListeners();
         return;
       }
@@ -236,7 +251,7 @@ class ChatProvider extends ChangeNotifier {
                 ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
                 .toList() ??
             [];
-        debugPrint('ChatProvider.poll: serverMsgs=${serverMsgs.length} localMsgs=${_messages.length}');
+        logViewer('ChatProvider.poll: serverMsgs=${serverMsgs.length} localMsgs=${_messages.length}');
         if (serverMsgs.isNotEmpty) {
           final merged = <ChatMessage>[];
           final seen = <String>{};
@@ -245,7 +260,7 @@ class ChatProvider extends ChangeNotifier {
             if (seen.add(key)) merged.add(m);
           }
           if (merged.length != _messages.length) {
-            debugPrint('ChatProvider.poll: merged ${_messages.length}→${merged.length} messages');
+            logViewer('ChatProvider.poll: merged ${_messages.length}→${merged.length} messages');
             _messages = merged;
             _error = null;  // clear error when server responds successfully
             await _saveToCache();
@@ -256,7 +271,7 @@ class ChatProvider extends ChangeNotifier {
         final batch = state['batch'] as Map<String, dynamic>?;
         if (batch != null) {
           final wasLoading = _loading;
-          debugPrint('ChatProvider.poll: batch running=${batch['running']} pos=${batch['position']} total=${batch['total']} wasLoading=$wasLoading');
+          logViewer('ChatProvider.poll: batch running=${batch['running']} pos=${batch['position']} total=${batch['total']} wasLoading=$wasLoading');
           _loading = batch['running'] == true;
           _queuePosition = (batch['position'] as int?) ?? _queuePosition;
           _queueTotal = (batch['total'] as int?) ?? _queueTotal;
@@ -266,14 +281,14 @@ class ChatProvider extends ChangeNotifier {
             _pollTimer?.cancel();
             _queuePosition = 0;
             _queueTotal = 0;  // hide progress bar
-            debugPrint('ChatProvider.poll: DONE pos=$_queuePosition total=$_queueTotal');
+            logViewer('ChatProvider.poll: DONE pos=$_queuePosition total=$_queueTotal');
           }
         }
 
         _pollFailures = 0;
         notifyListeners();
       } catch (e) {
-        debugPrint('ChatProvider.poll: fail #$_pollFailures: $e');
+        logViewer('ChatProvider.poll: fail #$_pollFailures: $e');
         _pollFailures++;
         if (_pollFailures >= 10) {
           _error = 'Lost connection to server. Queue may still be running.';
@@ -307,7 +322,7 @@ class ChatProvider extends ChangeNotifier {
       _error = null;
       await _saveToCache();
     } catch (e) {
-      debugPrint('ChatProvider.switchRepo: failed to fetch messages: $e');
+      logViewer('ChatProvider.switchRepo: failed to fetch messages: $e');
     }
     notifyListeners();
     // Refresh repo list (new repo might appear later after messages)
@@ -319,7 +334,7 @@ class ChatProvider extends ChangeNotifier {
       _savedRepos = await _api.getChatRepos();
       notifyListeners();
     } catch (e) {
-      debugPrint('ChatProvider.refreshRepos: $e');
+      logViewer('ChatProvider.refreshRepos: $e');
     }
   }
 
@@ -331,7 +346,7 @@ class ChatProvider extends ChangeNotifier {
     _loadingSince = null;
     _queuePosition = 0;
     _queueTotal = 0;
-    debugPrint('ChatProvider.cancel');
+    logViewer('ChatProvider.cancel');
     notifyListeners();
   }
 
@@ -348,7 +363,7 @@ class ChatProvider extends ChangeNotifier {
     try {
       await _api.deleteChat();
     } catch (e) {
-      debugPrint('ChatProvider.clearChat: $e');
+      logViewer('ChatProvider.clearChat: $e');
     }
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_cacheKey);

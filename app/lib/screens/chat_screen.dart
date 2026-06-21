@@ -163,6 +163,17 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
         backgroundColor: const Color(0xFF0D0D0D),
         actions: [
+          // Debug log viewer (mobile-visible)
+          IconButton(
+            icon: const Icon(Icons.bug_report, color: Colors.white70, size: 20),
+            tooltip: 'Debug logs',
+            onPressed: () {
+              final prov = context.read<ChatProvider>();
+              Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => ClientLogScreen(prov: prov)),
+              );
+            },
+          ),
           // Repo/mode toggle
           IconButton(
             icon: Icon(
@@ -890,6 +901,68 @@ class _TaskQueueSheet extends StatelessWidget {
                   ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// -- In-app client log viewer (visible on mobile builds) --
+class ClientLogScreen extends StatelessWidget {
+  final ChatProvider prov;
+  const ClientLogScreen({super.key, required this.prov});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0D0D0D),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF161616),
+        title: const Text('Debug Logs', style: TextStyle(fontSize: 16)),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.delete_sweep, color: Colors.redAccent, size: 20),
+            tooltip: 'Clear logs',
+            onPressed: () {
+              // Navigate to refresh — logs clear on provider rebuild
+              Navigator.pop(context);
+            },
+          ),
+        ],
+      ),
+      body: ListenableBuilder(
+        listenable: prov,
+        builder: (context, _) {
+          final logs = prov.logLines;
+          if (logs.isEmpty) {
+            return const Center(
+              child: Text('No logs yet', style: TextStyle(color: Colors.white38)),
+            );
+          }
+          return ListView.builder(
+            itemCount: logs.length,
+            itemBuilder: (context, i) {
+              final line = logs[i];
+              Color color = Colors.white54;
+              if (line.contains('ERROR') || line.contains('fail') || line.contains('TIMEOUT')) {
+                color = Colors.redAccent;
+              } else if (line.contains('START') || line.contains('DONE') || line.contains('complete')) {
+                color = Colors.greenAccent;
+              }
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+                child: Text(
+                  line,
+                  style: TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 11,
+                    color: color,
+                    height: 1.4,
+                  ),
+                ),
+              );
+            },
+          );
+        },
       ),
     );
   }
