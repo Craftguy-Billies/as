@@ -44,7 +44,9 @@ class ChatProvider extends ChangeNotifier {
   int _queuePosition = 0;
   int _queueTotal = 0;
   int _pollFailures = 0;
+  int _pollGeneration = 0;
   Timer? _pollTimer;
+  int _lastNotifiedHash = 0;  // avoid redundant rebuilds
 
   ChatProvider(this._api);
 
@@ -72,7 +74,23 @@ class ChatProvider extends ChangeNotifier {
       _logLines.removeAt(0);
     }
     debugPrint(msg);
-    notifyListeners();
+    _notify();
+  }
+
+  /// notifyListeners only when state actually changed (avoid 2s poll rebuilds)
+  void _notify() {
+    final hash = Object.hash(
+      _messages.length,
+      _loading,
+      _error,
+      _queuePosition,
+      _queueTotal,
+      _messages.isEmpty ? 0 : _messages.last.timestamp,
+    );
+    if (hash != _lastNotifiedHash) {
+      _lastNotifiedHash = hash;
+      notifyListeners();
+    }
   }
 
   // -- Init: restore from cache + server, resume batch if running --
@@ -88,7 +106,7 @@ class ChatProvider extends ChangeNotifier {
             _messages = msgs
                 .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
                 .toList();
-            notifyListeners();
+            _notify();
           }
           serverRepo = (data['repo']?.toString()) ?? '';
           serverMode = (data['mode']?.toString()) ?? 'code';
@@ -97,7 +115,7 @@ class ChatProvider extends ChangeNotifier {
           _messages = data
               .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
               .toList();
-          notifyListeners();
+          _notify();
         }
       } catch (_) {
         await prefs.remove(_cacheKey);
@@ -120,7 +138,7 @@ class ChatProvider extends ChangeNotifier {
         }
         _messages = merged;
         await _saveToCache();
-        notifyListeners();
+        _notify();
       }
     } catch (e) {
       logViewer('ChatProvider.loadFromCache: server merge failed: $e');
@@ -138,7 +156,7 @@ class ChatProvider extends ChangeNotifier {
         _queueTotal = total;
         _loading = true;
         _loadingSince = DateTime.now();
-        notifyListeners();
+        _notify();
         _startPolling(repo: state?['repo']?.toString() ?? '',
                       branch: 'main',
                       mode: state?['mode']?.toString() ?? 'code');
@@ -179,7 +197,7 @@ class ChatProvider extends ChangeNotifier {
       _queueTotal = 0;
       _pollTimer?.cancel();
       await _saveToCache();
-      notifyListeners();
+      _notify();
     } else if (mode != serverMode) {
       serverMode = mode;
       await _saveToCache();
@@ -193,7 +211,7 @@ class ChatProvider extends ChangeNotifier {
     );
     _messages.add(userMsg);
     await _saveToCache();
-    notifyListeners();
+    _notify();
 
     try {
       final result = await _api.sendChatBatch(
@@ -211,38 +229,41 @@ class ChatProvider extends ChangeNotifier {
         _loading = true;
         _loadingSince = DateTime.now();
         logViewer('ChatProvider.send: queued pos=$_queuePosition total=$_queueTotal — polling');
-        notifyListeners();
+        _notify();
         _startPolling(repo: repo, branch: branch, mode: mode);
       } else {
         logViewer('ChatProvider.send: unexpected status=${result['status']}');
         _error = (result['error']?.toString()) ?? 'Server did not accept the request';
         _queueTotal = 0;
-        notifyListeners();
+        _notify();
       }
     } catch (e) {
       logViewer('ChatProvider.send: ERROR ${ApiService.friendlyError(e)}');
       _error = ApiService.friendlyError(e);
       _queueTotal = 0;
-      notifyListeners();
+      _notify();
     }
   }
 
   // -- Polling: fetch messages + progress every 2 seconds --
   void _startPolling({required String repo, required String branch, required String mode}) {
     _pollTimer?.cancel();
+    final gen = ++_pollGeneration;
     final pollStarted = DateTime.now();
     _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      if (gen != _pollGeneration) return; // stale: repo switched or chat cleared
       if (DateTime.now().difference(pollStarted).inMinutes >= 30) {
         _pollTimer?.cancel();
         _loading = false;
         _loadingSince = null;
         _error = 'Polling timed out (30 min). Queue may still run on server.';
         logViewer('ChatProvider.poll: TIMEOUT');
-        notifyListeners();
+        _notify();
         return;
       }
       try {
         final state = await _api.getChat(repo: repo, mode: mode);
+        if (gen != _pollGeneration) return; // stale after await
         if (state == null) return;
         _error = null;  // clear error on any successful poll
 
@@ -259,10 +280,18 @@ class ChatProvider extends ChangeNotifier {
             final key = '${m.role}:${m.content}:${m.timestamp}';
             if (seen.add(key)) merged.add(m);
           }
-          if (merged.length != _messages.length) {
+          // Sort by timestamp so messages appear chronologically
+          merged.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+          // Trim to prevent unbounded memory growth
+          if (merged.length > 500) {
+            merged.removeRange(0, merged.length - 400);
+          }
+          if (merged.length != _messages.length ||
+              _messages.isEmpty ||
+              merged.last.timestamp != _messages.last.timestamp) {
             logViewer('ChatProvider.poll: merged ${_messages.length}→${merged.length} messages');
             _messages = merged;
-            _error = null;  // clear error when server responds successfully
+            _error = null;
             await _saveToCache();
           }
         }
@@ -286,7 +315,7 @@ class ChatProvider extends ChangeNotifier {
         }
 
         _pollFailures = 0;
-        notifyListeners();
+        _notify();
       } catch (e) {
         logViewer('ChatProvider.poll: fail #$_pollFailures: $e');
         _pollFailures++;
@@ -295,7 +324,7 @@ class ChatProvider extends ChangeNotifier {
           _loading = false;
           _loadingSince = null;
           _pollTimer?.cancel();
-          notifyListeners();
+          _notify();
         }
       }
     });
@@ -324,7 +353,7 @@ class ChatProvider extends ChangeNotifier {
     } catch (e) {
       logViewer('ChatProvider.switchRepo: failed to fetch messages: $e');
     }
-    notifyListeners();
+    _notify();
     // Refresh repo list (new repo might appear later after messages)
     refreshRepos();
   }
@@ -332,7 +361,7 @@ class ChatProvider extends ChangeNotifier {
   Future<void> refreshRepos() async {
     try {
       _savedRepos = await _api.getChatRepos();
-      notifyListeners();
+      _notify();
     } catch (e) {
       logViewer('ChatProvider.refreshRepos: $e');
     }
@@ -347,7 +376,7 @@ class ChatProvider extends ChangeNotifier {
     _queuePosition = 0;
     _queueTotal = 0;
     logViewer('ChatProvider.cancel');
-    notifyListeners();
+    _notify();
   }
 
   Future<void> clearChat() async {
@@ -358,7 +387,7 @@ class ChatProvider extends ChangeNotifier {
     _loadingSince = null;
     _queuePosition = 0;
     _queueTotal = 0;
-    notifyListeners();
+    _notify();
 
     try {
       await _api.deleteChat();
@@ -376,12 +405,16 @@ class ChatProvider extends ChangeNotifier {
   }
 
   Future<void> _saveToCache() async {
-    final prefs = await SharedPreferences.getInstance();
-    final payload = json.encode({
-      'messages': _messages.map((m) => m.toJson()).toList(),
-      'repo': serverRepo,
-      'mode': serverMode,
-    });
-    await prefs.setString(_cacheKey, payload);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final payload = json.encode({
+        'messages': _messages.map((m) => m.toJson()).toList(),
+        'repo': serverRepo,
+        'mode': serverMode,
+      });
+      await prefs.setString(_cacheKey, payload);
+    } catch (_) {
+      // silently ignore — SharedPreferences may fail if disk full
+    }
   }
 }

@@ -87,6 +87,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _send() {
+    if (!mounted) return;
     final text = _inputCtrl.text.trim();
     if (text.isEmpty) return;
 
@@ -585,8 +586,27 @@ class _ChatBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final isUser = msg.role == 'user';
     final isEvent = msg.role == 'event';
+    final isError = msg.role == 'error';
 
     if (isEvent) return _buildEvent(context);
+
+    if (isError) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
+        child: Row(
+          children: [
+            const Icon(Icons.error_outline, color: Colors.redAccent, size: 14),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                msg.content,
+                style: const TextStyle(color: Colors.redAccent, fontSize: 13, height: 1.45),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
@@ -706,6 +726,8 @@ class _ChatBubble extends StatelessWidget {
           Flexible(
             child: Text(
               displayText,
+              maxLines: 15,
+              overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 color: accent.withAlpha(200),
                 fontSize: 11,
@@ -723,7 +745,16 @@ class _ChatBubble extends StatelessWidget {
   static String _stripTagPrefix(String text) {
     if (text.isEmpty) return text;
     final m = RegExp(r'^\[[A-Z]+\]\s?').firstMatch(text);
-    return m != null ? text.substring(m.end) : text;
+    if (m == null) return text;
+    final stripped = text.substring(m.end);
+    return stripped.isEmpty ? '(no details)' : stripped;
+  }
+
+  String _fmtTime(int ms) {
+    final dt = DateTime.fromMillisecondsSinceEpoch(ms);
+    final h = dt.hour.toString().padLeft(2, '0');
+    final m = dt.minute.toString().padLeft(2, '0');
+    return '$h:$m';
   }
 
 // ---------------------------------------------------------------------------

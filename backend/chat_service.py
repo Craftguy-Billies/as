@@ -58,9 +58,9 @@ def _migrate_keys(msgs_by_repo: dict) -> dict:
             migrated[base] = list(msgs)
         else:
             # Merge: dedup by (role, content, timestamp)
-            existing = {(m.get('role'), m.get('content'), m.get('timestamp')) for m in migrated[base]}
+            existing = {(m.get('role', ''), m.get('content', ''), m.get('timestamp', 0)) for m in migrated[base]}
             for m in msgs:
-                if (m.get('role'), m.get('content'), m.get('timestamp')) not in existing:
+                if (m.get('role', ''), m.get('content', ''), m.get('timestamp', 0)) not in existing:
                     migrated[base].append(m)
             migrated[base].sort(key=lambda m: m.get('timestamp', 0))
     return migrated
@@ -105,10 +105,11 @@ def _restore_from_db() -> None:
             _batch_prompt_modes = data.get("batch_prompt_modes", [])
             _batch_position = data.get("batch_position", 0)
             _batch_total = data.get("batch_total", 0)
-            _batch_running = False  # never auto-resume — user must re-trigger
-            logger.info("Restored chat session: conv=%s repo=%s mode=%s msgs=%d batch=%d/%d",
-                         _conversation_id, _conversation_repo, _conversation_mode, len(_msgs()),
-                         _batch_position, _batch_total)
+            # Auto-resume if server restarted mid-batch (remaining prompts in queue)
+            _batch_running = _batch_position < _batch_total and len(_batch_prompts) > _batch_position
+            if _batch_running:
+                threading.Thread(target=_batch_worker, daemon=True).start()
+                logger.info("Auto-resuming batch: %d/%d remaining", _batch_total - _batch_position, _batch_total)
     except Exception as e:
         logger.warning("Failed to restore chat session from DB: %s", e)
 
@@ -491,9 +492,9 @@ def _process_batch_worker() -> None:
 def cancel_batch() -> dict:
     """Cancel the running batch queue. Non-blocking — sets flag for worker."""
     global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _conversation_status
-    _batch_cancelled = True  # non-blocking flag, worker checks each iteration
-    _conversation_status = "idle"
     with _lock:
+        _batch_cancelled = True  # non-blocking flag, worker checks each iteration
+        _conversation_status = "idle"
         was_running = _batch_running
         _batch_running = False
         remaining = _batch_total - _batch_position
@@ -1028,12 +1029,17 @@ def _format_event_preview(evt: dict) -> str | None:
             return f"[TOOL] {tool}: {str(action)[:120]}"
 
     elif kind == "ObservationEvent":
-        obs = evt.get("observation") or {}
+        obs = evt.get("observation")
+        if obs is None:
+            return None
         if isinstance(obs, str):
             try:
                 obs = json.loads(obs)
             except Exception:
                 obs = {"output": str(obs)}
+        elif not isinstance(obs, dict):
+            # bool, int, float, list — wrap in dict
+            obs = {"output": str(obs)}
 
         if tool in ("bash", "terminal", "execute_bash_command"):
             stdout = obs.get("stdout", "") or obs.get("output", "") or obs.get("content", "")
