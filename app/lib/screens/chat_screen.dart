@@ -131,9 +131,11 @@ class _ChatScreenState extends State<ChatScreen> {
     final prov = context.watch<ChatProvider>();
     final msgs = prov.messages;
 
-    // Auto-scroll on first render with messages, or when new messages arrive.
-    // Skip when showFromIndex changes (user is loading older msgs).
-    final scrollNow = msgs.isNotEmpty && (
+    // Auto-scroll to bottom on first render with messages (ListView must
+    // exist — _hasLoaded guards against firing while spinner is showing).
+    // Also auto-scroll when new messages arrive (count changes).
+    // Skip when showFromIndex changes (user loading older msgs).
+    final scrollNow = msgs.isNotEmpty && _hasLoaded && (
       _needsInitialScroll ||
       msgs.length != _lastTotalMsgCount
     );
