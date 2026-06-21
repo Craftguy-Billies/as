@@ -719,9 +719,7 @@ def _send_message(conversation_id: str, prompt: str) -> tuple[bool, str | None]:
 
         # Update sandbox_id from response if we don't have it
         sandbox_status = data.get("sandbox_status", "")
-        # Log full response to see what fields are available (looking for inline response)
-        logger.info("send-message OK (sandbox=%s) full_response_keys=%s",
-                    sandbox_status, list(data.keys()))
+        logger.info("send-message OK (sandbox=%s)", sandbox_status)
         return True, None
 
     return False, "Sandbox not running after resume attempt"
@@ -908,11 +906,6 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         if not items:
             continue
 
-        # Log full conversation object keys once to see available fields
-        if not hasattr(_wait_for_response, "_logged_conv_keys"):
-            logger.info("app-conversations item keys: %s", list(items[0].keys()))
-            _wait_for_response._logged_conv_keys = True
-
         status = items[0].get("execution_status", "")
 
         # Capture sandbox_id for sandbox management (resume, etc.)
@@ -948,24 +941,16 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                     "timestamp": int(time.time() * 1000),
                 })
 
-        # -- Get events (SAME endpoint as agent_runner) --
-        params: dict = {"limit": 100}
-        if _last_event_ts:
-            # Try incremental pagination first; fall back to without after
-            # if the API doesn't support it (422).
-            params["after"] = _last_event_ts
-        try:
-            r2 = httpx.get(
-                f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
-                headers=_headers(),
-                params=params,
-                timeout=10,
-            )
-            r2.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 422 and "after" in params:
-                logger.info("events/search rejected 'after' param, retrying without")
-                params.pop("after")
+        # -- Get events with pagination (after= timestamp) --
+        # Fetch all available pages in one go so we don't fall behind
+        # in long conversations (400+ events).
+        all_events = []
+        events_page_count = 0
+        while events_page_count < 10:  # max 10 pages per poll cycle
+            params: dict = {"limit": 100}
+            if _last_event_ts:
+                params["after"] = _last_event_ts
+            try:
                 r2 = httpx.get(
                     f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
                     headers=_headers(),
@@ -973,34 +958,68 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                     timeout=10,
                 )
                 r2.raise_for_status()
-            else:
-                raise
-        try:
-            events_data = r2.json()
-        except Exception as e:
-            logger.warning("Events poll error: %s", e)
-            continue
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 422 and "after" in params:
+                    logger.info("events/search rejected 'after' param, retrying without")
+                    params.pop("after")
+                    r2 = httpx.get(
+                        f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
+                        headers=_headers(),
+                        params=params,
+                        timeout=10,
+                    )
+                    r2.raise_for_status()
+                else:
+                    raise
+            try:
+                events_data = r2.json()
+            except Exception as e:
+                logger.warning("Events poll error: %s", e)
+                break
 
-        # Robust extraction: try "items", "events", "data", "results", or bare list
-        if isinstance(events_data, list):
-            all_events = events_data
-        elif isinstance(events_data, dict):
-            all_events = (
-                events_data.get("items")
-                or events_data.get("events")
-                or events_data.get("data")
-                or events_data.get("results")
-                or []
-            )
-        else:
-            all_events = []
+            # Robust extraction: try "items", "events", "data", "results", or bare list
+            if isinstance(events_data, list):
+                page_events = events_data
+            elif isinstance(events_data, dict):
+                page_events = (
+                    events_data.get("items")
+                    or events_data.get("events")
+                    or events_data.get("data")
+                    or events_data.get("results")
+                    or []
+                )
+            else:
+                page_events = []
+
+            if not page_events:
+                break
+
+            events_page_count += 1
+            all_events.extend(page_events)
+
+            # Advance cursor for next page
+            last_evt = page_events[-1]
+            new_cursor = last_evt.get("timestamp") or last_evt.get("created_at") or 0
+            if isinstance(new_cursor, str):
+                try:
+                    new_cursor = int(datetime.fromisoformat(new_cursor.replace("Z", "+00:00")).timestamp() * 1000)
+                except (ValueError, TypeError):
+                    new_cursor = 0
+            if isinstance(new_cursor, (int, float)) and new_cursor > _last_event_ts:
+                _last_event_ts = int(new_cursor)
+            else:
+                break  # no progress, stop paginating
+
+        if events_page_count > 1:
+            logger.info("Conversation %s: fetched %d pages, %d total events",
+                        _conversation_id, events_page_count, len(all_events))
+
+        # -- Process all collected events --
 
         new_count = len(all_events)
         if new_count > 0:
-            first_ts = all_events[0].get("created_at") or all_events[0].get("timestamp") or 0
-            last_ts = all_events[-1].get("created_at") or all_events[-1].get("timestamp") or 0
-            logger.info("Conversation %s: %d events fetched (first_ts=%s last_ts=%s, ID-based dedup)",
-                        _conversation_id, new_count, first_ts, last_ts)
+            logger.info("Conversation %s: %d events fetched (ID-based dedup)",
+                        _conversation_id, new_count)
         else:
             # No events at all — log every 30s so we know polling works
             if int(time.time() - start) % 30 < 3:
