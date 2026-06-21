@@ -903,6 +903,8 @@ def _scrape_events_for_text(events: list[dict]) -> str | None:
     for evt in events:
         kind = evt.get("kind", "")
         # llm_message (MessageEvent, any source)
+        if kind == "MessageEvent" and evt.get("source") == "user":
+            continue  # never scrape user's own messages
         llm_msg = evt.get("llm_message") or evt.get("message")
         if isinstance(llm_msg, dict):
             content = llm_msg.get("content") or []
@@ -963,6 +965,10 @@ def _format_event_preview(evt: dict) -> str | None:
         elif tool in ("file_editor", "str_replace_editor"):
             cmd = (action.get("command") or "").strip()
             path = action.get("path", "") or action.get("file", "")
+            if not cmd:
+                logger.warning("file_editor ActionEvent: NO command in action. keys=%s tool=%s",
+                               sorted(action.keys()) if isinstance(action, dict) else type(action).__name__,
+                               tool)
             if path:
                 if cmd == "view":
                     return f"📖 Reading: {path}"
