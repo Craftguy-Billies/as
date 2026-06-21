@@ -706,7 +706,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             source = evt.get("source", "")
             tool = evt.get("tool_name", "")
 
-            if kind == "MessageEvent" and source in ("agent", "assistant"):
+            if kind == "MessageEvent":
                 # API returns llm_message (a Message object), not plain "message"
                 llm_msg = evt.get("llm_message") or evt.get("message") or {}
                 text = ""
@@ -775,17 +775,69 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     if not all_new_msgs:
         elapsed = int(time.time() - start)
         logger.warning("No assistant messages found after %ds (status=%s)", elapsed, last_status)
-        with _lock:
-            _messages.append({
-                "role": "event",
-                "content": f"⚠️ No response from agent after {elapsed}s (status: {last_status or 'unknown'}). The agent may be stuck or the LLM may not be configured correctly on the server.",
-                "kind": "SystemEvent",
-                "timestamp": int(time.time() * 1000),
-            })
+
+        # Fallback: scrape last 20 events for any text content
+        fallback_text = _scrape_events_for_text(all_events[-20:])
+        if fallback_text:
+            logger.info("Fallback: scraped %d chars from last 20 events", len(fallback_text))
+            all_new_msgs.append(fallback_text)
+
+        if not all_new_msgs:
+            with _lock:
+                _messages.append({
+                    "role": "event",
+                    "content": f"⚠️ No response from agent after {elapsed}s (status: {last_status or 'unknown'}). The agent may be stuck or the LLM may not be configured correctly on the server.",
+                    "kind": "SystemEvent",
+                    "timestamp": int(time.time() * 1000),
+                })
 
     _conversation_status = "idle"
     return "\n\n".join(all_new_msgs) if all_new_msgs else None
 
+
+
+def _scrape_events_for_text(events: list[dict]) -> str | None:
+    """Fallback: extract any text from events when no MessageEvent found.
+
+    Tries: llm_message.content, observation.content, action.thought, error fields.
+    """
+    parts: list[str] = []
+    for evt in events:
+        kind = evt.get("kind", "")
+        # llm_message (MessageEvent, any source)
+        llm_msg = evt.get("llm_message") or evt.get("message")
+        if isinstance(llm_msg, dict):
+            content = llm_msg.get("content") or []
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("text"):
+                        parts.append(str(block["text"]))
+            elif isinstance(content, str) and content.strip():
+                parts.append(content.strip())
+        # Observation content (tool results with text)
+        obs = evt.get("observation")
+        if isinstance(obs, dict):
+            obs_content = obs.get("content") or []
+            if isinstance(obs_content, list):
+                for block in obs_content:
+                    if isinstance(block, dict) and block.get("text"):
+                        t = str(block["text"]).strip()
+                        if t and len(t) > 20:  # skip trivial messages
+                            parts.append(t)
+            elif isinstance(obs_content, str) and obs_content.strip():
+                parts.append(obs_content.strip())
+        # Action thought (agent reasoning before tool call)
+        thought = evt.get("thought")
+        if isinstance(thought, list):
+            for item in thought:
+                if isinstance(item, dict) and item.get("text"):
+                    parts.append(str(item["text"]))
+        # Error text
+        err = evt.get("error")
+        if isinstance(err, str) and err.strip():
+            parts.append(err)
+    text = "\n\n".join(parts).strip()
+    return text if text else None
 
 
 def _format_event_preview(evt: dict) -> str | None:
