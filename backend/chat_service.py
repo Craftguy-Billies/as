@@ -1074,37 +1074,28 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         elapsed = int(time.time() - start)
         logger.warning("No assistant messages found after %ds (status=%s)", elapsed, last_status)
         logger.warning("All event kinds seen: %s", sorted(_event_kinds))
-        logger.warning("Total events: %d, messages: %d", len(all_events), len(_msgs()))
-
-        # Fallback: scrape last 20 events for any text content
-        fallback_text = _scrape_events_for_text(all_events[-20:])
-        if fallback_text:
-            logger.info("Fallback: scraped %d chars from last 20 events", len(fallback_text))
-            all_new_msgs.append(fallback_text)
-
-        if not all_new_msgs:
-            with _lock:
-                _msgs().append({
-                    "role": "event",
-                    "content": f"[WARN] No response from agent after {elapsed}s (status: {last_status or 'unknown'}). The agent may be stuck or the LLM may not be configured correctly on the server.",
-                    "kind": "SystemEvent",
-                    "timestamp": int(time.time() * 1000),
-                })
+        logger.warning("Total events in last poll: %d, stored messages: %d", len(all_events), len(_msgs()))
+        with _lock:
+            _msgs().append({
+                "role": "event",
+                "content": f"[WARN] No response from agent after {elapsed}s (status: {last_status or 'unknown'}). The agent may be stuck or the LLM may not be configured correctly on the server.",
+                "kind": "SystemEvent",
+                "timestamp": int(time.time() * 1000),
+            })
 
     _conversation_status = "idle"
     response = "\n\n".join(all_new_msgs) if all_new_msgs else None
 
     # OpenHands Cloud returns cumulative llm_message content — each new
-    # MessageEvent includes all prior assistant responses as a prefix.
-    # Strip the last previous assistant message to get only the NEW text.
+    # MessageEvent includes ALL prior assistant responses as a prefix.
+    # Strip them chronologically so only the NEW text remains.
     if response:
         with _lock:
-            for m in reversed(_msgs()):
+            for m in _msgs():
                 if m.get("role") == "assistant" and m.get("content"):
                     prev = m["content"]
                     if prev and response.startswith(prev):
                         response = response[len(prev):].lstrip("\n")
-                    break
     return response if response else None
 
 
