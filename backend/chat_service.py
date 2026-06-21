@@ -285,15 +285,25 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
         else:
             success, send_err = _send_message(current_conv_id, prompt)
             if not success:
-                # If sandbox is paused/gone, reset conversation so next send creates a new one
+                # If sandbox is paused/gone, auto-recover: reset + create new
+                # conversation with same prompt. The caller never sees a 409.
                 if send_err and "409" in str(send_err):
-                    logger.warning("Sandbox paused/gone for conversation %s — resetting", current_conv_id)
-                with _lock:
-                    _conversation_id = None
-                    _last_event_index = 0
-                    _sandbox_id = None
-                    _persist_to_db()
-                return {"error": send_err or "Failed to send message to conversation"}
+                    logger.warning("Sandbox paused/gone for conversation %s — recovering", current_conv_id)
+                    with _lock:
+                        _conversation_id = None
+                        _last_event_index = 0
+                        _sandbox_id = None
+                        _persist_to_db()
+                    new_conv_id = _create_conversation(prompt, repo, branch, mode)
+                    logger.info("Recovered: created new conversation %s", new_conv_id)
+                    need_new_conv = True  # Phase 1c will store it
+                else:
+                    with _lock:
+                        _conversation_id = None
+                        _last_event_index = 0
+                        _sandbox_id = None
+                        _persist_to_db()
+                    return {"error": send_err or "Failed to send message to conversation"}
             logger.info("Sent to conversation %s", current_conv_id)
     except httpx.HTTPStatusError as e:
         logger.error("HTTP error: %s %s", e.response.status_code, e.response.text[:200])
