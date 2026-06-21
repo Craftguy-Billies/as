@@ -1092,7 +1092,20 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 })
 
     _conversation_status = "idle"
-    return "\n\n".join(all_new_msgs) if all_new_msgs else None
+    response = "\n\n".join(all_new_msgs) if all_new_msgs else None
+
+    # OpenHands Cloud returns cumulative llm_message content — each new
+    # MessageEvent includes all prior assistant responses as a prefix.
+    # Strip the last previous assistant message to get only the NEW text.
+    if response:
+        with _lock:
+            for m in reversed(_msgs()):
+                if m.get("role") == "assistant" and m.get("content"):
+                    prev = m["content"]
+                    if prev and response.startswith(prev):
+                        response = response[len(prev):].lstrip("\n")
+                    break
+    return response if response else None
 
 
 
