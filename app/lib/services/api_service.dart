@@ -189,14 +189,28 @@ class ApiService {
     }
   }
 
-  Future<Map<String, dynamic>> getChat() async {
+  Future<Map<String, dynamic>> getChat({String repo = '', String mode = ''}) async {
+    final uri = repo.isNotEmpty
+        ? Uri.parse('$_url/api/chat?repo=${Uri.encodeComponent(repo)}&mode=${Uri.encodeComponent(mode)}')
+        : Uri.parse('$_url/api/chat');
     final resp = await http
-        .get(Uri.parse('$_url/api/chat'))
+        .get(uri)
         .timeout(const Duration(seconds: 8));
     if (resp.statusCode != 200) {
       throw Exception(_parseError(resp.statusCode, resp.body));
     }
     return json.decode(resp.body) as Map<String, dynamic>;
+  }
+
+  Future<List<Map<String, dynamic>>> getChatRepos() async {
+    final resp = await http
+        .get(Uri.parse('$_url/api/chat/repos'))
+        .timeout(const Duration(seconds: 8));
+    if (resp.statusCode != 200) {
+      throw Exception(_parseError(resp.statusCode, resp.body));
+    }
+    final data = json.decode(resp.body) as Map<String, dynamic>;
+    return (data['repos'] as List?)?.cast<Map<String, dynamic>>() ?? [];
   }
 
   Future<void> deleteChat() async {

@@ -231,25 +231,61 @@ class _ChatScreenState extends State<ChatScreen> {
         children: [
           Row(
             children: [
-              // Repo input
+              // Repo input + saved repos dropdown
               Expanded(
                 flex: 3,
-                child: TextField(
-                  controller: _repoCtrl,
-                  style: const TextStyle(color: Colors.white, fontSize: 13),
-                  onChanged: (_) => _saveRepoPrefs(),
-                  decoration: InputDecoration(
-                    hintText: 'owner/repo',
-                    hintStyle: TextStyle(color: Colors.grey[700], fontSize: 12),
-                    filled: true,
-                    fillColor: const Color(0xFF1A1A2E),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide.none,
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _repoCtrl,
+                        style: const TextStyle(color: Colors.white, fontSize: 13),
+                        onChanged: (_) => _saveRepoPrefs(),
+                        decoration: InputDecoration(
+                          hintText: 'owner/repo',
+                          hintStyle: TextStyle(color: Colors.grey[700], fontSize: 12),
+                          filled: true,
+                          fillColor: const Color(0xFF1A1A2E),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            borderSide: BorderSide.none,
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                          isDense: true,
+                        ),
+                      ),
                     ),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                    isDense: true,
-                  ),
+                    // Saved repos dropdown
+                    if (prov.savedRepos.isNotEmpty)
+                      PopupMenuButton<Map<String, dynamic>>(
+                        padding: EdgeInsets.zero,
+                        icon: const Icon(Icons.arrow_drop_down, color: Colors.grey, size: 18),
+                        tooltip: 'Saved repos',
+                        onSelected: (r) {
+                          final repo = r['repo']?.toString() ?? '';
+                          final mode = r['mode']?.toString() ?? 'code';
+                          _repoCtrl.text = repo == '(none)' ? '' : repo;
+                          _saveRepoPrefs();
+                          if (repo.isNotEmpty) {
+                            _mode = mode;
+                            prov.switchRepo(repo, mode);
+                          }
+                        },
+                        itemBuilder: (_) => prov.savedRepos.map((r) {
+                          final repo = r['repo']?.toString() ?? '';
+                          final mode = r['mode']?.toString() ?? 'code';
+                          final count = (r['message_count'] as int?) ?? 0;
+                          return PopupMenuItem(
+                            value: r,
+                            height: 36,
+                            child: Text(
+                              '${repo == "(none)" ? "No repo" : repo} [$mode • $count msgs]',
+                              style: const TextStyle(fontSize: 12, color: Colors.white70),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                  ],
                 ),
               ),
               const SizedBox(width: 6),

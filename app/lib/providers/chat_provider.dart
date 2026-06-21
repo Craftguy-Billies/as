@@ -57,6 +57,8 @@ class ChatProvider extends ChangeNotifier {
   bool get isProcessing => _queueTotal > 0;
   String serverRepo = '';
   String serverMode = 'code';
+  List<Map<String, dynamic>> _savedRepos = [];
+  List<Map<String, dynamic>> get savedRepos => _savedRepos;
 
   // -- Init: restore from cache + server, resume batch if running --
   Future<void> loadFromCache() async {
@@ -117,6 +119,14 @@ class ChatProvider extends ChangeNotifier {
       }
     } catch (e) {
       debugPrint('ChatProvider.loadFromCache: batch resume failed: $e');
+    }
+
+    // Fetch saved repos
+    try {
+      _savedRepos = await _api.getChatRepos();
+      debugPrint('ChatProvider.loadFromCache: loaded ${_savedRepos.length} repos');
+    } catch (e) {
+      debugPrint('ChatProvider.loadFromCache: repo fetch failed: $e');
     }
   }
 
@@ -190,7 +200,7 @@ class ChatProvider extends ChangeNotifier {
         return;
       }
       try {
-        final state = await _api.getChat();
+        final state = await _api.getChat(repo: repo, mode: mode);
         if (state == null) return;
         _error = null;  // clear error on any successful poll
 
@@ -247,6 +257,43 @@ class ChatProvider extends ChangeNotifier {
         }
       }
     });
+  }
+
+  // -- Repo management --
+  Future<void> switchRepo(String repo, String mode) async {
+    if (repo == serverRepo && mode == serverMode) return;
+    serverRepo = repo;
+    serverMode = mode;
+    _pollTimer?.cancel();
+    _queuePosition = 0;
+    _queueTotal = 0;
+    _loading = false;
+    _loadingSince = null;
+    // Fetch messages for this repo from server
+    try {
+      final state = await _api.getChat(repo: repo, mode: mode);
+      final serverMsgs = (state['messages'] as List?)
+              ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
+              .toList() ??
+          [];
+      _messages = serverMsgs;
+      _error = null;
+      await _saveToCache();
+    } catch (e) {
+      debugPrint('ChatProvider.switchRepo: failed to fetch messages: $e');
+    }
+    notifyListeners();
+    // Refresh repo list (new repo might appear later after messages)
+    refreshRepos();
+  }
+
+  Future<void> refreshRepos() async {
+    try {
+      _savedRepos = await _api.getChatRepos();
+      notifyListeners();
+    } catch (e) {
+      debugPrint('ChatProvider.refreshRepos: $e');
+    }
   }
 
   // -- Cancel / Clear --

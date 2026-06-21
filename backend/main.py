@@ -113,7 +113,7 @@ async def stream_logs():
 # Chat (token-efficient conversation reuse)
 # ---------------------------------------------------------------------------
 
-from chat_service import send as chat_send, reset as chat_reset, get_state as chat_state, enqueue_batch as chat_enqueue_batch, cancel_batch as chat_cancel_batch
+from chat_service import send as chat_send, reset as chat_reset, get_state as chat_state, get_repos as chat_repos, enqueue_batch as chat_enqueue_batch, cancel_batch as chat_cancel_batch
 
 
 class ChatRequest(BaseModel):
@@ -139,9 +139,17 @@ async def chat_send_message(req: ChatRequest):
 
 
 @app.get("/api/chat")
-async def chat_get():
-    """Return current chat session state (messages + conversation_id)."""
-    return chat_state()
+async def chat_get(repo: str = Query(""), mode: str = Query("")):
+    """Return current chat session state (messages + conversation_id).
+    Pass ?repo=owner/repo&mode=code to switch active repo.
+    """
+    return chat_state(repo=repo, mode=mode)
+
+
+@app.get("/api/chat/repos")
+async def chat_list_repos():
+    """Return list of all repos that have chat history."""
+    return {"repos": chat_repos()}
 
 
 @app.delete("/api/chat")

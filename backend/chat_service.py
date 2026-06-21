@@ -35,8 +35,19 @@ _conversation_mode: str = "code"
 _last_event_index: int = 0
 _sandbox_id: str | None = None
 _event_kinds: set[str] = set()  # diagnostic: all event kinds seen in current conversation
-_messages: list[dict] = []
+_current_repo_key: str = ""  # "repo|mode" — determines which chat history to show
+_messages_by_repo: dict[str, list[dict]] = {}  # per-repo chat history
 _lock = threading.Lock()
+
+def _msgs() -> list[dict]:
+    """Get or create the message list for the current repo/mode."""
+    if _current_repo_key not in _messages_by_repo:
+        _messages_by_repo[_current_repo_key] = []
+    return _messages_by_repo[_current_repo_key]
+
+def _repo_key(repo: str, mode: str) -> str:
+    """Build a stable key for repo+mode combo."""
+    return f"{repo or '(none)'}|{mode}"
 
 # Batch queue — server-side, survives client disconnect
 _batch_prompts: list[str] = []
@@ -54,7 +65,7 @@ _CHAT_TIMEOUT = int(os.getenv("VIBECODE_CHAT_TIMEOUT", "600"))  # 10 min default
 
 # -- Restore state from DB on module load --
 def _restore_from_db() -> None:
-    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages
+    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages_by_repo, _current_repo_key
     global _batch_prompts, _batch_position, _batch_total, _batch_running
     if _DB is None:
         return
@@ -66,14 +77,15 @@ def _restore_from_db() -> None:
             _conversation_repo = data.get("repo", "")
             _conversation_mode = data.get("mode", "code")
             _last_event_index = data.get("last_event_index", 0)
-            _messages = data.get("messages", [])
+            _messages_by_repo = data.get("messages_by_repo", {})
+            _current_repo_key = data.get("current_repo_key", _repo_key(_conversation_repo, _conversation_mode))
             # Restore batch queue if server restarted mid-batch
             _batch_prompts = data.get("batch_prompts", [])
             _batch_position = data.get("batch_position", 0)
             _batch_total = data.get("batch_total", 0)
             _batch_running = False  # never auto-resume — user must re-trigger
             logger.info("Restored chat session: conv=%s repo=%s mode=%s msgs=%d batch=%d/%d",
-                         _conversation_id, _conversation_repo, _conversation_mode, len(_messages),
+                         _conversation_id, _conversation_repo, _conversation_mode, len(_msgs()),
                          _batch_position, _batch_total)
     except Exception as e:
         logger.warning("Failed to restore chat session from DB: %s", e)
@@ -83,14 +95,14 @@ def _persist_to_db() -> None:
         return
     try:
         # Trim in-memory to prevent unbounded growth
-        if len(_messages) > 500:
-            _messages[:] = _messages[-400:]
+        if len(_msgs()) > 500:
+            _msgs()[:] = _msgs()[-400:]
         data = json.dumps({
             "conversation_id": _conversation_id,
             "repo": _conversation_repo,
             "mode": _conversation_mode,
             "last_event_index": _last_event_index,
-            "messages": _messages[-200:],  # keep last 200 messages max
+            "messages": _msgs()[-200:],  # keep last 200 messages max
             # Batch state for survival across restarts
             "batch_prompts": _batch_prompts,
             "batch_position": _batch_position,
@@ -124,7 +136,7 @@ def _headers() -> dict:
 
 def reset() -> None:
     """Clear the current chat session AND cancel any running batch."""
-    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages, _event_kinds, _conversation_status, _sandbox_id
+    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
     global _batch_cancelled, _batch_running, _batch_prompts, _batch_position, _batch_total
     with _lock:
         # Cancel running batch
@@ -142,21 +154,29 @@ def reset() -> None:
         _last_event_index = 0
         _event_kinds.clear()
         _sandbox_id = None
-        _messages = []
+        _messages_by_repo.pop(_current_repo_key, None)  # clear current repo's history
         _conversation_status = "idle"
         _persist_to_db()
     logger.info("Chat session reset")
 
 
-def get_state() -> dict:
-    """Return current chat state for API consumers."""
+def get_state(repo: str = "", mode: str = "") -> dict:
+    """Return current chat state for API consumers.
+    
+    If repo/mode are provided, switch the active repo key first.
+    This lets the Flutter client request messages for a specific repo.
+    """
+    global _current_repo_key
     with _lock:
+        if repo or mode:
+            _current_repo_key = _repo_key(repo, mode)
         return {
-            "messages": list(_messages),
+            "messages": list(_msgs()),
             "conversation_id": _conversation_id,
             "sandbox_id": _sandbox_id,
             "repo": _conversation_repo,
             "mode": _conversation_mode,
+            "current_repo_key": _current_repo_key,
             "conversation_status": _conversation_status,
             "batch": {
                 "running": _batch_running,
@@ -166,6 +186,25 @@ def get_state() -> dict:
                 "prompts": list(_batch_prompts),
             },
         }
+
+
+def get_repos() -> list[dict]:
+    """Return list of all saved repo keys with message counts."""
+    result = []
+    for key, msgs in _messages_by_repo.items():
+        if not msgs:
+            continue
+        repo_mode, sep, mode_val = key.rpartition("|")
+        repo = repo_mode  # full key part before last |
+        result.append({
+            "key": key,
+            "repo": repo,
+            "mode": mode_val if sep else "code",
+            "message_count": len(msgs),
+            "last_timestamp": msgs[-1].get("timestamp", 0),
+        })
+    result.sort(key=lambda r: r["last_timestamp"], reverse=True)
+    return result
 
 
 def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") -> dict:
@@ -194,7 +233,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             _last_event_index = 0
             _sandbox_id = None
             _event_kinds.clear()
-            _messages = []  # clear old repo's messages
+            _messages_by_repo.pop(_current_repo_key, None)  # clear current repo's history  # clear old repo's messages
             _conversation_repo = repo
             _conversation_mode = mode
             _persist_to_db()
@@ -240,8 +279,9 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             _conversation_id = new_conv_id
             _conversation_repo = repo
             _conversation_mode = mode
+            _current_repo_key = _repo_key(repo, mode)
             _last_event_index = 0
-        _messages.append({
+        _msgs().append({
             "role": "user",
             "content": prompt,
             "timestamp": int(time.time() * 1000),
@@ -258,7 +298,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
     # Phase 3: Save result under lock
     with _lock:
         if response:
-            _messages.append({
+            _msgs().append({
                 "role": "assistant",
                 "content": response,
                 "timestamp": int(time.time() * 1000),
@@ -334,7 +374,7 @@ def _process_batch_worker() -> None:
     _batch_running=True (which would freeze the client forever).
     Also enforce a 30-minute global timeout per batch.
     """
-    global _batch_cancelled, _batch_running, _batch_prompts, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _messages
+    global _batch_cancelled, _batch_running, _batch_prompts, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode
     _batch_started_at = time.time()
 
     try:
@@ -350,7 +390,7 @@ def _process_batch_worker() -> None:
                     return
                 # 30-minute global batch timeout
                 if time.time() - _batch_started_at > 1800:
-                    _messages.append({
+                    _msgs().append({
                         "role": "error",
                         "content": "Batch timed out after 30 minutes. Remaining prompts skipped.",
                         "timestamp": int(time.time() * 1000),
@@ -379,7 +419,7 @@ def _process_batch_worker() -> None:
 
             if result and "error" in result:
                 with _lock:
-                    _messages.append({
+                    _msgs().append({
                         "role": "assistant",
                         "content": f"❌ [{pos}/{total}] Failed: {result['error']}",
                         "timestamp": int(time.time() * 1000),
@@ -393,7 +433,7 @@ def _process_batch_worker() -> None:
     except BaseException as e:
         logger.error("Batch worker FATAL crash: %s", e, exc_info=True)
         with _lock:
-            _messages.append({
+            _msgs().append({
                 "role": "event",
                 "content": f"❌ Worker crashed\nType: {type(e).__name__}\nMessage: {e}",
                 "kind": "ErrorEvent",
@@ -613,7 +653,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
     Timeout: VIBECODE_CHAT_TIMEOUT env var (default 600s = 10 min).
 
-    Also appends live events (tool calls, observations) to _messages so the client
+    Also appends live events (tool calls, observations) to the chat history so the client
     can see what the agent is doing via polling get_state().
     """
     global _last_event_index, _conversation_status, _sandbox_id
@@ -675,7 +715,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             }
             label = status_labels.get(status, f"📋 Status: {status} ({elapsed}s)")
             with _lock:
-                _messages.append({
+                _msgs().append({
                     "role": "event",
                     "content": label,
                     "kind": "SystemEvent",
@@ -761,7 +801,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 if text:
                     all_new_msgs.append(text)
                     with _lock:
-                        _messages.append({
+                        _msgs().append({
                             "role": "event",
                             "content": f"💬 {text}",
                             "kind": kind,
@@ -775,7 +815,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             event_preview = _format_event_preview(evt)
             if event_preview:
                 with _lock:
-                    _messages.append({
+                    _msgs().append({
                         "role": "event",
                         "content": event_preview,
                         "kind": kind,
@@ -800,7 +840,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 parts.append(f"Type: {err_type}")
             parts.append(f"Message: {err_detail}")
             with _lock:
-                _messages.append({
+                _msgs().append({
                     "role": "event",
                     "content": "\n".join(parts),
                     "kind": "ErrorEvent",
@@ -812,7 +852,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         elapsed = int(time.time() - start)
         logger.warning("No assistant messages found after %ds (status=%s)", elapsed, last_status)
         logger.warning("All event kinds seen: %s", sorted(_event_kinds))
-        logger.warning("Total events: %d, messages: %d", len(all_events), len(_messages))
+        logger.warning("Total events: %d, messages: %d", len(all_events), len(_msgs()))
 
         # Fallback: scrape last 20 events for any text content
         fallback_text = _scrape_events_for_text(all_events[-20:])
@@ -822,7 +862,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
         if not all_new_msgs:
             with _lock:
-                _messages.append({
+                _msgs().append({
                     "role": "event",
                     "content": f"⚠️ No response from agent after {elapsed}s (status: {last_status or 'unknown'}). The agent may be stuck or the LLM may not be configured correctly on the server.",
                     "kind": "SystemEvent",
