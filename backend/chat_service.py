@@ -877,6 +877,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     if timeout is None:
         timeout = _CHAT_TIMEOUT
 
+    global _conversation_status, _sandbox_id, _seen_event_ids
 
     start = time.time()
     all_new_msgs: list[str] = []
