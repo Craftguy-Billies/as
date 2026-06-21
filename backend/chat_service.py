@@ -33,6 +33,7 @@ _last_event_index: int = 0
 _sandbox_id: str | None = None
 _event_kinds: set[str] = set()  # diagnostic: all event kinds seen in current conversation
 _seen_event_ids: set[str] = set()  # ID-based event dedup (immune to API limit=N truncation)
+_last_event_ts: int = 0  # timestamp of last event seen, for incremental pagination
 _current_repo_key: str = ""  # current repo — determines which chat history to show
 _messages_by_repo: dict[str, list[dict]] = {}  # per-repo chat history
 _lock = threading.Lock()
@@ -172,7 +173,7 @@ def _headers() -> dict:
 
 def reset() -> None:
     """Clear the current chat session AND cancel any running batch."""
-    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
+    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key, _last_event_ts, _seen_event_ids
     global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_prompt_branches, _batch_position, _batch_total, _batch_skip_prompt
     with _lock:
         # Cancel running batch
@@ -193,6 +194,7 @@ def reset() -> None:
         _conversation_mode = "code"
         _last_event_index = 0
         _seen_event_ids.clear()
+        _last_event_ts = 0
         _event_kinds.clear()
         _sandbox_id = None
         _messages_by_repo.pop(_current_repo_key, None)  # clear current repo's history
@@ -261,7 +263,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
     Creates a new conversation when repo or mode changes.
     HTTP calls (create/send) happen OUTSIDE _lock so get_state() polling is never blocked.
     """
-    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _sandbox_id
+    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _sandbox_id, _last_event_ts, _seen_event_ids
 
     if not CLOUD_API_KEY:
         return {"error": "OPENHANDS_CLOUD_API_KEY not configured on server"}
@@ -280,6 +282,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             _conversation_id = None
             _last_event_index = 0
             _seen_event_ids.clear()
+            _last_event_ts = 0
             _sandbox_id = None
             _event_kinds.clear()
             _conversation_repo = repo
@@ -316,6 +319,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                         _conversation_id = None
                         _last_event_index = 0
                         _seen_event_ids.clear()
+                        _last_event_ts = 0
                         _sandbox_id = None
                         _persist_to_db()
                     if recent_msgs:
@@ -343,6 +347,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                         _conversation_id = None
                         _last_event_index = 0
                         _seen_event_ids.clear()
+                        _last_event_ts = 0
                         _sandbox_id = None
                         _persist_to_db()
                     return {"error": send_err or "Failed to send message to conversation"}
@@ -354,6 +359,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                 _conversation_id = None
                 _last_event_index = 0
                 _seen_event_ids.clear()
+                _last_event_ts = 0
                 _sandbox_id = None
                 _persist_to_db()
         return {"error": f"Cloud API error: {e.response.status_code}"}
@@ -371,6 +377,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             _current_repo_key = _repo_key(repo)
             _last_event_index = 0
             _seen_event_ids.clear()
+            _last_event_ts = 0
         _msgs().append({
             "role": "user",
             "content": prompt,
@@ -862,7 +869,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
     Uses ID-based event dedup (same as agent_runner.py) — immune to API limit=N truncation.
     """
-    global _conversation_status, _sandbox_id, _seen_event_ids
+    global _conversation_status, _sandbox_id, _seen_event_ids, _last_event_ts
 
     if timeout is None:
         timeout = _CHAT_TIMEOUT
@@ -935,14 +942,33 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 })
 
         # -- Get events (SAME endpoint as agent_runner) --
+        params: dict = {"limit": 200}
+        if _last_event_ts:
+            # Try incremental pagination first; fall back to without after
+            # if the API doesn't support it (422).
+            params["after"] = _last_event_ts
         try:
             r2 = httpx.get(
                 f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
                 headers=_headers(),
-                params={"limit": 1000, "sort": "-created_at"},  # newest first, high limit
+                params=params,
                 timeout=10,
             )
             r2.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 422 and "after" in params:
+                logger.info("events/search rejected 'after' param, retrying without")
+                params.pop("after")
+                r2 = httpx.get(
+                    f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
+                    headers=_headers(),
+                    params=params,
+                    timeout=10,
+                )
+                r2.raise_for_status()
+            else:
+                raise
+        try:
             events_data = r2.json()
         except Exception as e:
             logger.warning("Events poll error: %s", e)
@@ -979,6 +1005,9 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 continue
             if evt_id:
                 _seen_event_ids.add(evt_id)
+            ts = evt.get("timestamp") or evt.get("created_at") or 0
+            if isinstance(ts, (int, float)) and ts > _last_event_ts:
+                _last_event_ts = int(ts)
             kind = evt.get("kind", "")
             source = evt.get("source", "")
             tool = evt.get("tool_name", "")
@@ -1084,7 +1113,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 r3 = httpx.get(
                     f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
                     headers=_headers(),
-                    params={"limit": 200, "sort": "-created_at"},
+                    params={"limit": 200},
                     timeout=10,
                 )
                 r3.raise_for_status()
