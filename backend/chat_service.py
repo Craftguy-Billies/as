@@ -64,11 +64,11 @@ def _restore_from_db() -> None:
     global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages_by_repo, _current_repo_key
     global _batch_prompts, _batch_position, _batch_total, _batch_running
     try:
-        get_sync_db()
+        db = get_sync_db()
     except Exception:
         return
     try:
-        row = get_sync_db().execute("SELECT value FROM kv_store WHERE key = 'chat_session'").fetchone()
+        row = db.execute("SELECT value FROM kv_store WHERE key = 'chat_session'").fetchone()
         if row:
             data = json.loads(row[0])
             _conversation_id = data.get("conversation_id")
@@ -90,7 +90,7 @@ def _restore_from_db() -> None:
 
 def _persist_to_db() -> None:
     try:
-        get_sync_db()
+        db = get_sync_db()
     except Exception:
         return
     try:
@@ -109,17 +109,17 @@ def _persist_to_db() -> None:
             "batch_total": _batch_total,
             "batch_running": _batch_running,
         })
-        get_sync_db().execute(
+        db.execute(
             "INSERT OR REPLACE INTO kv_store (key, value) VALUES ('chat_session', ?)",
             (data,),
         )
-        get_sync_db().commit()
+        db.commit()
     except Exception:
         try:
-            get_sync_db().execute(
+            db.execute(
                 "CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT)"
             )
-            get_sync_db().commit()
+            db.commit()
         except Exception as e:
             logger.warning("Failed to persist chat session (kv_store missing): %s", e)
 

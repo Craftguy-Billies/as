@@ -24,7 +24,7 @@ def get_sync_db() -> sqlite3.Connection:
     """Get a thread-local synchronous sqlite3 connection (for non-async code)."""
     conn = getattr(_sync_conns, 'conn', None)
     if conn is None:
-        conn = sqlite3.connect(_resolve_path())
+        conn = sqlite3.connect(_resolve_path(), check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
