@@ -128,20 +128,31 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _jumpToBottom() {
-    // Instant jump — for initial load after all setState calls settle
-    if (_scrollCtrl.hasClients && _scrollCtrl.position.maxScrollExtent > 0) {
-      _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
-      return;
-    }
-    // Controller not yet attached (widget tree still settling).
-    // Listen once and jump when ready.
-    void listener() {
-      if (_scrollCtrl.hasClients && _scrollCtrl.position.maxScrollExtent > 0) {
-        _scrollCtrl.removeListener(listener);
-        _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
+    // ListView.builder lays out items lazily over multiple frames.
+    // maxScrollExtent changes as more items are built, so we keep
+    // jumping until the extent stabilizes for 3 consecutive checks.
+    double _lastExtent = -1;
+    int _stable = 0;
+
+    void check() {
+      if (!mounted || !_scrollCtrl.hasClients) return;
+      final ext = _scrollCtrl.position.maxScrollExtent;
+      if (ext <= 0) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => check());
+        return;
       }
+      if (ext == _lastExtent) {
+        _stable++;
+        if (_stable >= 3) return; // fully laid out
+      } else {
+        _stable = 0;
+        _lastExtent = ext;
+        _scrollCtrl.jumpTo(ext);
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) => check());
     }
-    _scrollCtrl.addListener(listener);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => check());
   }
 
   @override
