@@ -115,7 +115,7 @@ class ChatProvider extends ChangeNotifier {
         final merged = <ChatMessage>[];
         final seen = <String>{};
         for (final m in [...serverMsgs, ..._messages]) {
-          final key = '${m.role}:${m.content}';
+          final key = '${m.role}:${m.content}:${m.timestamp}';
           if (seen.add(key)) merged.add(m);
         }
         _messages = merged;
@@ -256,7 +256,7 @@ class ChatProvider extends ChangeNotifier {
           final merged = <ChatMessage>[];
           final seen = <String>{};
           for (final m in [...serverMsgs, ..._messages]) {
-            final key = '${m.role}:${m.content}';
+            final key = '${m.role}:${m.content}:${m.timestamp}';
             if (seen.add(key)) merged.add(m);
           }
           if (merged.length != _messages.length) {

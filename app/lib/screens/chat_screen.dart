@@ -614,7 +614,7 @@ class _ChatBubble extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   isUser
-                      ? Text(
+                      ? SelectableText(
                           msg.content,
                           style: const TextStyle(
                             color: Colors.white,
@@ -622,7 +622,8 @@ class _ChatBubble extends StatelessWidget {
                             height: 1.45,
                           ),
                         )
-                      : MarkdownBody(
+                      : SelectionArea(
+                          child: MarkdownBody(
                           data: msg.content,
                           styleSheet: MarkdownStyleSheet(
                             p: const TextStyle(color: Colors.white, fontSize: 14.5, height: 1.45),
@@ -647,6 +648,7 @@ class _ChatBubble extends StatelessWidget {
                             listBullet: const TextStyle(color: Color(0xFF7C3AED)),
                           ),
                         ),
+                      ),
                   const SizedBox(height: 4),
                   Text(
                     _fmtTime(msg.timestamp),
@@ -667,28 +669,29 @@ class _ChatBubble extends StatelessWidget {
 
   Widget _buildEvent(BuildContext context) {
     // Compact inline event display — tool calls, observations, etc.
+    // Backend sends text tags like [READ], [EDIT], [ERROR] instead of emoji
     Color accent;
     IconData icon;
-    if (msg.content.startsWith('💬')) { accent = Colors.white70; icon = Icons.chat_bubble_outline; }
-    else if (msg.content.startsWith('💻')) { accent = const Color(0xFF00FF88); icon = Icons.terminal; }
-    else if (msg.content.startsWith('📝')) { accent = const Color(0xFFF59E0B); icon = Icons.edit; }
-    else if (msg.content.startsWith('🔍')) { accent = const Color(0xFF3B82F6); icon = Icons.search; }
-    else if (msg.content.startsWith('🌐')) { accent = const Color(0xFF06B6D4); icon = Icons.public; }
-    else if (msg.content.startsWith('📤')) { accent = Colors.grey; icon = Icons.output; }
-    else if (msg.content.startsWith('📄')) { accent = const Color(0xFF10B981); icon = Icons.description; }
-    else if (msg.content.startsWith('📊')) { accent = const Color(0xFF8B5CF6); icon = Icons.bar_chart; }
-    else if (msg.content.startsWith('❌')) { accent = Colors.redAccent; icon = Icons.error; }
-    else if (msg.content.startsWith('⚠')) { accent = Colors.orangeAccent; icon = Icons.warning_amber; }
-    else if (msg.content.startsWith('🔵')) { accent = const Color(0xFF3B82F6); icon = Icons.play_circle_outline; }
-    else if (msg.content.startsWith('🟢')) { accent = const Color(0xFF22C55E); icon = Icons.play_circle; }
-    else if (msg.content.startsWith('✅')) { accent = const Color(0xFF22C55E); icon = Icons.check_circle; }
-    else if (msg.content.startsWith('⏹️')) { accent = Colors.grey; icon = Icons.stop_circle; }
-    else if (msg.content.startsWith('📋')) { accent = Colors.grey; icon = Icons.code; }
+    if (msg.content.startsWith('[TERMINAL]')) { accent = const Color(0xFF00FF88); icon = Icons.terminal; }
+    else if (msg.content.startsWith('[READ]')) { accent = const Color(0xFF10B981); icon = Icons.menu_book; }
+    else if (msg.content.startsWith('[EDIT]')) { accent = const Color(0xFFF59E0B); icon = Icons.edit; }
+    else if (msg.content.startsWith('[UNDO]')) { accent = Colors.orangeAccent; icon = Icons.undo; }
+    else if (msg.content.startsWith('[SEARCH]')) { accent = const Color(0xFF3B82F6); icon = Icons.search; }
+    else if (msg.content.startsWith('[BROWSER]')) { accent = const Color(0xFF06B6D4); icon = Icons.public; }
+    else if (msg.content.startsWith('[OUT]')) { accent = Colors.grey; icon = Icons.output; }
+    else if (msg.content.startsWith('[WARN]')) { accent = Colors.orangeAccent; icon = Icons.warning_amber; }
+    else if (msg.content.startsWith('[FILE]')) { accent = const Color(0xFF10B981); icon = Icons.description; }
+    else if (msg.content.startsWith('[RESULTS]')) { accent = const Color(0xFF8B5CF6); icon = Icons.bar_chart; }
+    else if (msg.content.startsWith('[ERROR]')) { accent = Colors.redAccent; icon = Icons.error; }
+    else if (msg.content.startsWith('[STOP]')) { accent = Colors.grey; icon = Icons.stop_circle; }
+    else if (msg.content.startsWith('[MSG]')) { accent = Colors.white70; icon = Icons.chat_bubble_outline; }
+    else if (msg.content.startsWith('[STATUS]')) { accent = const Color(0xFF3B82F6); icon = Icons.info_outline; }
+    else if (msg.content.startsWith('[WORKING]')) { accent = const Color(0xFF22C55E); icon = Icons.hourglass_top; }
+    else if (msg.content.startsWith('[DONE]')) { accent = const Color(0xFF22C55E); icon = Icons.check_circle; }
     else { accent = Colors.grey; icon = Icons.settings; }
 
-    // Strip emoji/icon prefix (first 1-3 chars if emoji) — the icon already conveys meaning.
-    // This avoids "Noto fonts" missing-character errors on platforms without emoji fonts.
-    final displayText = _stripEmojiPrefix(msg.content);
+    // Strip text tag prefix like "[READ] " for display (icon already conveys meaning)
+    final displayText = _stripTagPrefix(msg.content);
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 16),
@@ -716,36 +719,13 @@ class _ChatBubble extends StatelessWidget {
     );
   }
 
-  String _fmtTime(int ms) {
-    final dt = DateTime.fromMillisecondsSinceEpoch(ms);
-    final h = dt.hour.toString().padLeft(2, '0');
-    final m = dt.minute.toString().padLeft(2, '0');
-    return '$h:$m';
-  }
-
-  /// Strip the emoji/icon prefix (e.g. "🔵 " → "Agent is starting...", "💻 " → "$ ls")
-  /// so the Text widget never needs to render emoji glyphs. The icon already shows meaning.
-  static String _stripEmojiPrefix(String text) {
+  /// Strip text tag prefix like "[READ] " or "[EDIT] " for display.
+  /// The icon already conveys the meaning; we only show the description.
+  static String _stripTagPrefix(String text) {
     if (text.isEmpty) return text;
-    final runes = text.runes.toList();
-    int skip = 0;
-    for (final r in runes) {
-      // Emoji and symbol codepoints that may need special fonts
-      if ((r >= 0x1F300 && r <= 0x1F9FF) || // Misc Symbols, Emoticons, Supplemental
-          (r >= 0x2300 && r <= 0x27BF) ||   // Misc Technical, Dingbats (❌⚠✅⏹)
-          (r >= 0x1FA00 && r <= 0x1FAFF) || // Chess Symbols, etc.
-          r == 0xFE0F ||                     // Variation selector-16 (emoji style)
-          r == 0x200D) {                     // ZWJ (emoji combiner)
-        skip += 1;
-      } else {
-        break;
-      }
-    }
-    // Also skip a trailing space after emoji prefix
-    if (skip > 0 && skip < text.length && text[skip] == ' ') skip++;
-    return text.substring(skip);
+    final m = RegExp(r'^\[[A-Z]+\]\s?').firstMatch(text);
+    return m != null ? text.substring(m.end) : text;
   }
-}
 
 // ---------------------------------------------------------------------------
 // Typing indicator

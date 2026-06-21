@@ -45,6 +45,26 @@ def _repo_key(repo: str) -> str:
     """Build a stable key for a repo (plan and code share the same chat)."""
     return repo or '(none)'
 
+def _migrate_keys(msgs_by_repo: dict) -> dict:
+    """Migrate old 'repo|mode' keys to flat 'repo' keys, merging messages."""
+    migrated: dict[str, list[dict]] = {}
+    for key, msgs in msgs_by_repo.items():
+        if '|' in key:
+            repo, _, _mode = key.rpartition('|')
+            base = repo or '(none)'
+        else:
+            base = key
+        if base not in migrated:
+            migrated[base] = list(msgs)
+        else:
+            # Merge: dedup by (role, content, timestamp)
+            existing = {(m.get('role'), m.get('content'), m.get('timestamp')) for m in migrated[base]}
+            for m in msgs:
+                if (m.get('role'), m.get('content'), m.get('timestamp')) not in existing:
+                    migrated[base].append(m)
+            migrated[base].sort(key=lambda m: m.get('timestamp', 0))
+    return migrated
+
 # Batch queue — server-side, survives client disconnect
 _batch_prompts: list[str] = []
 _batch_prompt_modes: list[str] = []  # per-prompt mode (plan/code)
@@ -77,6 +97,8 @@ def _restore_from_db() -> None:
             _conversation_mode = data.get("mode", "code")
             _last_event_index = data.get("last_event_index", 0)
             _messages_by_repo = data.get("messages_by_repo", {})
+            # Migrate old "repo|mode" keys to flat "repo" keys
+            _messages_by_repo = _migrate_keys(_messages_by_repo)
             _current_repo_key = data.get("current_repo_key", _repo_key(_conversation_repo))
             # Restore batch queue if server restarted mid-batch
             _batch_prompts = data.get("batch_prompts", [])
@@ -200,14 +222,18 @@ def get_repos() -> list[dict]:
     for key, msgs in _messages_by_repo.items():
         if not msgs:
             continue
-        repo_mode, sep, mode_val = key.rpartition("|")
-        repo = repo_mode  # full key part before last |
+        # Normalize: strip old mode suffix if present
+        repo = key.rpartition("|")[0] if "|" in key else key
+        if not repo:
+            repo = "(none)"
+        # Determine mode: check messages for mode hints, default to code
+        mode = "code"
         result.append({
-            "key": key,
+            "key": repo,
             "repo": repo,
-            "mode": mode_val if sep else "code",
+            "mode": mode,
             "message_count": len(msgs),
-            "last_timestamp": msgs[-1].get("timestamp", 0),
+            "last_timestamp": msgs[-1].get("timestamp", 0) if msgs else 0,
         })
     result.sort(key=lambda r: r["last_timestamp"], reverse=True)
     return result
@@ -436,7 +462,7 @@ def _process_batch_worker() -> None:
                 with _lock:
                     _msgs().append({
                         "role": "assistant",
-                        "content": f"❌ [{pos}/{total}] Failed: {result['error']}",
+                        "content": f"[ERROR] [{pos}/{total}] Failed: {result['error']}",
                         "timestamp": int(time.time() * 1000),
                     })
 
@@ -450,7 +476,7 @@ def _process_batch_worker() -> None:
         with _lock:
             _msgs().append({
                 "role": "event",
-                "content": f"❌ Worker crashed\nType: {type(e).__name__}\nMessage: {e}",
+                "content": f"[ERROR] Worker crashed\nType: {type(e).__name__}\nMessage: {e}",
                 "kind": "ErrorEvent",
                 "timestamp": int(time.time() * 1000),
             })
@@ -729,15 +755,15 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
             # Stream status as visible event
             status_labels = {
-                "starting": f"🔵 Agent is starting up... ({elapsed}s)",
-                "running": f"🟢 Agent is working... ({elapsed}s)",
-                "completed": f"✅ Task completed ({elapsed}s)",
-                "finished": f"✅ Task finished ({elapsed}s)",
-                "failed": f"❌ Task failed ({elapsed}s)",
-                "error": f"❌ Error ({elapsed}s)",
-                "stopped": f"⏹️ Task stopped ({elapsed}s)",
+                "starting": f"[STATUS] Agent is starting up... ({elapsed}s)",
+                "running": f"[WORKING] Agent is working... ({elapsed}s)",
+                "completed": f"[DONE] Task completed ({elapsed}s)",
+                "finished": f"[DONE] Task finished ({elapsed}s)",
+                "failed": f"[ERROR] Task failed ({elapsed}s)",
+                "error": f"[ERROR] Error ({elapsed}s)",
+                "stopped": f"[STOP] Task stopped ({elapsed}s)",
             }
-            label = status_labels.get(status, f"📋 Status: {status} ({elapsed}s)")
+            label = status_labels.get(status, f"[STATUS] Status: {status} ({elapsed}s)")
             with _lock:
                 _msgs().append({
                     "role": "event",
@@ -830,7 +856,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                     with _lock:
                         _msgs().append({
                             "role": "event",
-                            "content": f"💬 {text}",
+                            "content": f"[MSG] {text}",
                             "kind": kind,
                             "timestamp": int(time.time() * 1000),
                         })
@@ -867,7 +893,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             err_type = items[0].get("error_type", "")
             logger.warning("Conversation %s: type=%s detail=%s", status, err_type, err_detail)
             # Stream the failure as a visible event
-            parts = [f"❌ Conversation {status}"]
+            parts = [f"[ERROR] Conversation {status}"]
             if err_type:
                 parts.append(f"Type: {err_type}")
             parts.append(f"Message: {err_detail}")
@@ -896,7 +922,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             with _lock:
                 _msgs().append({
                     "role": "event",
-                    "content": f"⚠️ No response from agent after {elapsed}s (status: {last_status or 'unknown'}). The agent may be stuck or the LLM may not be configured correctly on the server.",
+                    "content": f"[WARN] No response from agent after {elapsed}s (status: {last_status or 'unknown'}). The agent may be stuck or the LLM may not be configured correctly on the server.",
                     "kind": "SystemEvent",
                     "timestamp": int(time.time() * 1000),
                 })
@@ -973,7 +999,7 @@ def _format_event_preview(evt: dict) -> str | None:
         if tool in ("bash", "terminal", "execute_bash_command"):
             cmd = action.get("command", "") or action.get("content", "")
             if cmd:
-                return f"💻 $ {cmd}"
+                return f"[TERMINAL] $ {cmd}"
         elif tool in ("file_editor", "str_replace_editor"):
             cmd = (action.get("command") or "").strip()
             path = action.get("path", "") or action.get("file", "")
@@ -983,23 +1009,23 @@ def _format_event_preview(evt: dict) -> str | None:
                                tool)
             if path:
                 if cmd == "view":
-                    return f"📖 Reading: {path}"
+                    return f"[READ] Reading: {path}"
                 if cmd == "create":
-                    return f"📝 Creating: {path}"
+                    return f"[EDIT] Creating: {path}"
                 if cmd == "undo_edit":
-                    return f"↩️ Undoing: {path}"
-                return f"📝 Editing: {path}"
+                    return f"[UNDO] Undoing: {path}"
+                return f"[EDIT] Editing: {path}"
         elif tool in ("tavily_search", "tavily_tavily_search"):
             q = action.get("query", "") or action.get("content", "")
             if q:
-                return f"🔍 Searching: {q}"
+                return f"[SEARCH] Searching: {q}"
         elif tool == "browser_navigate":
             url = action.get("url", "")
             if url:
-                return f"🌐 Navigate: {url}"
+                return f"[BROWSER] Navigate: {url}"
         else:
             # Unknown tool — show tool name + first action key for visibility
-            return f"🔧 {tool}: {str(action)[:120]}"
+            return f"[TOOL] {tool}: {str(action)[:120]}"
 
     elif kind == "ObservationEvent":
         obs = evt.get("observation") or {}
@@ -1016,20 +1042,20 @@ def _format_event_preview(evt: dict) -> str | None:
             out = stdout or stderr
             if out:
                 short = str(out)[:200].replace("\n", " ").strip()
-                tag = "📤 " if not stderr else "⚠️ stderr: "
+                tag = "[OUT] " if not stderr else "[WARN] stderr: "
                 extra = f" (exit={exit_code})" if exit_code is not None and exit_code != 0 else ""
                 return f"{tag}{short}{extra}"
         elif tool in ("file_editor", "str_replace_editor"):
             diff = obs.get("diff", "")
             if diff:
-                return f"📄 Diff ({len(diff)} chars)"
+                return f"[FILE] Diff ({len(diff)} chars)"
             path = obs.get("path", "")
             if path:
-                return f"📄 File: {path}"
+                return f"[FILE] File: {path}"
         elif tool in ("tavily_search", "tavily_tavily_search"):
             results = obs.get("results", [])
             if isinstance(results, list) and results:
-                lines = [f"📊 {len(results)} search results:"]
+                lines = [f"[RESULTS] {len(results)} search results:"]
                 for r in results[:5]:
                     title = r.get("title", "")
                     url = r.get("url", "")
@@ -1041,7 +1067,7 @@ def _format_event_preview(evt: dict) -> str | None:
         elif tool == "browser_get_content":
             text = obs.get("text", "") or obs.get("content", "")
             if text:
-                return f"🌐 Page: ({len(str(text))} chars)"
+                return f"[BROWSER] Page: ({len(str(text))} chars)"
         else:
             # skip unknown observations
             return None
@@ -1050,6 +1076,6 @@ def _format_event_preview(evt: dict) -> str | None:
         msg = evt.get("message", "")
         error_type = evt.get("error_type", "") or evt.get("type", "")
         text = msg or error_type or "Unknown error"
-        return f"❌ {text[:300]}"
+        return f"[ERROR] {text[:300]}"
     # Catch-all: skip unknown event types
     return None

@@ -17,7 +17,7 @@ class ApiService {
   /// Wrap network errors in user-friendly messages
   static String friendlyError(Object e) {
     final s = e.toString().toLowerCase();
-    if (s.contains('socketexception') || s.contains('connection refused')) {
+    if (s.contains('socketexception') || s.contains('connection refused') || s.contains('connection abort')) {
       return 'Cannot reach server. Check your internet connection and server URL.';
     }
     if (s.contains('timeout') || s.contains('timed out')) {
