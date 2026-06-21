@@ -420,7 +420,11 @@ def _process_batch_worker() -> None:
         while True:
             with _lock:
                 # Per-prompt cancel: skip current, move to next
-                if _batch_skip_prompt:
+                try:
+                    skip_prompt = _batch_skip_prompt
+                except (NameError, UnboundLocalError):
+                    skip_prompt = False
+                if skip_prompt:
                     _batch_skip_prompt = False
                     _batch_cancelled = False
                     # Current prompt was removed from queue; next prompt is at same position
@@ -482,7 +486,11 @@ def _process_batch_worker() -> None:
 
             if result and "error" in result:
                 # Don't show error for deliberately cancelled prompts
-                if not _batch_skip_prompt:
+                try:
+                    skip = _batch_skip_prompt
+                except (NameError, UnboundLocalError):
+                    skip = False
+                if not skip:
                     with _lock:
                         _msgs().append({
                             "role": "assistant",
@@ -491,7 +499,11 @@ def _process_batch_worker() -> None:
                         })
 
             with _lock:
-                if not _batch_skip_prompt:
+                try:
+                    skip = _batch_skip_prompt
+                except (NameError, UnboundLocalError):
+                    skip = False
+                if not skip:
                     _batch_position += 1
                 _persist_to_db()
 
