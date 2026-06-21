@@ -19,6 +19,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final _scrollCtrl = ScrollController();
   bool _hasLoaded = false;
   bool _showRepoBar = false;
+  bool _needsInitialScroll = true;  // scroll to bottom on first render with messages
   int _lastTotalMsgCount = -1;  // only auto-scroll when new msgs arrive
   String _mode = 'code';
   String _activeModel = '';
@@ -130,9 +131,14 @@ class _ChatScreenState extends State<ChatScreen> {
     final prov = context.watch<ChatProvider>();
     final msgs = prov.messages;
 
-    // Auto-scroll when new messages arrive (post-build, not during build)
-    // Skip when showFromIndex changes (user is loading older msgs)
-    if (msgs.isNotEmpty && msgs.length != _lastTotalMsgCount) {
+    // Auto-scroll on first render with messages, or when new messages arrive.
+    // Skip when showFromIndex changes (user is loading older msgs).
+    final scrollNow = msgs.isNotEmpty && (
+      _needsInitialScroll ||
+      msgs.length != _lastTotalMsgCount
+    );
+    if (scrollNow) {
+      _needsInitialScroll = false;
       _lastTotalMsgCount = msgs.length;
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollDown());
     }
