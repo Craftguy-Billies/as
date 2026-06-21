@@ -942,7 +942,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 })
 
         # -- Get events (SAME endpoint as agent_runner) --
-        params: dict = {"limit": 200}
+        params: dict = {"limit": 100}
         if _last_event_ts:
             # Try incremental pagination first; fall back to without after
             # if the API doesn't support it (422).
@@ -1113,7 +1113,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 r3 = httpx.get(
                     f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
                     headers=_headers(),
-                    params={"limit": 200},
+                    params={"limit": 100},
                     timeout=10,
                 )
                 r3.raise_for_status()
