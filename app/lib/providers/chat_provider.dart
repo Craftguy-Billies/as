@@ -32,7 +32,7 @@ class ChatMessage {
 /// Send → enqueue on server → poll for live events + progress.
 /// Survives phone close — reconnects and resumes polling.
 class ChatProvider extends ChangeNotifier {
-  static const _cacheKey = 'chat_messages';
+  static const _cacheKey = 'chat_session';
 
   final ApiService _api;
   List<ChatMessage> _messages = [];
@@ -66,9 +66,20 @@ class ChatProvider extends ChangeNotifier {
     final raw = prefs.getString(_cacheKey);
     if (raw != null) {
       try {
-        final list = json.decode(raw) as List;
-        if (list.isNotEmpty) {
-          _messages = list
+        final data = json.decode(raw);
+        if (data is Map<String, dynamic>) {
+          final msgs = data['messages'];
+          if (msgs is List && msgs.isNotEmpty) {
+            _messages = msgs
+                .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
+                .toList();
+            notifyListeners();
+          }
+          serverRepo = (data['repo']?.toString()) ?? '';
+          serverMode = (data['mode']?.toString()) ?? 'code';
+        } else if (data is List && data.isNotEmpty) {
+          // Legacy cache format (plain list)
+          _messages = data
               .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
               .toList();
           notifyListeners();
@@ -80,7 +91,7 @@ class ChatProvider extends ChangeNotifier {
 
     // Merge server messages (survives server restart)
     try {
-      final data = await _api.getChat();
+      final data = await _api.getChat(repo: serverRepo, mode: serverMode);
       final serverMsgs = (data['messages'] as List?)
               ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
               .toList() ??
@@ -102,7 +113,7 @@ class ChatProvider extends ChangeNotifier {
 
     // Resume polling if a batch is running on the server
     try {
-      final state = await _api.getChat();
+      final state = await _api.getChat(repo: serverRepo, mode: serverMode);
       final batch = state?['batch'] as Map<String, dynamic>?;
       final isRunning = batch?['running'] == true;
       final total = (batch?['total'] as int?) ?? 0;
@@ -347,6 +358,11 @@ class ChatProvider extends ChangeNotifier {
 
   Future<void> _saveToCache() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_cacheKey, json.encode(_messages.map((m) => m.toJson()).toList()));
+    final payload = json.encode({
+      'messages': _messages.map((m) => m.toJson()).toList(),
+      'repo': serverRepo,
+      'mode': serverMode,
+    });
+    await prefs.setString(_cacheKey, payload);
   }
 }
