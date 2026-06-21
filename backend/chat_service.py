@@ -32,6 +32,7 @@ _conversation_mode: str = "code"
 _last_event_index: int = 0
 _sandbox_id: str | None = None
 _event_kinds: set[str] = set()  # diagnostic: all event kinds seen in current conversation
+_seen_event_ids: set[str] = set()  # ID-based event dedup (immune to API limit=N truncation)
 _current_repo_key: str = ""  # current repo — determines which chat history to show
 _messages_by_repo: dict[str, list[dict]] = {}  # per-repo chat history
 _lock = threading.Lock()
@@ -191,6 +192,7 @@ def reset() -> None:
         _conversation_branch = "main"
         _conversation_mode = "code"
         _last_event_index = 0
+        _seen_event_ids.clear()
         _event_kinds.clear()
         _sandbox_id = None
         _messages_by_repo.pop(_current_repo_key, None)  # clear current repo's history
@@ -277,6 +279,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                         _conversation_repo, repo, _conversation_branch, branch, _conversation_mode, mode)
             _conversation_id = None
             _last_event_index = 0
+            _seen_event_ids.clear()
             _sandbox_id = None
             _event_kinds.clear()
             _conversation_repo = repo
@@ -312,6 +315,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                                 recent_msgs.append(m)
                         _conversation_id = None
                         _last_event_index = 0
+                        _seen_event_ids.clear()
                         _sandbox_id = None
                         _persist_to_db()
                     if recent_msgs:
@@ -338,6 +342,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                     with _lock:
                         _conversation_id = None
                         _last_event_index = 0
+                        _seen_event_ids.clear()
                         _sandbox_id = None
                         _persist_to_db()
                     return {"error": send_err or "Failed to send message to conversation"}
@@ -348,6 +353,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             with _lock:
                 _conversation_id = None
                 _last_event_index = 0
+                _seen_event_ids.clear()
                 _sandbox_id = None
                 _persist_to_db()
         return {"error": f"Cloud API error: {e.response.status_code}"}
@@ -364,6 +370,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             _conversation_mode = mode
             _current_repo_key = _repo_key(repo)
             _last_event_index = 0
+            _seen_event_ids.clear()
         _msgs().append({
             "role": "user",
             "content": prompt,
@@ -372,19 +379,15 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
         _persist_to_db()
 
     # Phase 2: Long wait — NO LOCK, get_state() can read events live
-    with _lock:
-        _msg_count_before = len(_msgs())
-        start_ei = _last_event_index  # snapshot to avoid race with concurrent send() calls
     try:
-        response, new_last_event_index = _wait_for_response(last_event_index=start_ei)
+        response = _wait_for_response()
     except Exception as e:
         logger.error("Wait for response crashed: %s", e, exc_info=True)
-        response, new_last_event_index = None, start_ei
+        response = None
 
     # Phase 3: Save result under lock — replace live [MSG] event placeholders
     # with a single clean assistant message (avoids duplicated/concatenated display).
     with _lock:
-        _last_event_index = max(_last_event_index, new_last_event_index)  # never go backwards
         if response:
             msgs = _msgs()
             msgs[:] = [
@@ -849,7 +852,7 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     return conversation_id
 
 
-def _wait_for_response(last_event_index: int = 0, timeout: int | None = None) -> tuple[str | None, int]:
+def _wait_for_response(timeout: int | None = None) -> str | None:
     """Poll conversation status + events until the agent finishes (SAME logic as agent_runner).
 
     Timeout: VIBECODE_CHAT_TIMEOUT env var (default 600s = 10 min).
@@ -857,9 +860,9 @@ def _wait_for_response(last_event_index: int = 0, timeout: int | None = None) ->
     Also appends live events (tool calls, observations) to the chat history so the client
     can see what the agent is doing via polling get_state().
 
-    Returns (response_text, new_last_event_index).
+    Uses ID-based event dedup (same as agent_runner.py) — immune to API limit=N truncation.
     """
-    global _conversation_status, _sandbox_id
+    global _conversation_status, _sandbox_id, _seen_event_ids
 
     if timeout is None:
         timeout = _CHAT_TIMEOUT
@@ -867,7 +870,6 @@ def _wait_for_response(last_event_index: int = 0, timeout: int | None = None) ->
     start = time.time()
     all_new_msgs: list[str] = []
     last_status = ""
-    last_event_count = 0
 
     while time.time() - start < timeout:
         time.sleep(3)
@@ -877,7 +879,7 @@ def _wait_for_response(last_event_index: int = 0, timeout: int | None = None) ->
             logger.info("Batch cancelled/skipped during wait — exiting early (%d msgs collected)", len(all_new_msgs))
             with _lock:
                 _conversation_status = "idle"
-            return ("\n\n".join(all_new_msgs) if all_new_msgs else "", last_event_index)  # empty str = no error in send()
+            return "\n\n".join(all_new_msgs) if all_new_msgs else ""  # empty str = no error in send()
 
         # -- Check conversation status (SAME endpoint as agent_runner) --
         try:
@@ -960,20 +962,9 @@ def _wait_for_response(last_event_index: int = 0, timeout: int | None = None) ->
         else:
             all_events = []
 
-        new_count = len(all_events) - last_event_index
-        if new_count > 0 and len(all_events) != last_event_count:
-            last_event_count = len(all_events)
-            logger.info("Conversation %s: %d total events, %d new (index=%d)",
-                        _conversation_id, len(all_events), new_count, last_event_index)
-            # Log first event kind+source to verify format matches
-            if all_events:
-                first = all_events[0]
-                logger.info("First event: kind=%s source=%s tool=%s keys=%s",
-                            first.get("kind"), first.get("source"),
-                            first.get("tool_name"),
-                            sorted(first.keys())[:8])
-        elif new_count == 0 and len(all_events) > 0:
-            pass  # no new events yet, agent still working
+        new_count = len(all_events)
+        if new_count > 0:
+            logger.info("Conversation %s: %d events fetched (ID-based dedup)", _conversation_id, new_count)
         else:
             # No events at all — log every 30s so we know polling works
             if int(time.time() - start) % 30 < 3:
@@ -981,7 +972,13 @@ def _wait_for_response(last_event_index: int = 0, timeout: int | None = None) ->
                             _conversation_id, int(time.time() - start))
 
         # Stream EVERYTHING the agent does as live events (text, tools, observations)
-        for evt in all_events[last_event_index:]:
+        # ID-based dedup — process all returned events, skip previously seen by ID
+        for evt in all_events:
+            evt_id = evt.get("id", "")
+            if evt_id and evt_id in _seen_event_ids:
+                continue
+            if evt_id:
+                _seen_event_ids.add(evt_id)
             kind = evt.get("kind", "")
             source = evt.get("source", "")
             tool = evt.get("tool_name", "")
@@ -1044,7 +1041,7 @@ def _wait_for_response(last_event_index: int = 0, timeout: int | None = None) ->
                     })
 
         # Advance the seen index
-        last_event_index = len(all_events)
+        # (ID-based dedup above handles this — nothing to reset here)
 
         if status in ("completed", "finished"):
             _conversation_status = "idle"
@@ -1095,7 +1092,7 @@ def _wait_for_response(last_event_index: int = 0, timeout: int | None = None) ->
                 })
 
     _conversation_status = "idle"
-    return ("\n\n".join(all_new_msgs) if all_new_msgs else None, last_event_index)
+    return "\n\n".join(all_new_msgs) if all_new_msgs else None
 
 
 
