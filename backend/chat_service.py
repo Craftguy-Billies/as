@@ -707,15 +707,26 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             tool = evt.get("tool_name", "")
 
             if kind == "MessageEvent" and source in ("agent", "assistant"):
-                msg = evt.get("message", "")
+                # API returns llm_message (a Message object), not plain "message"
+                llm_msg = evt.get("llm_message") or evt.get("message") or {}
                 text = ""
-                if isinstance(msg, str) and msg.strip():
-                    text = msg.strip()
-                elif isinstance(msg, dict) and msg.get("content"):
-                    text = str(msg["content"]).strip()
+                if isinstance(llm_msg, str) and llm_msg.strip():
+                    text = llm_msg.strip()
+                elif isinstance(llm_msg, dict):
+                    # content is [{type: "text", text: "..."}, ...]
+                    content = llm_msg.get("content") or []
+                    if isinstance(content, list):
+                        parts = []
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                t = block.get("text", "")
+                                if t.strip():
+                                    parts.append(t.strip())
+                        text = "\n".join(parts)
+                    elif isinstance(content, str):
+                        text = content.strip()
                 if text:
                     all_new_msgs.append(text)
-                    # Stream agent text as live event so Flutter sees it in real-time
                     with _lock:
                         _messages.append({
                             "role": "event",
