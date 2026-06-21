@@ -289,6 +289,8 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             logger.info("Created conversation %s (repo=%s mode=%s)",
                         new_conv_id, repo, mode)
         else:
+            logger.info("Reusing conversation %s (repo=%s branch=%s mode=%s)",
+                        current_conv_id, repo, branch, mode)
             success, send_err = _send_message(current_conv_id, prompt)
             if not success:
                 # If sandbox is paused/gone, auto-recover: reset + create new
