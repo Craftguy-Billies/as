@@ -557,10 +557,9 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
                 "1. FIRST, analyze the task and research the codebase. Read files, search, "
                 "understand the architecture. Create a detailed implementation plan saved "
                 "to .agents_tmp/PLAN.md. Do NOT implement anything yet.\n"
-                "2. After creating the plan, present your findings to the user and ask "
+                "2. After creating the plan, present your findings and ask "
                 "whether to proceed with implementation.\n"
-                "IMPORTANT: Do NOT proceed to step 2 of the problem-solving workflow "
-                "(IMPLEMENTATION). Stop after EXPLORATION + ANALYSIS.\n\n"
+                "IMPORTANT: Stop after EXPLORATION + ANALYSIS.\n\n"
                 f"Task: {prompt}"
             )
         else:
@@ -576,9 +575,8 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     elif repo:
         full_prompt = (
             f"Repository: {repo} (branch: {branch}).\n"
-            "IMPORTANT: First run `git pull` to get the latest code. "
-            "When you finish making changes, commit them with a descriptive message "
-            "and push to the remote repository.\n\n"
+            "When implementing changes: review relevant files, make edits, "
+            "commit with a descriptive message, and push.\n\n"
             f"{prompt}"
         )
     else:
