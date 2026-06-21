@@ -19,6 +19,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final _scrollCtrl = ScrollController();
   bool _hasLoaded = false;
   bool _showRepoBar = false;
+  int _lastTotalMsgCount = -1;  // only auto-scroll when new msgs arrive
   String _mode = 'code';
   String _activeModel = '';
 
@@ -130,7 +131,9 @@ class _ChatScreenState extends State<ChatScreen> {
     final msgs = prov.messages;
 
     // Auto-scroll when new messages arrive (post-build, not during build)
-    if (msgs.isNotEmpty) {
+    // Skip when showFromIndex changes (user is loading older msgs)
+    if (msgs.isNotEmpty && msgs.length != _lastTotalMsgCount) {
+      _lastTotalMsgCount = msgs.length;
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollDown());
     }
 
@@ -202,15 +205,36 @@ class _ChatScreenState extends State<ChatScreen> {
             child: _hasLoaded
                 ? (msgs.isEmpty
                     ? _buildEmpty()
-                    : ListView.builder(
-                        controller: _scrollCtrl,
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                        itemCount: msgs.length + (prov.loading ? 1 : 0),
-                        itemBuilder: (_, i) {
-                          if (i >= msgs.length) return _buildTyping();
-                          return _ChatBubble(msg: msgs[i]);
-                        },
-                      ))
+                    : Builder(builder: (ctx) {
+                        final visible = msgs.sublist(prov.showFromIndex);
+                        final hasMore = prov.hasMoreMessages;
+                        final showTyping = prov.loading;
+                        return ListView.builder(
+                          controller: _scrollCtrl,
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          itemCount: (hasMore ? 1 : 0) + visible.length + (showTyping ? 1 : 0),
+                          itemBuilder: (_, i) {
+                            if (hasMore && i == 0) {
+                              return Padding(
+                                padding: const EdgeInsets.only(bottom: 12),
+                                child: Center(
+                                  child: TextButton.icon(
+                                    onPressed: () => prov.loadMoreMessages(),
+                                    icon: const Icon(Icons.expand_less, color: Color(0xFF7C3AED), size: 18),
+                                    label: const Text(
+                                      'Load earlier messages',
+                                      style: TextStyle(color: Color(0xFF7C3AED), fontSize: 13),
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }
+                            final msgIdx = i - (hasMore ? 1 : 0);
+                            if (msgIdx >= visible.length) return _buildTyping();
+                            return _ChatBubble(msg: visible[msgIdx]);
+                          },
+                        );
+                      }))
                 : const Center(child: CircularProgressIndicator(strokeWidth: 2)),
           ),
 

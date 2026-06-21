@@ -62,6 +62,19 @@ class ChatProvider extends ChangeNotifier {
   List<Map<String, dynamic>> _savedRepos = [];
   List<Map<String, dynamic>> get savedRepos => _savedRepos;
 
+  // Lazy message loading: show latest N first, "load earlier" button at top
+  static const _pageSize = 50;
+  int _showFromIndex = 0;  // index into _messages to start displaying from
+  int get showFromIndex => _showFromIndex;
+  bool get hasMoreMessages => _showFromIndex > 0;
+
+  /// Show [_pageSize] more older messages (decrease start index).
+  void loadMoreMessages() {
+    if (_showFromIndex <= 0) return;
+    _showFromIndex = (_showFromIndex - _pageSize).clamp(0, _messages.length);
+    _notify();
+  }
+
   // Batch queue prompt list for per-prompt cancel UI
   List<String> _batchPrompts = [];
   List<String> _batchModes = [];   // "plan" or "code" per prompt
@@ -91,6 +104,7 @@ class ChatProvider extends ChangeNotifier {
       _error,
       _queuePosition,
       _queueTotal,
+      _showFromIndex,
       _messages.isEmpty ? 0 : _messages.last.timestamp,
     );
     if (hash != _lastNotifiedHash) {
@@ -178,6 +192,10 @@ class ChatProvider extends ChangeNotifier {
     } catch (e) {
       logViewer('ChatProvider.loadFromCache: repo fetch failed: $e');
     }
+
+    // Show latest messages first — scroll to bottom on first render
+    _showFromIndex = (_messages.length - _pageSize).clamp(0, _messages.length);
+    logViewer('ChatProvider.loadFromCache: showFrom=$_showFromIndex of ${_messages.length}');
   }
 
   // -- Send: queue prompt(s) on server, then poll for progress --
