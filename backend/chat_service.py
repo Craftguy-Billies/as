@@ -123,9 +123,19 @@ def _headers() -> dict:
 
 
 def reset() -> None:
-    """Clear the current chat session."""
+    """Clear the current chat session AND cancel any running batch."""
     global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages, _event_kinds, _conversation_status, _sandbox_id
+    global _batch_cancelled, _batch_running, _batch_prompts, _batch_position, _batch_total
     with _lock:
+        # Cancel running batch
+        if _batch_running:
+            _batch_cancelled = True
+            _batch_running = False
+            _batch_prompts = []
+            _batch_position = 0
+            _batch_total = 0
+            logger.info("Batch cancelled by chat reset")
+        # Reset conversation
         _conversation_id = None
         _conversation_repo = ""
         _conversation_mode = "code"
@@ -182,6 +192,12 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                         _conversation_repo, repo, _conversation_mode, mode)
             _conversation_id = None
             _last_event_index = 0
+            _sandbox_id = None
+            _event_kinds.clear()
+            _messages = []  # clear old repo's messages
+            _conversation_repo = repo
+            _conversation_mode = mode
+            _persist_to_db()
         need_new_conv = _conversation_id is None
         if not need_new_conv:
             current_conv_id = _conversation_id  # snapshot to use outside lock
@@ -279,7 +295,15 @@ def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "main", mode
 
     with _lock:
         if _batch_running:
-            # Append to running batch
+            # Reject append if repo/mode changed — prevents cross-repo contamination
+            if repo != _batch_repo or mode != _batch_mode:
+                return {
+                    "error": (
+                        f"Batch already running with repo={_batch_repo or '(none)'} mode={_batch_mode}. "
+                        "Wait for it to finish or tap 'New conversation' to start fresh."
+                    )
+                }
+            # Append to running batch (same repo/mode)
             _batch_prompts.extend(cleaned)
             _batch_total = len(_batch_prompts)
             logger.info("Batch appended: +%d prompts (now %d total)", len(cleaned), _batch_total)
@@ -485,8 +509,8 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
         if repo:
             full_prompt = (
                 f"Plan mode for {repo} on branch {branch}. "
-                f"First, explore the codebase, analyze the situation, "
-                f"and create a detailed plan. Do NOT implement yet. "
+                f"First, run `git pull` to get the latest code, then explore the codebase, "
+                f"analyze the situation, and create a detailed plan. Do NOT implement yet. "
                 f"After the plan is complete, ask me whether to proceed.\n\n"
                 f"{prompt}"
             )
@@ -498,7 +522,11 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
             )
     elif repo:
         full_prompt = (
-            f"Repository: {repo} (branch: {branch}). {prompt}"
+            f"Repository: {repo} (branch: {branch}).\n"
+            "IMPORTANT: First run `git pull` to get the latest code. "
+            "When you finish making changes, commit them with a descriptive message "
+            "and push to the remote repository.\n\n"
+            f"{prompt}"
         )
     else:
         full_prompt = prompt

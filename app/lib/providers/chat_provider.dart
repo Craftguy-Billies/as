@@ -192,6 +192,7 @@ class ChatProvider extends ChangeNotifier {
       try {
         final state = await _api.getChat();
         if (state == null) return;
+        _error = null;  // clear error on any successful poll
 
         // Merge server messages (events, responses) into local chat
         final serverMsgs = (state['messages'] as List?)
@@ -209,6 +210,7 @@ class ChatProvider extends ChangeNotifier {
           if (merged.length != _messages.length) {
             debugPrint('ChatProvider.poll: merged ${_messages.length}→${merged.length} messages');
             _messages = merged;
+            _error = null;  // clear error when server responds successfully
             await _saveToCache();
           }
         }
