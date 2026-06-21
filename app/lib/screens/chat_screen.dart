@@ -492,6 +492,82 @@ class _ChatScreenState extends State<ChatScreen> {
                 ],
               ),
             ),
+          // Per-prompt cancel chips — horizontal scrollable
+          if (processing && prov.batchPrompts.isNotEmpty)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              color: const Color(0xFF16162A),
+              child: SizedBox(
+                height: 36,
+                child: ListView.builder(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: prov.batchPrompts.length,
+                  itemBuilder: (_, i) {
+                    final isRunning = i == prov.queuePosition - 1;  // position is 1-based display
+                    final mode = i < prov.batchModes.length ? prov.batchModes[i] : 'code';
+                    final isPlan = mode == 'plan';
+                    final text = prov.batchPrompts[i];
+                    final truncated = text.length > 28 ? '${text.substring(0, 28)}…' : text;
+                    return Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: isRunning
+                              ? const Color(0xFF312E81).withValues(alpha: 0.6)
+                              : const Color(0xFF2A2A3E),
+                          borderRadius: BorderRadius.circular(8),
+                          border: isRunning
+                              ? Border.all(color: const Color(0xFF7C3AED), width: 1)
+                              : Border.all(color: Colors.white12),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.only(left: 8),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: isPlan
+                                      ? Colors.amber.withValues(alpha: 0.2)
+                                      : Colors.cyan.withValues(alpha: 0.2),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(
+                                  isPlan ? 'PL' : 'CD',
+                                  style: TextStyle(
+                                    color: isPlan ? Colors.amber : Colors.cyan,
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 6),
+                              child: Text(
+                                truncated,
+                                style: TextStyle(
+                                  color: isRunning ? Colors.white : Colors.white54,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ),
+                            GestureDetector(
+                              onTap: () => prov.cancelPrompt(i),
+                              child: const Padding(
+                                padding: EdgeInsets.symmetric(horizontal: 6),
+                                child: Icon(Icons.close, color: Colors.redAccent, size: 14),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
           // Input row
           Row(
             children: [

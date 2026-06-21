@@ -113,7 +113,7 @@ async def stream_logs():
 # Chat (token-efficient conversation reuse)
 # ---------------------------------------------------------------------------
 
-from chat_service import send as chat_send, reset as chat_reset, get_state as chat_state, get_repos as chat_repos, enqueue_batch as chat_enqueue_batch, cancel_batch as chat_cancel_batch
+from chat_service import send as chat_send, reset as chat_reset, get_state as chat_state, get_repos as chat_repos, enqueue_batch as chat_enqueue_batch, cancel_batch as chat_cancel_batch, cancel_batch_prompt as chat_cancel_batch_prompt
 
 
 class ChatRequest(BaseModel):
@@ -190,6 +190,14 @@ async def chat_batch_cancel():
     """Cancel the running batch queue."""
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, chat_cancel_batch)
+    return result
+
+
+@app.post("/api/chat/batch/cancel/{index}")
+async def chat_batch_cancel_prompt(index: int):
+    """Cancel a single prompt by index in the batch queue."""
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, chat_cancel_batch_prompt, index)
     return result
 
 

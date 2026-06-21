@@ -75,6 +75,7 @@ _batch_branch: str = "main"
 _batch_mode: str = "code"
 _batch_running: bool = False
 _batch_cancelled: bool = False
+_batch_skip_prompt: bool = False  # set by per-prompt cancel, tells worker to skip current
 
 # Current conversation status (for UI visibility)
 _conversation_status: str = "idle"
@@ -213,6 +214,7 @@ def get_state(repo: str = "", mode: str = "") -> dict:
                 "position": _batch_position + (1 if _batch_running else 0),
                 "total": _batch_total,
                 "prompts": list(_batch_prompts),
+                "modes": list(_batch_prompt_modes),
             },
         }
 
@@ -415,6 +417,23 @@ def _process_batch_worker() -> None:
     try:
         while True:
             with _lock:
+                # Per-prompt cancel: skip current, move to next
+                if _batch_skip_prompt:
+                    _batch_skip_prompt = False
+                    _batch_cancelled = False
+                    # Current prompt was removed from queue; next prompt is at same position
+                    if _batch_position >= _batch_total:
+                        _batch_running = False
+                        _batch_prompts = []
+                        _batch_prompt_modes = []
+                        _batch_position = 0
+                        _batch_total = 0
+                        _persist_to_db()
+                        logger.info("Batch complete (last prompt skipped)")
+                        return
+                    _persist_to_db()
+                    continue
+
                 if _batch_cancelled or not _batch_running or _batch_position >= _batch_total:
                     _batch_running = False
                     _batch_prompts = []
@@ -505,6 +524,48 @@ def cancel_batch() -> dict:
     if was_running:
         logger.info("Batch cancelled (%d prompts remaining)", remaining)
     return {"status": "cancelled", "remaining": remaining}
+
+
+def cancel_batch_prompt(index: int) -> dict:
+    """Cancel a single prompt in the batch queue by index."""
+    global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_skip_prompt
+
+    with _lock:
+        if not _batch_running:
+            return {"error": "No batch running"}
+        if index < 0 or index >= len(_batch_prompts):
+            return {"error": f"Invalid index {index} (queue size: {len(_batch_prompts)})"}
+        if index < _batch_position:
+            return {"error": "Prompt already processed"}
+
+        removed = _batch_prompts.pop(index)
+        mode_removed = _batch_prompt_modes.pop(index) if index < len(_batch_prompt_modes) else "code"
+        _batch_total -= 1
+
+        if index == _batch_position:
+            # Cancelling the currently-running prompt
+            _batch_cancelled = True   # interrupt _wait_for_response
+            _batch_skip_prompt = True # tell worker to skip, not clear queue
+            logger.info("Batch: skipping current prompt [%d/%d]: %.60s...",
+                        index + 1, _batch_total + 1, removed)
+        else:
+            # Cancelling a future prompt — just remove from queue
+            logger.info("Batch: removed future prompt [%d/%d]: %.60s...",
+                        index + 1, _batch_total + 1, removed)
+
+        if _batch_total == 0:
+            _batch_running = False
+            logger.info("Batch: queue empty after per-prompt cancel")
+
+        _persist_to_db()
+
+    return {
+        "status": "cancelled",
+        "removed": removed[:200],
+        "mode": mode_removed,
+        "position": _batch_position,
+        "total": _batch_total,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -725,7 +786,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             logger.info("Batch cancelled during wait — exiting early (%d msgs collected)", len(all_new_msgs))
             with _lock:
                 _conversation_status = "idle"
-            return "\n\n".join(all_new_msgs) if all_new_msgs else None
+            return "\n\n".join(all_new_msgs) if all_new_msgs else ""  # empty str = no error in send()
 
         # -- Check conversation status (SAME endpoint as agent_runner) --
         try:

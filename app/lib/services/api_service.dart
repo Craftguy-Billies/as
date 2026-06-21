@@ -189,6 +189,24 @@ class ApiService {
     }
   }
 
+  /// Cancel a single prompt at [index] in the batch queue.
+  Future<Map<String, dynamic>?> cancelPrompt(int index) async {
+    try {
+      final resp = await http
+          .post(
+            Uri.parse('$_url/api/chat/batch/cancel/$index'),
+            headers: {'Content-Type': 'application/json'},
+          )
+          .timeout(const Duration(seconds: 5));
+      if (resp.statusCode == 200) {
+        return json.decode(resp.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<Map<String, dynamic>> getChat({String repo = '', String mode = ''}) async {
     final uri = repo.isNotEmpty
         ? Uri.parse('$_url/api/chat?repo=${Uri.encodeComponent(repo)}&mode=${Uri.encodeComponent(mode)}')

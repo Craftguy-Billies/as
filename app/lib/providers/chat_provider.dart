@@ -62,6 +62,12 @@ class ChatProvider extends ChangeNotifier {
   List<Map<String, dynamic>> _savedRepos = [];
   List<Map<String, dynamic>> get savedRepos => _savedRepos;
 
+  // Batch queue prompt list for per-prompt cancel UI
+  List<String> _batchPrompts = [];
+  List<String> _batchModes = [];   // "plan" or "code" per prompt
+  List<String> get batchPrompts => _batchPrompts;
+  List<String> get batchModes => _batchModes;
+
   // -- In-app log buffer (visible on mobile where debugPrint is hidden) --
   final List<String> _logLines = [];
   List<String> get logLines => List.unmodifiable(_logLines);
@@ -305,6 +311,16 @@ class ChatProvider extends ChangeNotifier {
           _queuePosition = (batch['position'] as int?) ?? _queuePosition;
           _queueTotal = (batch['total'] as int?) ?? _queueTotal;
 
+          // Parse prompt list for per-prompt cancel UI
+          final prompts = batch['prompts'] as List?;
+          if (prompts != null) {
+            _batchPrompts = prompts.map((e) => e.toString()).toList();
+          }
+          final modes = batch['modes'] as List?;
+          if (modes != null) {
+            _batchModes = modes.map((e) => e.toString()).toList();
+          }
+
           if (wasLoading && !_loading) {
             _loadingSince = null;
             _pollTimer?.cancel();
@@ -374,6 +390,8 @@ class ChatProvider extends ChangeNotifier {
     _loadingSince = null;
     _queuePosition = 0;
     _queueTotal = 0;
+    _batchPrompts = [];
+    _batchModes = [];
     _notify();
 
     // Await server cancel — if it fails, show error but UI already reset
@@ -385,6 +403,23 @@ class ChatProvider extends ChangeNotifier {
     } catch (e) {
       logViewer('ChatProvider.cancel: $e');
     }
+  }
+
+  /// Cancel a single prompt at [index] in the batch queue.
+  /// Let server handle removal; next poll syncs authoritative state.
+  Future<void> cancelPrompt(int index) async {
+    if (index < 0 || index >= _batchPrompts.length) return;
+    logViewer('ChatProvider.cancelPrompt: #$index "${_batchPrompts[index].truncate(60)}..."');
+
+    try {
+      final result = await _api.cancelPrompt(index);
+      if (result != null && result.containsKey('error')) {
+        logViewer('ChatProvider.cancelPrompt error: ${result['error']}');
+      }
+    } catch (e) {
+      logViewer('ChatProvider.cancelPrompt exception: $e');
+    }
+    _notify();  // next periodic poll (~2s) will sync authoritative state
   }
 
   Future<void> clearChat() async {
