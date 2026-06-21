@@ -1005,9 +1005,13 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                     new_cursor = int(datetime.fromisoformat(new_cursor.replace("Z", "+00:00")).timestamp() * 1000)
                 except (ValueError, TypeError):
                     new_cursor = 0
+            logger.info("Page %d cursor: new=%s current=%s (advance=%s)",
+                       events_page_count, new_cursor, _last_event_ts, 
+                       isinstance(new_cursor, (int, float)) and new_cursor > _last_event_ts)
             if isinstance(new_cursor, (int, float)) and new_cursor > _last_event_ts:
                 _last_event_ts = int(new_cursor)
             else:
+                logger.info("Pagination stopped: cursor not advancing (page %d)", events_page_count)
                 break  # no progress, stop paginating
 
         if events_page_count > 1:
@@ -1163,9 +1167,12 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                         new_cursor = int(datetime.fromisoformat(new_cursor.replace("Z", "+00:00")).timestamp() * 1000)
                     except (ValueError, TypeError):
                         new_cursor = 0
+                logger.info("Final fetch page %d: cursor new=%s current=%s events=%d",
+                           page, new_cursor, cursor, len(final_events))
                 if isinstance(new_cursor, (int, float)) and new_cursor > cursor:
                     cursor = int(new_cursor)
                 else:
+                    logger.info("Final fetch: cursor not advancing at page %d, stopping", page)
                     break  # no progress
                 # Search for unseen assistant MessageEvent
                 for evt in reversed(final_events):
