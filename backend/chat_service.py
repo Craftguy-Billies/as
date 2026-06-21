@@ -289,13 +289,33 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                 # conversation with same prompt. The caller never sees a 409.
                 if send_err and "409" in str(send_err):
                     logger.warning("Sandbox paused/gone for conversation %s — recovering", current_conv_id)
+                    recent_msgs: list = []
                     with _lock:
+                        # Capture recent context before resetting so the new
+                        # conversation knows what was discussed (not just UI history).
+                        for m in _msgs()[-6:]:
+                            role = m.get("role", "")
+                            if role in ("user", "assistant") and m.get("content"):
+                                recent_msgs.append(m)
                         _conversation_id = None
                         _last_event_index = 0
                         _sandbox_id = None
                         _persist_to_db()
-                    new_conv_id = _create_conversation(prompt, repo, branch, mode)
-                    logger.info("Recovered: created new conversation %s", new_conv_id)
+                    if recent_msgs:
+                        context = "\n".join(
+                            f"{m['role'].capitalize()}: {m['content']}" for m in recent_msgs
+                        )
+                        enhanced = (
+                            f"[Previous conversation context — session was recreated due to server restart]\n"
+                            f"{context}\n"
+                            f"---\n"
+                            f"Current task: {prompt}"
+                        )
+                    else:
+                        enhanced = prompt
+                    new_conv_id = _create_conversation(enhanced, repo, branch, mode)
+                    logger.info("Recovered: created new conversation %s (%d context msgs)",
+                                new_conv_id, len(recent_msgs))
                     need_new_conv = True  # Phase 1c will store it
                 else:
                     with _lock:
