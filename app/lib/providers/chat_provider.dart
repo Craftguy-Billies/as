@@ -154,8 +154,9 @@ class ChatProvider extends ChangeNotifier {
     debugPrint('ChatProvider.send: START repo=$repo mode=$mode');
     _error = null;
 
-    // If repo/mode changed, switch to new repo's history first
-    if (repo != serverRepo || mode != serverMode) {
+    // If repo changed, switch to new repo's history
+    // Mode switch on same repo → keep messages (plan then code = one chat)
+    if (repo != serverRepo) {
       serverRepo = repo;
       serverMode = mode;
       _messages.clear();
@@ -164,6 +165,9 @@ class ChatProvider extends ChangeNotifier {
       _pollTimer?.cancel();
       await _saveToCache();
       notifyListeners();
+    } else if (mode != serverMode) {
+      serverMode = mode;
+      await _saveToCache();
     }
 
     // Add user message to chat immediately

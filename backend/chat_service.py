@@ -31,7 +31,7 @@ _conversation_mode: str = "code"
 _last_event_index: int = 0
 _sandbox_id: str | None = None
 _event_kinds: set[str] = set()  # diagnostic: all event kinds seen in current conversation
-_current_repo_key: str = ""  # "repo|mode" — determines which chat history to show
+_current_repo_key: str = ""  # current repo — determines which chat history to show
 _messages_by_repo: dict[str, list[dict]] = {}  # per-repo chat history
 _lock = threading.Lock()
 
@@ -41,9 +41,9 @@ def _msgs() -> list[dict]:
         _messages_by_repo[_current_repo_key] = []
     return _messages_by_repo[_current_repo_key]
 
-def _repo_key(repo: str, mode: str) -> str:
-    """Build a stable key for repo+mode combo."""
-    return f"{repo or '(none)'}|{mode}"
+def _repo_key(repo: str) -> str:
+    """Build a stable key for a repo (plan and code share the same chat)."""
+    return repo or '(none)'
 
 # Batch queue — server-side, survives client disconnect
 _batch_prompts: list[str] = []
@@ -76,7 +76,7 @@ def _restore_from_db() -> None:
             _conversation_mode = data.get("mode", "code")
             _last_event_index = data.get("last_event_index", 0)
             _messages_by_repo = data.get("messages_by_repo", {})
-            _current_repo_key = data.get("current_repo_key", _repo_key(_conversation_repo, _conversation_mode))
+            _current_repo_key = data.get("current_repo_key", _repo_key(_conversation_repo))
             # Restore batch queue if server restarted mid-batch
             _batch_prompts = data.get("batch_prompts", [])
             _batch_position = data.get("batch_position", 0)
@@ -171,7 +171,7 @@ def get_state(repo: str = "", mode: str = "") -> dict:
     global _current_repo_key
     with _lock:
         if repo or mode:
-            _current_repo_key = _repo_key(repo, mode)
+            _current_repo_key = _repo_key(repo)
         return {
             "messages": list(_msgs()),
             "conversation_id": _conversation_id,
@@ -280,7 +280,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             _conversation_id = new_conv_id
             _conversation_repo = repo
             _conversation_mode = mode
-            _current_repo_key = _repo_key(repo, mode)
+            _current_repo_key = _repo_key(repo)
             _last_event_index = 0
         _msgs().append({
             "role": "user",
