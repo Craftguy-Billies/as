@@ -606,7 +606,10 @@ class _ChatBubble extends StatelessWidget {
     else if (msg.content.startsWith('📋')) { accent = Colors.grey; icon = Icons.code; }
     else { accent = Colors.grey; icon = Icons.settings; }
 
-    // All events get full visibility — debuggable
+    // Strip emoji/icon prefix (first 1-3 chars if emoji) — the icon already conveys meaning.
+    // This avoids "Noto fonts" missing-character errors on platforms without emoji fonts.
+    final displayText = _stripEmojiPrefix(msg.content);
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 16),
       child: Row(
@@ -619,7 +622,7 @@ class _ChatBubble extends StatelessWidget {
           const SizedBox(width: 6),
           Flexible(
             child: Text(
-              msg.content,
+              displayText,
               style: TextStyle(
                 color: accent.withAlpha(200),
                 fontSize: 11,
@@ -638,6 +641,29 @@ class _ChatBubble extends StatelessWidget {
     final h = dt.hour.toString().padLeft(2, '0');
     final m = dt.minute.toString().padLeft(2, '0');
     return '$h:$m';
+  }
+
+  /// Strip the emoji/icon prefix (e.g. "🔵 " → "Agent is starting...", "💻 " → "$ ls")
+  /// so the Text widget never needs to render emoji glyphs. The icon already shows meaning.
+  static String _stripEmojiPrefix(String text) {
+    if (text.isEmpty) return text;
+    final runes = text.runes.toList();
+    int skip = 0;
+    for (final r in runes) {
+      // Emoji and symbol codepoints that may need special fonts
+      if ((r >= 0x1F300 && r <= 0x1F9FF) || // Misc Symbols, Emoticons, Supplemental
+          (r >= 0x2300 && r <= 0x27BF) ||   // Misc Technical, Dingbats (❌⚠✅⏹)
+          (r >= 0x1FA00 && r <= 0x1FAFF) || // Chess Symbols, etc.
+          r == 0xFE0F ||                     // Variation selector-16 (emoji style)
+          r == 0x200D) {                     // ZWJ (emoji combiner)
+        skip += 1;
+      } else {
+        break;
+      }
+    }
+    // Also skip a trailing space after emoji prefix
+    if (skip > 0 && skip < text.length && text[skip] == ' ') skip++;
+    return text.substring(skip);
   }
 }
 
