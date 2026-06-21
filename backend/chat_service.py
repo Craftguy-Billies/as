@@ -354,15 +354,28 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
         _persist_to_db()
 
     # Phase 2: Long wait — NO LOCK, get_state() can read events live
+    # Track message count before wait so we can replace live [MSG] events
+    # with the clean assistant response afterwards.
+    with _lock:
+        _msg_count_before = len(_messages)
     try:
         response = _wait_for_response()
     except Exception as e:
         logger.error("Wait for response crashed: %s", e, exc_info=True)
         response = None
 
-    # Phase 3: Save result under lock
+    # Phase 3: Save result under lock — replace live [MSG] event placeholders
+    # with a single clean assistant message (avoids duplicated/concatenated display).
     with _lock:
         if response:
+            _messages[:] = [
+                m for m in _messages
+                if not (
+                    m.get("role") == "event"
+                    and isinstance(m.get("content"), str)
+                    and m["content"].startswith("[MSG] ")
+                )
+            ]
             _msgs().append({
                 "role": "assistant",
                 "content": response,
@@ -831,8 +844,8 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         time.sleep(3)
 
         # Check for batch cancel — exit early if cancelled
-        if _batch_cancelled:
-            logger.info("Batch cancelled during wait — exiting early (%d msgs collected)", len(all_new_msgs))
+        if _batch_cancelled or _batch_skip_prompt:
+            logger.info("Batch cancelled/skipped during wait — exiting early (%d msgs collected)", len(all_new_msgs))
             with _lock:
                 _conversation_status = "idle"
             return "\n\n".join(all_new_msgs) if all_new_msgs else ""  # empty str = no error in send()

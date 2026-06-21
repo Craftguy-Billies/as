@@ -103,14 +103,17 @@ class ChatProvider extends ChangeNotifier {
 
   /// notifyListeners only when state actually changed (avoid 2s poll rebuilds)
   void _notify() {
+    final msgs = _messages;
     final hash = Object.hash(
-      _messages.length,
+      msgs.length,
       _loading,
       _error,
       _queuePosition,
       _queueTotal,
       _showFromIndex,
-      _messages.isEmpty ? 0 : _messages.last.timestamp,
+      msgs.isEmpty ? 0 : msgs.last.timestamp,
+      msgs.isEmpty ? 0 : msgs.first.timestamp,
+      msgs.isEmpty ? '' : msgs.last.content,
     );
     if (hash != _lastNotifiedHash) {
       _lastNotifiedHash = hash;
@@ -158,9 +161,12 @@ class ChatProvider extends ChangeNotifier {
         final merged = <ChatMessage>[];
         final seen = <String>{};
         for (final m in [...serverMsgs, ..._messages]) {
+          // Role+content dedup: server timestamps differ from client cached
+          // timestamps, so timestamp is intentionally omitted from the key.
           final key = '${m.role}:${m.content}';
           if (seen.add(key)) merged.add(m);
         }
+        merged.sort((a, b) => a.timestamp.compareTo(b.timestamp));
         _messages = merged;
         await _saveToCache();
         _resetShowIndex();
@@ -323,6 +329,7 @@ class ChatProvider extends ChangeNotifier {
               merged.last.timestamp != _messages.last.timestamp) {
             logViewer('ChatProvider.poll: merged ${_messages.length}→${merged.length} messages');
             _messages = merged;
+            _resetShowIndex();  // re-clamp after possible trim
             _error = null;
             await _saveToCache();
           }
@@ -390,6 +397,7 @@ class ChatProvider extends ChangeNotifier {
               .toList() ??
           [];
       _messages = serverMsgs;
+      _resetShowIndex();  // re-clamp for new repo's message count
       _error = null;
       await _saveToCache();
     } catch (e) {
