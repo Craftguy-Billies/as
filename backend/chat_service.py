@@ -361,7 +361,7 @@ def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "main", mode
     Call get_state() to track progress.
     If a batch is already running, appends to it.
     """
-    global _batch_prompts, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _batch_running, _batch_cancelled
+    global _batch_prompts, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _batch_running, _batch_cancelled, _batch_skip_prompt
 
     cleaned = [p.strip() for p in prompts if p.strip()]
     if not cleaned:
@@ -386,6 +386,7 @@ def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "main", mode
             return {"status": "appended", "added": len(cleaned), "total": _batch_total}
 
         _batch_cancelled = False  # reset from any previous cancellation
+        _batch_skip_prompt = False
         _batch_prompts = cleaned
         _batch_prompt_modes = [mode] * len(cleaned)
         _batch_position = 0
@@ -411,7 +412,7 @@ def _process_batch_worker() -> None:
     _batch_running=True (which would freeze the client forever).
     Also enforce a 30-minute global timeout per batch.
     """
-    global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode
+    global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _batch_skip_prompt
     _batch_started_at = time.time()
 
     try:
