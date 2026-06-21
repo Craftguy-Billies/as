@@ -69,6 +69,7 @@ def _migrate_keys(msgs_by_repo: dict) -> dict:
 # Batch queue — server-side, survives client disconnect
 _batch_prompts: list[str] = []
 _batch_prompt_modes: list[str] = []  # per-prompt mode (plan/code)
+_batch_prompt_branches: list[str] = []  # per-prompt branch (for cross-branch appends)
 _batch_position: int = 0
 _batch_total: int = 0
 _batch_repo: str = ""
@@ -85,7 +86,7 @@ _CHAT_TIMEOUT = int(os.getenv("VIBECODE_CHAT_TIMEOUT", "600"))  # 10 min default
 # -- Restore state from DB on module load --
 def _restore_from_db() -> None:
     global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _messages_by_repo, _current_repo_key
-    global _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_running
+    global _batch_prompts, _batch_prompt_modes, _batch_prompt_branches, _batch_position, _batch_total, _batch_running
     try:
         db = get_sync_db()
     except Exception:
@@ -106,6 +107,7 @@ def _restore_from_db() -> None:
             # Restore batch queue if server restarted mid-batch
             _batch_prompts = data.get("batch_prompts", [])
             _batch_prompt_modes = data.get("batch_prompt_modes", [])
+            _batch_prompt_branches = data.get("batch_prompt_branches", [])
             _batch_position = data.get("batch_position", 0)
             _batch_total = data.get("batch_total", 0)
             # Auto-resume if server restarted mid-batch (remaining prompts in queue)
@@ -137,6 +139,7 @@ def _persist_to_db() -> None:
             # Batch state for survival across restarts
             "batch_prompts": _batch_prompts,
             "batch_prompt_modes": _batch_prompt_modes,
+            "batch_prompt_branches": _batch_prompt_branches,
             "batch_position": _batch_position,
             "batch_total": _batch_total,
             "batch_running": _batch_running,
@@ -169,7 +172,7 @@ def _headers() -> dict:
 def reset() -> None:
     """Clear the current chat session AND cancel any running batch."""
     global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
-    global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_skip_prompt
+    global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_prompt_branches, _batch_position, _batch_total, _batch_skip_prompt
     with _lock:
         # Cancel running batch
         if _batch_running:
@@ -178,6 +181,7 @@ def reset() -> None:
             _batch_running = False
             _batch_prompts = []
             _batch_prompt_modes = []
+            _batch_prompt_branches = []
             _batch_position = 0
             _batch_total = 0
             logger.info("Batch cancelled by chat reset")
@@ -221,6 +225,7 @@ def get_state(repo: str = "", mode: str = "") -> dict:
                 "total": _batch_total,
                 "prompts": list(_batch_prompts),
                 "modes": list(_batch_prompt_modes),
+                "branches": list(_batch_prompt_branches),
             },
         }
 
@@ -367,19 +372,19 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
         _persist_to_db()
 
     # Phase 2: Long wait — NO LOCK, get_state() can read events live
-    # Track message count before wait so we can replace live [MSG] events
-    # with the clean assistant response afterwards.
     with _lock:
         _msg_count_before = len(_msgs())
+        start_ei = _last_event_index  # snapshot to avoid race with concurrent send() calls
     try:
-        response = _wait_for_response()
+        response, new_last_event_index = _wait_for_response(last_event_index=start_ei)
     except Exception as e:
         logger.error("Wait for response crashed: %s", e, exc_info=True)
-        response = None
+        response, new_last_event_index = None, start_ei
 
     # Phase 3: Save result under lock — replace live [MSG] event placeholders
     # with a single clean assistant message (avoids duplicated/concatenated display).
     with _lock:
+        _last_event_index = max(_last_event_index, new_last_event_index)  # never go backwards
         if response:
             msgs = _msgs()
             msgs[:] = [
@@ -419,7 +424,7 @@ def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "main", mode
     Call get_state() to track progress.
     If a batch is already running, appends to it.
     """
-    global _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _batch_running, _batch_cancelled, _batch_skip_prompt
+    global _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _batch_prompt_branches, _batch_running, _batch_cancelled, _batch_skip_prompt
 
     cleaned = [p.strip() for p in prompts if p.strip()]
     if not cleaned:
@@ -438,6 +443,7 @@ def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "main", mode
             # Append to running batch (cross-mode allowed: plan+code share same chat)
             _batch_prompts.extend(cleaned)
             _batch_prompt_modes.extend([mode] * len(cleaned))
+            _batch_prompt_branches.extend([branch] * len(cleaned))
             _batch_total = len(_batch_prompts)
             _batch_mode = mode  # update default mode
             logger.info("Batch appended: +%d prompts (now %d total, mode=%s)", len(cleaned), _batch_total, mode)
@@ -447,6 +453,7 @@ def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "main", mode
         _batch_skip_prompt = False
         _batch_prompts = cleaned
         _batch_prompt_modes = [mode] * len(cleaned)
+        _batch_prompt_branches = [branch] * len(cleaned)
         _batch_position = 0
         _batch_total = len(cleaned)
         _batch_repo = repo
@@ -489,6 +496,7 @@ def _process_batch_worker() -> None:
                         _batch_running = False
                         _batch_prompts = []
                         _batch_prompt_modes = []
+                        _batch_prompt_branches = []
                         _batch_position = 0
                         _batch_total = 0
                         _persist_to_db()
@@ -501,6 +509,7 @@ def _process_batch_worker() -> None:
                     _batch_running = False
                     _batch_prompts = []
                     _batch_prompt_modes = []
+                    _batch_prompt_branches = []
                     _batch_position = 0
                     _batch_total = 0
                     _persist_to_db()
@@ -516,6 +525,7 @@ def _process_batch_worker() -> None:
                     _batch_running = False
                     _batch_prompts = []
                     _batch_prompt_modes = []
+                    _batch_prompt_branches = []
                     _batch_position = 0
                     _batch_total = 0
                     _persist_to_db()
@@ -525,7 +535,7 @@ def _process_batch_worker() -> None:
                 pos = _batch_position + 1
                 total = _batch_total
                 repo = _batch_repo
-                branch = _batch_branch
+                branch = _batch_prompt_branches[_batch_position] if _batch_position < len(_batch_prompt_branches) else _batch_branch
                 mode = _batch_prompt_modes[_batch_position] if _batch_position < len(_batch_prompt_modes) else _batch_mode
 
             # Send the prompt (this blocks — uses the same send() function)
@@ -584,7 +594,7 @@ def _process_batch_worker() -> None:
 
 def cancel_batch() -> dict:
     """Cancel the running batch queue. Non-blocking — sets flag for worker."""
-    global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _conversation_status
+    global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_prompt_branches, _batch_position, _batch_total, _conversation_status
     with _lock:
         _batch_cancelled = True  # non-blocking flag, worker checks each iteration
         _conversation_status = "idle"
@@ -593,6 +603,7 @@ def cancel_batch() -> dict:
         remaining = _batch_total - _batch_position
         _batch_prompts = []
         _batch_prompt_modes = []
+        _batch_prompt_branches = []
         _batch_position = 0
         _batch_total = 0
     if was_running:
@@ -602,7 +613,7 @@ def cancel_batch() -> dict:
 
 def cancel_batch_prompt(index: int) -> dict:
     """Cancel a single prompt in the batch queue by index."""
-    global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_skip_prompt
+    global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_prompt_branches, _batch_position, _batch_total, _batch_skip_prompt
 
     with _lock:
         if not _batch_running:
@@ -616,6 +627,7 @@ def cancel_batch_prompt(index: int) -> dict:
 
         removed = _batch_prompts.pop(index)
         mode_removed = _batch_prompt_modes.pop(index) if index < len(_batch_prompt_modes) else "code"
+        branch_removed = _batch_prompt_branches.pop(index) if index < len(_batch_prompt_branches) else _batch_branch
         _batch_total -= 1
 
         if index == _batch_position:
@@ -837,15 +849,17 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     return conversation_id
 
 
-def _wait_for_response(timeout: int | None = None) -> str | None:
+def _wait_for_response(last_event_index: int = 0, timeout: int | None = None) -> tuple[str | None, int]:
     """Poll conversation status + events until the agent finishes (SAME logic as agent_runner).
 
     Timeout: VIBECODE_CHAT_TIMEOUT env var (default 600s = 10 min).
 
     Also appends live events (tool calls, observations) to the chat history so the client
     can see what the agent is doing via polling get_state().
+
+    Returns (response_text, new_last_event_index).
     """
-    global _last_event_index, _conversation_status, _sandbox_id
+    global _conversation_status, _sandbox_id
 
     if timeout is None:
         timeout = _CHAT_TIMEOUT
@@ -863,7 +877,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             logger.info("Batch cancelled/skipped during wait — exiting early (%d msgs collected)", len(all_new_msgs))
             with _lock:
                 _conversation_status = "idle"
-            return "\n\n".join(all_new_msgs) if all_new_msgs else ""  # empty str = no error in send()
+            return ("\n\n".join(all_new_msgs) if all_new_msgs else "", last_event_index)  # empty str = no error in send()
 
         # -- Check conversation status (SAME endpoint as agent_runner) --
         try:
@@ -946,11 +960,11 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         else:
             all_events = []
 
-        new_count = len(all_events) - _last_event_index
+        new_count = len(all_events) - last_event_index
         if new_count > 0 and len(all_events) != last_event_count:
             last_event_count = len(all_events)
             logger.info("Conversation %s: %d total events, %d new (index=%d)",
-                        _conversation_id, len(all_events), new_count, _last_event_index)
+                        _conversation_id, len(all_events), new_count, last_event_index)
             # Log first event kind+source to verify format matches
             if all_events:
                 first = all_events[0]
@@ -967,7 +981,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                             _conversation_id, int(time.time() - start))
 
         # Stream EVERYTHING the agent does as live events (text, tools, observations)
-        for evt in all_events[_last_event_index:]:
+        for evt in all_events[last_event_index:]:
             kind = evt.get("kind", "")
             source = evt.get("source", "")
             tool = evt.get("tool_name", "")
@@ -998,7 +1012,14 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                     elif isinstance(content, str):
                         text = content.strip()
                 if text:
-                    all_new_msgs.append(text)
+                    # OpenHands API returns cumulative llm_message content
+                    # (each MessageEvent contains all prior text + new delta).
+                    # Deduplicate: if new text starts with the previous entry,
+                    # replace it — otherwise append as a fresh message.
+                    if all_new_msgs and text.startswith(all_new_msgs[-1]):
+                        all_new_msgs[-1] = text
+                    else:
+                        all_new_msgs.append(text)
                     with _lock:
                         _msgs().append({
                             "role": "event",
@@ -1023,7 +1044,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                     })
 
         # Advance the seen index
-        _last_event_index = len(all_events)
+        last_event_index = len(all_events)
 
         if status in ("completed", "finished"):
             _conversation_status = "idle"
@@ -1074,7 +1095,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 })
 
     _conversation_status = "idle"
-    return "\n\n".join(all_new_msgs) if all_new_msgs else None
+    return ("\n\n".join(all_new_msgs) if all_new_msgs else None, last_event_index)
 
 
 
