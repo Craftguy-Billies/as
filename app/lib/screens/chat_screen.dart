@@ -19,7 +19,6 @@ class _ChatScreenState extends State<ChatScreen> {
   final _scrollCtrl = ScrollController();
   bool _hasLoaded = false;
   bool _showRepoBar = false;
-  bool _needsInitialScroll = true;  // scroll to bottom on first render with messages
   int _lastTotalMsgCount = -1;  // only auto-scroll when new msgs arrive
   String _mode = 'code';
   String _activeModel = '';
@@ -52,6 +51,10 @@ class _ChatScreenState extends State<ChatScreen> {
       final sp = await SharedPreferences.getInstance();
       setState(() => _activeModel = sp.getString('last_model') ?? '');
     } catch (_) {}
+    // Scroll to latest messages after all layout settles
+    if (mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToBottom());
+    }
   }
 
   Future<Map<String, String?>> _loadPrefs() async {
@@ -115,15 +118,30 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _scrollDown() {
-    if (_scrollCtrl.hasClients) {
-      WidgetsBinding.instance.addPostFrameCallback(
-        (_) => _scrollCtrl.animateTo(
-          _scrollCtrl.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        ),
-      );
+    // Smooth animated scroll when new messages arrive
+    if (!_scrollCtrl.hasClients) return;
+    _scrollCtrl.animateTo(
+      _scrollCtrl.position.maxScrollExtent,
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOut,
+    );
+  }
+
+  void _jumpToBottom() {
+    // Instant jump — for initial load after all setState calls settle
+    if (_scrollCtrl.hasClients && _scrollCtrl.position.maxScrollExtent > 0) {
+      _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
+      return;
     }
+    // Controller not yet attached (widget tree still settling).
+    // Listen once and jump when ready.
+    void listener() {
+      if (_scrollCtrl.hasClients && _scrollCtrl.position.maxScrollExtent > 0) {
+        _scrollCtrl.removeListener(listener);
+        _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
+      }
+    }
+    _scrollCtrl.addListener(listener);
   }
 
   @override
@@ -131,16 +149,9 @@ class _ChatScreenState extends State<ChatScreen> {
     final prov = context.watch<ChatProvider>();
     final msgs = prov.messages;
 
-    // Auto-scroll to bottom on first render with messages (ListView must
-    // exist — _hasLoaded guards against firing while spinner is showing).
-    // Also auto-scroll when new messages arrive (count changes).
-    // Skip when showFromIndex changes (user loading older msgs).
-    final scrollNow = msgs.isNotEmpty && _hasLoaded && (
-      _needsInitialScroll ||
-      msgs.length != _lastTotalMsgCount
-    );
-    if (scrollNow) {
-      _needsInitialScroll = false;
+    // Auto-scroll when new messages arrive (count changes).
+    // Initial scroll is handled separately at the end of _init().
+    if (msgs.isNotEmpty && _hasLoaded && msgs.length != _lastTotalMsgCount) {
       _lastTotalMsgCount = msgs.length;
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollDown());
     }
