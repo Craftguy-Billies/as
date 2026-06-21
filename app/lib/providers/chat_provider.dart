@@ -64,7 +64,9 @@ class ChatProvider extends ChangeNotifier {
   List<Map<String, dynamic>> get savedRepos => _savedRepos;
 
   // Lazy message loading: show latest N first, "load earlier" button at top
-  static const _pageSize = 50;
+  // Set high because each user turn spawns ~10-15 internal events ([MSG], [START],
+  // [TOOL], etc.) which all count as separate items in _messages.
+  static const _pageSize = 200;
   int _showFromIndex = 0;  // index into _messages to start displaying from
   int get showFromIndex => _showFromIndex;
   bool get hasMoreMessages => _showFromIndex > 0;
@@ -328,8 +330,8 @@ class ChatProvider extends ChangeNotifier {
           // Sort by timestamp so messages appear chronologically
           merged.sort((a, b) => a.timestamp.compareTo(b.timestamp));
           // Trim to prevent unbounded memory growth
-          if (merged.length > 500) {
-            merged.removeRange(0, merged.length - 400);
+          if (merged.length > 2000) {
+            merged.removeRange(0, merged.length - 1500);
           }
           if (merged.length != _messages.length ||
               _messages.isEmpty ||
