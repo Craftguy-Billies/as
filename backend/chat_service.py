@@ -380,6 +380,20 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                     and m["content"].startswith("[MSG] ")
                 )
             ]
+            # Strip ALL previous assistant message prefixes from the cumulative
+            # API response (each MessageEvent from OpenHands Cloud includes all
+            # prior assistant responses as a prefix — we only want the new text).
+            for m in msgs:
+                if m.get("role") == "assistant" and m.get("content"):
+                    prev = m["content"]
+                    if prev and response.startswith(prev):
+                        response = response[len(prev):]
+            response = response.strip()
+            if not response:
+                return {
+                    "error": "Agent did not produce a new response (prefix stripping removed everything)",
+                    "conversation_id": _conversation_id,
+                }
             _msgs().append({
                 "role": "assistant",
                 "content": response,
