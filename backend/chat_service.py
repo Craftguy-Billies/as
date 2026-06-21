@@ -166,11 +166,12 @@ def _headers() -> dict:
 def reset() -> None:
     """Clear the current chat session AND cancel any running batch."""
     global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
-    global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total
+    global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_skip_prompt
     with _lock:
         # Cancel running batch
         if _batch_running:
             _batch_cancelled = True
+            _batch_skip_prompt = False
             _batch_running = False
             _batch_prompts = []
             _batch_prompt_modes = []
@@ -361,7 +362,7 @@ def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "main", mode
     Call get_state() to track progress.
     If a batch is already running, appends to it.
     """
-    global _batch_prompts, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _batch_running, _batch_cancelled, _batch_skip_prompt
+    global _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _batch_running, _batch_cancelled, _batch_skip_prompt
 
     cleaned = [p.strip() for p in prompts if p.strip()]
     if not cleaned:
