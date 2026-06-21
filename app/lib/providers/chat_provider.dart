@@ -368,15 +368,23 @@ class ChatProvider extends ChangeNotifier {
   }
 
   // -- Cancel / Clear --
-  void cancel() {
+  Future<void> cancel() async {
     _pollTimer?.cancel();
-    _api.cancelChatBatch();
     _loading = false;
     _loadingSince = null;
     _queuePosition = 0;
     _queueTotal = 0;
-    logViewer('ChatProvider.cancel');
     _notify();
+
+    // Await server cancel — if it fails, show error but UI already reset
+    try {
+      final ok = await _api.cancelChatBatch();
+      if (!ok) {
+        logViewer('ChatProvider.cancel: server unreachable, batch may still run');
+      }
+    } catch (e) {
+      logViewer('ChatProvider.cancel: $e');
+    }
   }
 
   Future<void> clearChat() async {

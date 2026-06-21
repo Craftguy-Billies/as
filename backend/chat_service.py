@@ -108,7 +108,7 @@ def _restore_from_db() -> None:
             # Auto-resume if server restarted mid-batch (remaining prompts in queue)
             _batch_running = _batch_position < _batch_total and len(_batch_prompts) > _batch_position
             if _batch_running:
-                threading.Thread(target=_batch_worker, daemon=True).start()
+                threading.Thread(target=_process_batch_worker, daemon=True).start()
                 logger.info("Auto-resuming batch: %d/%d remaining", _batch_total - _batch_position, _batch_total)
     except Exception as e:
         logger.warning("Failed to restore chat session from DB: %s", e)
@@ -719,6 +719,13 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
     while time.time() - start < timeout:
         time.sleep(3)
+
+        # Check for batch cancel — exit early if cancelled
+        if _batch_cancelled:
+            logger.info("Batch cancelled during wait — exiting early (%d msgs collected)", len(all_new_msgs))
+            with _lock:
+                _conversation_status = "idle"
+            return "\n\n".join(all_new_msgs) if all_new_msgs else None
 
         # -- Check conversation status (SAME endpoint as agent_runner) --
         try:
