@@ -33,8 +33,6 @@ _last_event_index: int = 0
 _sandbox_id: str | None = None
 _event_kinds: set[str] = set()  # diagnostic: all event kinds seen in current conversation
 _seen_event_ids: set[str] = set()  # ID-based event dedup (immune to API limit=N truncation)
-_agent_server_url: str | None = None  # direct agent server URL (session-key auth)
-_session_api_key: str | None = None   # session key for agent server
 _current_repo_key: str = ""  # current repo — determines which chat history to show
 _messages_by_repo: dict[str, list[dict]] = {}  # per-repo chat history
 _lock = threading.Lock()
@@ -879,7 +877,6 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     if timeout is None:
         timeout = _CHAT_TIMEOUT
 
-    global _conversation_status, _sandbox_id, _seen_event_ids, _agent_server_url, _session_api_key
 
     start = time.time()
     all_new_msgs: list[str] = []
@@ -921,14 +918,6 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             _sandbox_id = sid
             logger.info("Conversation %s sandbox_id=%s", _conversation_id, sid)
 
-        # Capture agent server URL + session key for direct event access
-        conv_url = items[0].get("conversation_url", "")
-        session_key = items[0].get("session_api_key", "")
-        global _agent_server_url, _session_api_key
-        if conv_url and session_key:
-            _agent_server_url = conv_url.rsplit("/api/conversations", 1)[0]
-            _session_api_key = session_key
-
         # Report status changes to UI
         if status != last_status:
             last_status = status
@@ -956,45 +945,20 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                     "timestamp": int(time.time() * 1000),
                 })
 
-        # -- Get events (prefer agent server — may return all events) --
+        # -- Get events --
         all_events = []
         try:
-            if _agent_server_url and _session_api_key:
-                # Agent server endpoint (session-key auth) — try without limit first
-                agent_headers = {"X-Session-API-Key": _session_api_key}
-                r2 = httpx.get(
-                    f"{_agent_server_url}/api/conversations/{_conversation_id}/events/search",
-                    headers=agent_headers,
-                    timeout=10,
-                )
-            else:
-                r2 = httpx.get(
-                    f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
-                    headers=_headers(),
-                    params={"limit": 100},
-                    timeout=10,
-                )
+            r2 = httpx.get(
+                f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
+                headers=_headers(),
+                params={"limit": 100},
+                timeout=10,
+            )
             r2.raise_for_status()
             events_data = r2.json()
         except Exception as e:
-            # Agent server failed — fall back to app server
-            if _agent_server_url:
-                logger.warning("Agent server events failed (%s), falling back to app server", e)
-                try:
-                    r2 = httpx.get(
-                        f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
-                        headers=_headers(),
-                        params={"limit": 100},
-                        timeout=10,
-                    )
-                    r2.raise_for_status()
-                    events_data = r2.json()
-                except Exception as e2:
-                    logger.warning("Events poll error (both): %s", e2)
-                    continue
-            else:
-                logger.warning("Events poll error: %s", e)
-                continue
+            logger.warning("Events poll error: %s", e)
+            continue
 
         # Robust extraction
         if isinstance(events_data, list):
@@ -1139,8 +1103,19 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             )
             r3.raise_for_status()
             zf = zipfile.ZipFile(io.BytesIO(r3.content))
-            event_files = sorted([n for n in zf.namelist() if n.startswith("event_") and n.endswith(".json")])
+            all_names = zf.namelist()
+            logger.info("Trajectory zip: %d files total, top-level: %s", len(all_names), all_names[:20])
+            event_files = sorted([n for n in all_names if n.startswith("event_") and n.endswith(".json")])
+            if not event_files:
+                # Try alternate naming: events might be in a subfolder
+                event_files = sorted([n for n in all_names if "event" in n.lower() and n.endswith(".json")])
             if event_files:
+                # Log first event structure to understand the format
+                with zf.open(event_files[0]) as f:
+                    first_evt = json.loads(f.read())
+                logger.info("Trajectory zip: %d event files, first event keys=%s kind=%s",
+                           len(event_files), list(first_evt.keys())[:15] if isinstance(first_evt, dict) else "not_dict",
+                           first_evt.get("kind", "") if isinstance(first_evt, dict) else "")
                 for fname in reversed(event_files):
                     with zf.open(fname) as f:
                         evt = json.loads(f.read())
@@ -1162,6 +1137,13 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                             break
                 if not all_new_msgs:
                     logger.info("Trajectory zip: %d files, no assistant MessageEvent", len(event_files))
+                    # Diagnostic: log all unique (kind, source) pairs seen
+                    seen_pairs = set()
+                    for fname in event_files[-20:]:  # just last 20
+                        with zf.open(fname) as f:
+                            evt = json.loads(f.read())
+                        seen_pairs.add((evt.get("kind", ""), evt.get("source", "")))
+                    logger.info("Trajectory zip: last 20 events (kind, source): %s", sorted(seen_pairs))
         except Exception as e:
             logger.warning("Trajectory zip error: %s", e)
 
