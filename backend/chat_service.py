@@ -233,7 +233,6 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             _last_event_index = 0
             _sandbox_id = None
             _event_kinds.clear()
-            _messages_by_repo.pop(_current_repo_key, None)  # clear current repo's history  # clear old repo's messages
             _conversation_repo = repo
             _conversation_mode = mode
             _persist_to_db()
@@ -413,6 +412,11 @@ def _process_batch_worker() -> None:
             logger.info("Batch [%d/%d]: %.80s...", pos, total, prompt)
             try:
                 result = send(prompt, repo=repo, branch=branch, mode=mode)
+                logger.info("Batch [%d/%d]: send() returned status=%s has_error=%s msgs=%d",
+                            pos, total,
+                            result.get("status") if result else "None",
+                            bool(result and "error" in result),
+                            len(_msgs()))
             except Exception as e:
                 logger.error("Batch send crashed [%d/%d]: %s", pos, total, e)
                 result = {"error": str(e)}
@@ -548,23 +552,26 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     if mode == "plan":
         if repo:
             full_prompt = (
-                f"Plan mode for {repo} on branch {branch}. "
-                f"Your task is EXPLORATION + ANALYSIS only. Do NOT edit any files, "
-                f"do NOT run any commands that modify code, do NOT implement anything. "
-                f"First, run `git pull` to get the latest code. "
-                f"Then explore the codebase (read files, search, analyze). "
-                f"Create a detailed implementation plan with file paths, "
-                f"function names, and architectural decisions. "
-                f"When done, present the plan and ask me whether you should proceed.\n\n"
-                f"{prompt}"
+                f"Repository: {repo} (branch: {branch}).\n"
+                "IMPORTANT — PLAN MODE:\n"
+                "1. FIRST, analyze the task and research the codebase. Read files, search, "
+                "understand the architecture. Create a detailed implementation plan saved "
+                "to .agents_tmp/PLAN.md. Do NOT implement anything yet.\n"
+                "2. After creating the plan, present your findings to the user and ask "
+                "whether to proceed with implementation.\n"
+                "IMPORTANT: Do NOT proceed to step 2 of the problem-solving workflow "
+                "(IMPLEMENTATION). Stop after EXPLORATION + ANALYSIS.\n\n"
+                f"Task: {prompt}"
             )
         else:
             full_prompt = (
-                "PLAN MODE: Your task is ANALYSIS only. Do NOT edit files, "
-                "do NOT implement anything. Think through the problem, research, "
-                "and create a detailed plan. When done, present the plan and "
-                "ask me whether you should proceed to implementation.\n\n"
-                f"{prompt}"
+                "IMPORTANT — PLAN MODE:\n"
+                "1. FIRST, analyze the request. Research, think through the problem, "
+                "and create a detailed plan saved to .agents_tmp/PLAN.md. "
+                "Do NOT implement anything.\n"
+                "2. After creating the plan, present it to the user and ask "
+                "whether to proceed.\n\n"
+                f"Task: {prompt}"
             )
     elif repo:
         full_prompt = (
@@ -837,6 +844,11 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
         if status in ("completed", "finished"):
             _conversation_status = "idle"
+            logger.info("Conversation %s: finished. Kinds=%s new_msgs=%d total_msgs=%d",
+                        _conversation_id,
+                        sorted(_event_kinds),
+                        len(all_new_msgs),
+                        len(_msgs()))
             break
         elif status in ("failed", "error", "stopped"):
             _conversation_status = "idle"
