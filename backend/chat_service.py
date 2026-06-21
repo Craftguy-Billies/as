@@ -657,7 +657,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             r2 = httpx.get(
                 f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
                 headers=_headers(),
-                params={"limit": 500},
+                params={"limit": 100},  # API max is 100 per spec
                 timeout=10,
             )
             r2.raise_for_status()
@@ -685,6 +685,20 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             last_event_count = len(all_events)
             logger.info("Conversation %s: %d total events, %d new (index=%d)",
                         _conversation_id, len(all_events), new_count, _last_event_index)
+            # Log first event kind+source to verify format matches
+            if all_events:
+                first = all_events[0]
+                logger.info("First event: kind=%s source=%s tool=%s keys=%s",
+                            first.get("kind"), first.get("source"),
+                            first.get("tool_name"),
+                            sorted(first.keys())[:8])
+        elif new_count == 0 and len(all_events) > 0:
+            pass  # no new events yet, agent still working
+        else:
+            # No events at all — log every 30s so we know polling works
+            if int(time.time() - start) % 30 < 3:
+                logger.info("Conversation %s: 0 events so far (elapsed %ds)",
+                            _conversation_id, int(time.time() - start))
 
         # Stream EVERYTHING the agent does as live events (text, tools, observations)
         for evt in all_events[_last_event_index:]:
