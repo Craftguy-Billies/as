@@ -960,12 +960,11 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         all_events = []
         try:
             if _agent_server_url and _session_api_key:
-                # Agent server endpoint (session-key auth)
+                # Agent server endpoint (session-key auth) — try without limit first
                 agent_headers = {"X-Session-API-Key": _session_api_key}
                 r2 = httpx.get(
                     f"{_agent_server_url}/api/conversations/{_conversation_id}/events/search",
                     headers=agent_headers,
-                    params={"limit": 200},
                     timeout=10,
                 )
             else:
@@ -978,8 +977,24 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             r2.raise_for_status()
             events_data = r2.json()
         except Exception as e:
-            logger.warning("Events poll error: %s", e)
-            continue
+            # Agent server failed — fall back to app server
+            if _agent_server_url:
+                logger.warning("Agent server events failed (%s), falling back to app server", e)
+                try:
+                    r2 = httpx.get(
+                        f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
+                        headers=_headers(),
+                        params={"limit": 100},
+                        timeout=10,
+                    )
+                    r2.raise_for_status()
+                    events_data = r2.json()
+                except Exception as e2:
+                    logger.warning("Events poll error (both): %s", e2)
+                    continue
+            else:
+                logger.warning("Events poll error: %s", e)
+                continue
 
         # Robust extraction
         if isinstance(events_data, list):
