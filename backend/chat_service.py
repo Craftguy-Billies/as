@@ -955,6 +955,10 @@ def _format_event_preview(evt: dict) -> str | None:
             if path:
                 if cmd == "view":
                     return f"📖 Reading: {path}"
+                if cmd == "create":
+                    return f"📝 Creating: {path}"
+                if cmd == "undo_edit":
+                    return f"↩️ Undoing: {path}"
                 return f"📝 Editing: {path}"
         elif tool in ("tavily_search", "tavily_tavily_search"):
             q = action.get("query", "") or action.get("content", "")
@@ -992,7 +996,7 @@ def _format_event_preview(evt: dict) -> str | None:
                 return f"📄 Diff ({len(diff)} chars)"
             path = obs.get("path", "")
             if path:
-                return f"📖 File read: {path}"
+                return f"📄 File: {path}"
         elif tool in ("tavily_search", "tavily_tavily_search"):
             results = obs.get("results", [])
             if isinstance(results, list) and results:
