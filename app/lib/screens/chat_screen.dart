@@ -201,17 +201,15 @@ class _ChatScreenState extends State<ChatScreen> {
                 : const Center(child: CircularProgressIndicator(strokeWidth: 2)),
           ),
 
-          // Error bar
+          // Error bar - show full error, no truncation
           if (prov.error != null)
             Container(
               width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               color: Colors.red.shade900,
               child: Text(
                 prov.error!,
                 style: const TextStyle(color: Colors.white70, fontSize: 12),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
               ),
             ),
 
@@ -601,11 +599,14 @@ class _ChatBubble extends StatelessWidget {
     else if (msg.content.startsWith('📊')) { accent = const Color(0xFF8B5CF6); icon = Icons.bar_chart; }
     else if (msg.content.startsWith('❌')) { accent = Colors.redAccent; icon = Icons.error; }
     else if (msg.content.startsWith('⚠')) { accent = Colors.orangeAccent; icon = Icons.warning_amber; }
+    else if (msg.content.startsWith('🔵')) { accent = const Color(0xFF3B82F6); icon = Icons.play_circle_outline; }
+    else if (msg.content.startsWith('🟢')) { accent = const Color(0xFF22C55E); icon = Icons.play_circle; }
+    else if (msg.content.startsWith('✅')) { accent = const Color(0xFF22C55E); icon = Icons.check_circle; }
+    else if (msg.content.startsWith('⏹️')) { accent = Colors.grey; icon = Icons.stop_circle; }
     else if (msg.content.startsWith('📋')) { accent = Colors.grey; icon = Icons.code; }
     else { accent = Colors.grey; icon = Icons.settings; }
 
-    // Error/warning events get full visibility — no line limit
-    final isError = msg.content.startsWith('❌') || msg.content.startsWith('⚠');
+    // All events get full visibility — debuggable
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 16),
       child: Row(
@@ -620,13 +621,11 @@ class _ChatBubble extends StatelessWidget {
             child: Text(
               msg.content,
               style: TextStyle(
-                color: accent.withAlpha(isError ? 255 : 200),
+                color: accent.withAlpha(200),
                 fontSize: 11,
                 fontFamily: 'monospace',
                 height: 1.3,
               ),
-              maxLines: isError ? 50 : 8,
-              overflow: isError ? TextOverflow.visible : TextOverflow.ellipsis,
             ),
           ),
         ],
