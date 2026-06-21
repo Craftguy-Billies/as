@@ -719,7 +719,9 @@ def _send_message(conversation_id: str, prompt: str) -> tuple[bool, str | None]:
 
         # Update sandbox_id from response if we don't have it
         sandbox_status = data.get("sandbox_status", "")
-        logger.info("send-message OK (sandbox=%s)", sandbox_status)
+        # Log full response to see what fields are available (looking for inline response)
+        logger.info("send-message OK (sandbox=%s) full_response_keys=%s",
+                    sandbox_status, list(data.keys()))
         return True, None
 
     return False, "Sandbox not running after resume attempt"
@@ -906,6 +908,11 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         if not items:
             continue
 
+        # Log full conversation object keys once to see available fields
+        if not hasattr(_wait_for_response, "_logged_conv_keys"):
+            logger.info("app-conversations item keys: %s", list(items[0].keys()))
+            _wait_for_response._logged_conv_keys = True
+
         status = items[0].get("execution_status", "")
 
         # Capture sandbox_id for sandbox management (resume, etc.)
@@ -990,7 +997,10 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
         new_count = len(all_events)
         if new_count > 0:
-            logger.info("Conversation %s: %d events fetched (ID-based dedup)", _conversation_id, new_count)
+            first_ts = all_events[0].get("created_at") or all_events[0].get("timestamp") or 0
+            last_ts = all_events[-1].get("created_at") or all_events[-1].get("timestamp") or 0
+            logger.info("Conversation %s: %d events fetched (first_ts=%s last_ts=%s, ID-based dedup)",
+                        _conversation_id, new_count, first_ts, last_ts)
         else:
             # No events at all — log every 30s so we know polling works
             if int(time.time() - start) % 30 < 3:
