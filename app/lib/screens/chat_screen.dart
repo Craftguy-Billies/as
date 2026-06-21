@@ -182,7 +182,7 @@ class _ChatScreenState extends State<ChatScreen> {
       body: Column(
         children: [
           // Repo bar (collapsible)
-          if (_showRepoBar) _buildRepoBar(),
+          if (_showRepoBar) _buildRepoBar(prov),
 
           // Messages
           Expanded(
@@ -220,7 +220,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _buildRepoBar() {
+  Widget _buildRepoBar(ChatProvider prov) {
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
       decoration: const BoxDecoration(
