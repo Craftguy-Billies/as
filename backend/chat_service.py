@@ -549,15 +549,21 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
         if repo:
             full_prompt = (
                 f"Plan mode for {repo} on branch {branch}. "
-                f"First, run `git pull` to get the latest code, then explore the codebase, "
-                f"analyze the situation, and create a detailed plan. Do NOT implement yet. "
-                f"After the plan is complete, ask me whether to proceed.\n\n"
+                f"Your task is EXPLORATION + ANALYSIS only. Do NOT edit any files, "
+                f"do NOT run any commands that modify code, do NOT implement anything. "
+                f"First, run `git pull` to get the latest code. "
+                f"Then explore the codebase (read files, search, analyze). "
+                f"Create a detailed implementation plan with file paths, "
+                f"function names, and architectural decisions. "
+                f"When done, present the plan and ask me whether you should proceed.\n\n"
                 f"{prompt}"
             )
         else:
             full_prompt = (
-                "PLAN MODE: First, analyze this request and create a detailed plan. "
-                "Do NOT implement yet. After the plan is complete, ask me whether to proceed.\n\n"
+                "PLAN MODE: Your task is ANALYSIS only. Do NOT edit files, "
+                "do NOT implement anything. Think through the problem, research, "
+                "and create a detailed plan. When done, present the plan and "
+                "ask me whether you should proceed to implementation.\n\n"
                 f"{prompt}"
             )
     elif repo:
@@ -941,8 +947,11 @@ def _format_event_preview(evt: dict) -> str | None:
             if cmd:
                 return f"💻 $ {cmd}"
         elif tool in ("file_editor", "str_replace_editor"):
+            cmd = (action.get("command") or "").strip()
             path = action.get("path", "") or action.get("file", "")
             if path:
+                if cmd == "view":
+                    return f"📖 Reading: {path}"
                 return f"📝 Editing: {path}"
         elif tool in ("tavily_search", "tavily_tavily_search"):
             q = action.get("query", "") or action.get("content", "")
@@ -975,11 +984,15 @@ def _format_event_preview(evt: dict) -> str | None:
                 extra = f" (exit={exit_code})" if exit_code is not None and exit_code != 0 else ""
                 return f"{tag}{short}{extra}"
         elif tool in ("file_editor", "str_replace_editor"):
+            cmd = (action.get("command") or "").strip()
             diff = obs.get("diff", "")
             if diff:
                 return f"📄 Diff ({len(diff)} chars)"
             path = obs.get("path", "")
             if path:
+                if cmd == "view":
+                    lines = obs.get("content", "")
+                    return f"📄 Lines from: {path}"
                 return f"📄 Saved: {path}"
         elif tool in ("tavily_search", "tavily_tavily_search"):
             results = obs.get("results", [])
