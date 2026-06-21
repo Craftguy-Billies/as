@@ -143,6 +143,18 @@ class ChatProvider extends ChangeNotifier {
     debugPrint('ChatProvider.send: START repo=$repo mode=$mode');
     _error = null;
 
+    // If repo/mode changed, switch to new repo's history first
+    if (repo != serverRepo || mode != serverMode) {
+      serverRepo = repo;
+      serverMode = mode;
+      _messages.clear();
+      _queuePosition = 0;
+      _queueTotal = 0;
+      _pollTimer?.cancel();
+      await _saveToCache();
+      notifyListeners();
+    }
+
     // Add user message to chat immediately
     final userMsg = ChatMessage(
       role: 'user',
