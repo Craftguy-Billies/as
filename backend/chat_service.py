@@ -34,6 +34,7 @@ _conversation_repo: str = ""
 _conversation_mode: str = "code"
 _last_event_index: int = 0
 _sandbox_id: str | None = None
+_event_kinds: set[str] = set()  # diagnostic: all event kinds seen in current conversation
 _messages: list[dict] = []
 _lock = threading.Lock()
 
@@ -123,12 +124,13 @@ def _headers() -> dict:
 
 def reset() -> None:
     """Clear the current chat session."""
-    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages, _conversation_status, _sandbox_id
+    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages, _event_kinds, _conversation_status, _sandbox_id
     with _lock:
         _conversation_id = None
         _conversation_repo = ""
         _conversation_mode = "code"
         _last_event_index = 0
+        _event_kinds.clear()
         _sandbox_id = None
         _messages = []
         _conversation_status = "idle"
@@ -706,6 +708,9 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             source = evt.get("source", "")
             tool = evt.get("tool_name", "")
 
+            # Track event kinds for diagnostics
+            _event_kinds.add(kind)
+
             if kind == "MessageEvent":
                 # API returns llm_message (a Message object), not plain "message"
                 llm_msg = evt.get("llm_message") or evt.get("message") or {}
@@ -734,6 +739,9 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                             "kind": kind,
                             "timestamp": int(time.time() * 1000),
                         })
+                else:
+                    logger.warning("MessageEvent found but NO text extracted: source=%s llm_msg_keys=%s",
+                                   source, sorted(llm_msg.keys()) if isinstance(llm_msg, dict) else type(llm_msg).__name__)
 
             # Stream tool calls, observations, errors as live events
             event_preview = _format_event_preview(evt)
@@ -775,6 +783,8 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     if not all_new_msgs:
         elapsed = int(time.time() - start)
         logger.warning("No assistant messages found after %ds (status=%s)", elapsed, last_status)
+        logger.warning("All event kinds seen: %s", sorted(_event_kinds))
+        logger.warning("Total events: %d, messages: %d", len(all_events), len(_messages))
 
         # Fallback: scrape last 20 events for any text content
         fallback_text = _scrape_events_for_text(all_events[-20:])
