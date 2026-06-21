@@ -280,7 +280,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         onChanged: (_) => _saveRepoPrefs(),
                         onSubmitted: (_) {
                           final r = _repoCtrl.text.trim();
-                          if (r.isNotEmpty) prov.switchRepo(r, _mode);
+                          if (r.isNotEmpty) prov.switchRepo(r, _mode, branch: _branchCtrl.text.trim().isEmpty ? 'main' : _branchCtrl.text.trim());
                         },
                         decoration: InputDecoration(
                           hintText: 'owner/repo',
@@ -309,7 +309,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           _saveRepoPrefs();
                           if (repo.isNotEmpty) {
                             _mode = mode;
-                            prov.switchRepo(repo, mode);
+                            prov.switchRepo(repo, mode, branch: _branchCtrl.text.trim().isEmpty ? 'main' : _branchCtrl.text.trim());
                           }
                         },
                         itemBuilder: (_) => prov.savedRepos.map((r) {

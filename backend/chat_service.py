@@ -27,6 +27,7 @@ CLOUD_API_KEY = os.getenv("OPENHANDS_CLOUD_API_KEY", "")
 # -- Session state (persisted to DB, survives restart) --
 _conversation_id: str | None = None
 _conversation_repo: str = ""
+_conversation_branch: str = "main"
 _conversation_mode: str = "code"
 _last_event_index: int = 0
 _sandbox_id: str | None = None
@@ -83,7 +84,7 @@ _CHAT_TIMEOUT = int(os.getenv("VIBECODE_CHAT_TIMEOUT", "600"))  # 10 min default
 
 # -- Restore state from DB on module load --
 def _restore_from_db() -> None:
-    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages_by_repo, _current_repo_key
+    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _messages_by_repo, _current_repo_key
     global _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_running
     try:
         db = get_sync_db()
@@ -95,6 +96,7 @@ def _restore_from_db() -> None:
             data = json.loads(row[0])
             _conversation_id = data.get("conversation_id")
             _conversation_repo = data.get("repo", "")
+            _conversation_branch = data.get("branch", "main")
             _conversation_mode = data.get("mode", "code")
             _last_event_index = data.get("last_event_index", 0)
             _messages_by_repo = data.get("messages_by_repo", {})
@@ -127,6 +129,7 @@ def _persist_to_db() -> None:
         data = json.dumps({
             "conversation_id": _conversation_id,
             "repo": _conversation_repo,
+            "branch": _conversation_branch,
             "mode": _conversation_mode,
             "last_event_index": _last_event_index,
             "messages_by_repo": _messages_by_repo,
@@ -165,7 +168,7 @@ def _headers() -> dict:
 
 def reset() -> None:
     """Clear the current chat session AND cancel any running batch."""
-    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
+    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
     global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_skip_prompt
     with _lock:
         # Cancel running batch
@@ -181,6 +184,7 @@ def reset() -> None:
         # Reset conversation
         _conversation_id = None
         _conversation_repo = ""
+        _conversation_branch = "main"
         _conversation_mode = "code"
         _last_event_index = 0
         _event_kinds.clear()
@@ -206,6 +210,7 @@ def get_state(repo: str = "", mode: str = "") -> dict:
             "conversation_id": _conversation_id,
             "sandbox_id": _sandbox_id,
             "repo": _conversation_repo,
+            "branch": _conversation_branch,
             "mode": _conversation_mode,
             "current_repo_key": _current_repo_key,
             "conversation_status": _conversation_status,
@@ -249,27 +254,28 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
     Creates a new conversation when repo or mode changes.
     HTTP calls (create/send) happen OUTSIDE _lock so get_state() polling is never blocked.
     """
-    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _sandbox_id
+    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _sandbox_id
 
     if not CLOUD_API_KEY:
         return {"error": "OPENHANDS_CLOUD_API_KEY not configured on server"}
 
-    logger.info("Chat send: prompt=%.80s... repo=%s mode=%s", prompt, repo, mode)
+    logger.info("Chat send: prompt=%.80s... repo=%s branch=%s mode=%s", prompt, repo, branch, mode)
 
     # Phase 1a: Quick check under lock — do we need a new conversation?
     with _lock:
         ctx_changed = (
             _conversation_id is not None
-            and (repo != _conversation_repo or mode != _conversation_mode)
+            and (repo != _conversation_repo or branch != _conversation_branch or mode != _conversation_mode)
         )
         if ctx_changed:
-            logger.info("Context changed: repo %s→%s mode %s→%s — starting new conversation",
-                        _conversation_repo, repo, _conversation_mode, mode)
+            logger.info("Context changed: repo %s→%s branch %s→%s mode %s→%s — starting new conversation",
+                        _conversation_repo, repo, _conversation_branch, branch, _conversation_mode, mode)
             _conversation_id = None
             _last_event_index = 0
             _sandbox_id = None
             _event_kinds.clear()
             _conversation_repo = repo
+            _conversation_branch = branch
             _conversation_mode = mode
             _persist_to_db()
         need_new_conv = _conversation_id is None
@@ -306,7 +312,11 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                             f"{m['role'].capitalize()}: {m['content']}" for m in recent_msgs
                         )
                         enhanced = (
-                            f"[Previous conversation context — session was recreated due to server restart]\n"
+                            f"[RECOVERY CONTEXT — sandbox restarted, conversation recreated]\n"
+                            f"Below is a summary of recent messages from BEFORE the restart.\n"
+                            f"IMPORTANT: These exchanges already happened. Do NOT repeat actions\n"
+                            f"that were already completed (e.g., creating files, git operations).\n"
+                            f"Continue naturally from where the conversation left off.\n\n"
                             f"{context}\n"
                             f"---\n"
                             f"Current task: {prompt}"
@@ -343,6 +353,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
         if need_new_conv:
             _conversation_id = new_conv_id
             _conversation_repo = repo
+            _conversation_branch = branch
             _conversation_mode = mode
             _current_repo_key = _repo_key(repo)
             _last_event_index = 0
@@ -715,6 +726,7 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
         if repo:
             full_prompt = (
                 f"Repository: {repo} (branch: {branch}).\n"
+                "IMPORTANT: First run `git pull` to get the latest code.\n"
                 "IMPORTANT — PLAN MODE:\n"
                 "1. FIRST, analyze the task and research the codebase. Read files, search, "
                 "understand the architecture. Create a detailed implementation plan saved "

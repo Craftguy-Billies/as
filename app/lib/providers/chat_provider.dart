@@ -58,6 +58,7 @@ class ChatProvider extends ChangeNotifier {
   int get queueTotal => _queueTotal;
   bool get isProcessing => _queueTotal > 0;
   String serverRepo = '';
+  String serverBranch = 'main';
   String serverMode = 'code';
   List<Map<String, dynamic>> _savedRepos = [];
   List<Map<String, dynamic>> get savedRepos => _savedRepos;
@@ -153,6 +154,11 @@ class ChatProvider extends ChangeNotifier {
     // Merge server messages (survives server restart)
     try {
       final data = await _api.getChat(repo: serverRepo, mode: serverMode);
+      // Restore branch from server state
+      final serverBr = data['branch']?.toString();
+      if (serverBr != null && serverBr.isNotEmpty) {
+        serverBranch = serverBr;
+      }
       final serverMsgs = (data['messages'] as List?)
               ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
               .toList() ??
@@ -215,13 +221,14 @@ class ChatProvider extends ChangeNotifier {
     final trimmed = prompt.trim();
     if (trimmed.isEmpty) return;
 
-    logViewer('ChatProvider.send: START repo=$repo mode=$mode');
+    logViewer('ChatProvider.send: START repo=$repo branch=$branch mode=$mode');
     _error = null;
 
-    // If repo changed, switch to new repo's history
-    // Mode switch on same repo → keep messages (plan then code = one chat)
-    if (repo != serverRepo) {
+    // If repo or branch changed, switch to new conversation history
+    // Mode switch on same repo+branch → keep messages (plan then code = one chat)
+    if (repo != serverRepo || branch != serverBranch) {
       serverRepo = repo;
+      serverBranch = branch;
       serverMode = mode;
       _messages.clear();
       _queuePosition = 0;
@@ -380,9 +387,10 @@ class ChatProvider extends ChangeNotifier {
   }
 
   // -- Repo management --
-  Future<void> switchRepo(String repo, String mode) async {
-    if (repo == serverRepo && mode == serverMode) return;
+  Future<void> switchRepo(String repo, String mode, {String branch = 'main'}) async {
+    if (repo == serverRepo && mode == serverMode && branch == serverBranch) return;
     serverRepo = repo;
+    serverBranch = branch;
     serverMode = mode;
     _pollTimer?.cancel();
     _queuePosition = 0;
@@ -392,6 +400,11 @@ class ChatProvider extends ChangeNotifier {
     // Fetch messages for this repo from server
     try {
       final state = await _api.getChat(repo: repo, mode: mode);
+      // Restore branch from server state if available
+      final serverBr = state['branch']?.toString();
+      if (serverBr != null && serverBr.isNotEmpty) {
+        serverBranch = serverBr;
+      }
       final serverMsgs = (state['messages'] as List?)
               ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
               .toList() ??
@@ -487,6 +500,7 @@ class ChatProvider extends ChangeNotifier {
       final payload = json.encode({
         'messages': _messages.map((m) => m.toJson()).toList(),
         'repo': serverRepo,
+        'branch': serverBranch,
         'mode': serverMode,
       });
       await prefs.setString(_cacheKey, payload);
