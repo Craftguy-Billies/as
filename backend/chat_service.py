@@ -33,6 +33,7 @@ _conversation_id: str | None = None
 _conversation_repo: str = ""
 _conversation_mode: str = "code"
 _last_event_index: int = 0
+_sandbox_id: str | None = None
 _messages: list[dict] = []
 _lock = threading.Lock()
 
@@ -122,12 +123,13 @@ def _headers() -> dict:
 
 def reset() -> None:
     """Clear the current chat session."""
-    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages, _conversation_status
+    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages, _conversation_status, _sandbox_id
     with _lock:
         _conversation_id = None
         _conversation_repo = ""
         _conversation_mode = "code"
         _last_event_index = 0
+        _sandbox_id = None
         _messages = []
         _conversation_status = "idle"
         _persist_to_db()
@@ -140,6 +142,7 @@ def get_state() -> dict:
         return {
             "messages": list(_messages),
             "conversation_id": _conversation_id,
+            "sandbox_id": _sandbox_id,
             "repo": _conversation_repo,
             "mode": _conversation_mode,
             "conversation_status": _conversation_status,
@@ -159,7 +162,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
     Creates a new conversation when repo or mode changes.
     HTTP calls (create/send) happen OUTSIDE _lock so get_state() polling is never blocked.
     """
-    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index
+    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _sandbox_id
 
     if not CLOUD_API_KEY:
         return {"error": "OPENHANDS_CLOUD_API_KEY not configured on server"}
@@ -188,17 +191,17 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             logger.info("Created conversation %s (repo=%s mode=%s)",
                         new_conv_id, repo, mode)
         else:
-            resp = httpx.post(
-                f"{CLOUD_API_URL}/api/v1/app-conversations/{current_conv_id}/send-message",
-                headers=_headers(),
-                json={
-                    "role": "user",
-                    "content": [{"type": "text", "text": prompt}],
-                    "run": True,
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
+            success, send_err = _send_message(current_conv_id, prompt)
+            if not success:
+                # If sandbox is paused/gone, reset conversation so next send creates a new one
+                if send_err and "409" in str(send_err):
+                    logger.warning("Sandbox paused/gone for conversation %s — resetting", current_conv_id)
+                with _lock:
+                    _conversation_id = None
+                    _last_event_index = 0
+                    _sandbox_id = None
+                    _persist_to_db()
+                return {"error": send_err or "Failed to send message to conversation"}
             logger.info("Sent to conversation %s", current_conv_id)
     except httpx.HTTPStatusError as e:
         logger.error("HTTP error: %s %s", e.response.status_code, e.response.text[:200])
@@ -206,6 +209,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             with _lock:
                 _conversation_id = None
                 _last_event_index = 0
+                _sandbox_id = None
                 _persist_to_db()
         return {"error": f"Cloud API error: {e.response.status_code}"}
     except Exception as e:
@@ -399,6 +403,76 @@ def cancel_batch() -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _send_message(conversation_id: str, prompt: str) -> tuple[bool, str | None]:
+    """Send a follow-up message to an existing conversation via send-message endpoint.
+
+    Returns (success, error_message). Handles 409 (sandbox paused/gone)
+    by attempting to resume the sandbox and retrying once.
+
+    Verified against OpenHands Cloud OpenAPI spec.
+    """
+    global _sandbox_id
+
+    body = {
+        "role": "user",
+        "content": [{"type": "text", "text": prompt}],
+        "run": True,
+    }
+
+    for attempt in range(2):
+        try:
+            resp = httpx.post(
+                f"{CLOUD_API_URL}/api/v1/app-conversations/{conversation_id}/send-message",
+                headers=_headers(),
+                json=body,
+                timeout=30,
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 409:
+                logger.warning("send-message 409: sandbox not running for %s", conversation_id)
+                if attempt == 0 and _sandbox_id:
+                    # Try resume sandbox, then retry
+                    resume_err = _resume_sandbox(_sandbox_id)
+                    if resume_err:
+                        return False, f"Sandbox not running and resume failed: {resume_err}"
+                    continue  # retry send-message
+                return False, f"Sandbox not running (409). Please wait and try again."
+            raise  # re-raise other HTTP errors
+
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Check success field in response body
+        if not data.get("success", True):
+            sandbox_status = data.get("sandbox_status", "unknown")
+            msg = data.get("message", "")
+            logger.error("send-message returned success=false (sandbox=%s): %s", sandbox_status, msg)
+            return False, f"Agent not available (sandbox status: {sandbox_status}). {msg}".strip()
+
+        # Update sandbox_id from response if we don't have it
+        sandbox_status = data.get("sandbox_status", "")
+        logger.info("send-message OK (sandbox=%s)", sandbox_status)
+        return True, None
+
+    return False, "Sandbox not running after resume attempt"
+
+
+def _resume_sandbox(sandbox_id: str) -> str | None:
+    """Resume a paused sandbox. Returns None on success, error message on failure."""
+    try:
+        resp = httpx.post(
+            f"{CLOUD_API_URL}/api/v1/sandboxes/{sandbox_id}/resume",
+            headers=_headers(),
+            timeout=30,
+        )
+        resp.raise_for_status()
+        logger.info("Sandbox %s resumed", sandbox_id)
+        return None
+    except Exception as e:
+        logger.error("Failed to resume sandbox %s: %s", sandbox_id, e)
+        return str(e)
+
+
 def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     """Create a conversation via POST /api/v1/app-conversations (SAME as agent_runner).
 
@@ -512,7 +586,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     Also appends live events (tool calls, observations) to _messages so the client
     can see what the agent is doing via polling get_state().
     """
-    global _last_event_index, _conversation_status
+    global _last_event_index, _conversation_status, _sandbox_id
 
     if timeout is None:
         timeout = _CHAT_TIMEOUT
@@ -544,6 +618,12 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             continue
 
         status = items[0].get("execution_status", "")
+
+        # Capture sandbox_id for sandbox management (resume, etc.)
+        sid = items[0].get("sandbox_id")
+        if sid and sid != _sandbox_id:
+            _sandbox_id = sid
+            logger.info("Conversation %s sandbox_id=%s", _conversation_id, sid)
 
         # Report status changes to UI
         if status != last_status:
