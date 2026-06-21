@@ -17,11 +17,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-try:
-    from database import get_sync_db
-    _DB = get_sync_db()
-except Exception:
-    _DB = None
+from database import get_sync_db
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +63,12 @@ _CHAT_TIMEOUT = int(os.getenv("VIBECODE_CHAT_TIMEOUT", "600"))  # 10 min default
 def _restore_from_db() -> None:
     global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages_by_repo, _current_repo_key
     global _batch_prompts, _batch_position, _batch_total, _batch_running
-    if _DB is None:
+    try:
+        get_sync_db()
+    except Exception:
         return
     try:
-        row = _DB.execute("SELECT value FROM kv_store WHERE key = 'chat_session'").fetchone()
+        row = get_sync_db().execute("SELECT value FROM kv_store WHERE key = 'chat_session'").fetchone()
         if row:
             data = json.loads(row[0])
             _conversation_id = data.get("conversation_id")
@@ -91,7 +89,9 @@ def _restore_from_db() -> None:
         logger.warning("Failed to restore chat session from DB: %s", e)
 
 def _persist_to_db() -> None:
-    if _DB is None:
+    try:
+        get_sync_db()
+    except Exception:
         return
     try:
         # Trim in-memory to prevent unbounded growth
@@ -109,17 +109,17 @@ def _persist_to_db() -> None:
             "batch_total": _batch_total,
             "batch_running": _batch_running,
         })
-        _DB.execute(
+        get_sync_db().execute(
             "INSERT OR REPLACE INTO kv_store (key, value) VALUES ('chat_session', ?)",
             (data,),
         )
-        _DB.commit()
+        get_sync_db().commit()
     except Exception:
         try:
-            _DB.execute(
+            get_sync_db().execute(
                 "CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT)"
             )
-            _DB.commit()
+            get_sync_db().commit()
         except Exception as e:
             logger.warning("Failed to persist chat session (kv_store missing): %s", e)
 
