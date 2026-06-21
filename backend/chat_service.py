@@ -479,15 +479,18 @@ def _process_batch_worker() -> None:
                 result = {"error": str(e)}
 
             if result and "error" in result:
-                with _lock:
-                    _msgs().append({
-                        "role": "assistant",
-                        "content": f"[ERROR] [{pos}/{total}] Failed: {result['error']}",
-                        "timestamp": int(time.time() * 1000),
-                    })
+                # Don't show error for deliberately cancelled prompts
+                if not _batch_skip_prompt:
+                    with _lock:
+                        _msgs().append({
+                            "role": "assistant",
+                            "content": f"[ERROR] [{pos}/{total}] Failed: {result['error']}",
+                            "timestamp": int(time.time() * 1000),
+                        })
 
             with _lock:
-                _batch_position += 1
+                if not _batch_skip_prompt:
+                    _batch_position += 1
                 _persist_to_db()
 
             time.sleep(1)  # brief pause between prompts
