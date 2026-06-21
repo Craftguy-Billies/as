@@ -153,7 +153,7 @@ class ChatProvider extends ChangeNotifier {
         final merged = <ChatMessage>[];
         final seen = <String>{};
         for (final m in [...serverMsgs, ..._messages]) {
-          final key = '${m.role}:${m.content}:${m.timestamp}';
+          final key = '${m.role}:${m.content}';
           if (seen.add(key)) merged.add(m);
         }
         _messages = merged;
@@ -301,7 +301,8 @@ class ChatProvider extends ChangeNotifier {
           final merged = <ChatMessage>[];
           final seen = <String>{};
           for (final m in [...serverMsgs, ..._messages]) {
-            final key = '${m.role}:${m.content}:${m.timestamp}';
+            // Role+content dedup: server timestamps differ from client timestamps
+            final key = '${m.role}:${m.content}';
             if (seen.add(key)) merged.add(m);
           }
           // Sort by timestamp so messages appear chronologically
