@@ -19,7 +19,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final _scrollCtrl = ScrollController();
   bool _hasLoaded = false;
   bool _showRepoBar = false;
-  int _lastTotalMsgCount = -1;  // only auto-scroll when new msgs arrive
+  int _lastMsgCount = -1;  // auto-scroll to bottom when new msgs arrive
   String _mode = 'code';
   String _activeModel = '';
 
@@ -51,10 +51,6 @@ class _ChatScreenState extends State<ChatScreen> {
       final sp = await SharedPreferences.getInstance();
       setState(() => _activeModel = sp.getString('last_model') ?? '');
     } catch (_) {}
-    // Scroll to latest messages after all layout settles
-    if (mounted) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToBottom());
-    }
   }
 
   Future<Map<String, String?>> _loadPrefs() async {
@@ -117,54 +113,24 @@ class _ChatScreenState extends State<ChatScreen> {
     prov.send(text, repo: repo, branch: branch, mode: _mode);
   }
 
-  void _scrollDown() {
-    // Smooth animated scroll when new messages arrive
-    if (!_scrollCtrl.hasClients) return;
-    _scrollCtrl.animateTo(
-      _scrollCtrl.position.maxScrollExtent,
-      duration: const Duration(milliseconds: 200),
-      curve: Curves.easeOut,
-    );
-  }
-
-  void _jumpToBottom() {
-    // ListView.builder lays out items lazily over multiple frames.
-    // maxScrollExtent changes as more items are built, so we keep
-    // jumping until the extent stabilizes for 3 consecutive checks.
-    double _lastExtent = -1;
-    int _stable = 0;
-
-    void check() {
-      if (!mounted || !_scrollCtrl.hasClients) return;
-      final ext = _scrollCtrl.position.maxScrollExtent;
-      if (ext <= 0) {
-        WidgetsBinding.instance.addPostFrameCallback((_) => check());
-        return;
-      }
-      if (ext == _lastExtent) {
-        _stable++;
-        if (_stable >= 3) return; // fully laid out
-      } else {
-        _stable = 0;
-        _lastExtent = ext;
-        _scrollCtrl.jumpTo(ext);
-      }
-      WidgetsBinding.instance.addPostFrameCallback((_) => check());
-    }
-
-    WidgetsBinding.instance.addPostFrameCallback((_) => check());
-  }
-
   @override
   Widget build(BuildContext context) {
     final prov = context.watch<ChatProvider>();
     final msgs = prov.messages;
 
-    // Auto-scroll when new messages arrive (count changes).
-    // Initial scroll is handled separately at the end of _init().
-    if (msgs.isNotEmpty && _hasLoaded && msgs.length != _lastTotalMsgCount) {
-      _lastTotalMsgCount = msgs.length;
-      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollDown());
+    // With reverse:true ListView, offset 0 = bottom. Auto-scroll to
+    // bottom when new messages arrive (count changes).
+    if (msgs.isNotEmpty && _hasLoaded && msgs.length != _lastMsgCount) {
+      _lastMsgCount = msgs.length;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollCtrl.hasClients) {
+          _scrollCtrl.animateTo(
+            0, // reverse:true → 0 = bottom
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOut,
+          );
+        }
+      });
     }
 
     return Scaffold(
@@ -230,7 +196,9 @@ class _ChatScreenState extends State<ChatScreen> {
           // Repo bar (collapsible)
           if (_showRepoBar) _buildRepoBar(prov),
 
-          // Messages
+          // Messages — reverse:true renders from bottom natively.
+          // Item 0 = bottom of screen. Newest messages at index 0,
+          // "Load earlier" button at the end (top of screen).
           Expanded(
             child: _hasLoaded
                 ? (msgs.isEmpty
@@ -239,30 +207,32 @@ class _ChatScreenState extends State<ChatScreen> {
                         final visible = msgs.sublist(prov.showFromIndex);
                         final hasMore = prov.hasMoreMessages;
                         final showTyping = prov.loading;
+                        final items = <Widget>[];
+                        if (showTyping) items.add(_buildTyping());
+                        for (final m in visible.reversed) {
+                          items.add(_ChatBubble(msg: m));
+                        }
+                        if (hasMore) {
+                          items.add(Padding(
+                            padding: const EdgeInsets.only(top: 12),
+                            child: Center(
+                              child: TextButton.icon(
+                                onPressed: () => prov.loadMoreMessages(),
+                                icon: const Icon(Icons.expand_less, color: Color(0xFF7C3AED), size: 18),
+                                label: const Text(
+                                  'Load earlier messages',
+                                  style: TextStyle(color: Color(0xFF7C3AED), fontSize: 13),
+                                ),
+                              ),
+                            ),
+                          ));
+                        }
                         return ListView.builder(
+                          reverse: true,
                           controller: _scrollCtrl,
                           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                          itemCount: (hasMore ? 1 : 0) + visible.length + (showTyping ? 1 : 0),
-                          itemBuilder: (_, i) {
-                            if (hasMore && i == 0) {
-                              return Padding(
-                                padding: const EdgeInsets.only(bottom: 12),
-                                child: Center(
-                                  child: TextButton.icon(
-                                    onPressed: () => prov.loadMoreMessages(),
-                                    icon: const Icon(Icons.expand_less, color: Color(0xFF7C3AED), size: 18),
-                                    label: const Text(
-                                      'Load earlier messages',
-                                      style: TextStyle(color: Color(0xFF7C3AED), fontSize: 13),
-                                    ),
-                                  ),
-                                ),
-                              );
-                            }
-                            final msgIdx = i - (hasMore ? 1 : 0);
-                            if (msgIdx >= visible.length) return _buildTyping();
-                            return _ChatBubble(msg: visible[msgIdx]);
-                          },
+                          itemCount: items.length,
+                          itemBuilder: (_, i) => items[i],
                         );
                       }))
                 : const Center(child: CircularProgressIndicator(strokeWidth: 2)),
