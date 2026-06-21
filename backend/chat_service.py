@@ -33,7 +33,13 @@ _sandbox_id: str | None = None
 _event_kinds: set[str] = set()  # diagnostic: all event kinds seen in current conversation
 _current_repo_key: str = ""  # current repo — determines which chat history to show
 _messages_by_repo: dict[str, list[dict]] = {}  # per-repo chat history
+_msg_counter: int = 0  # monotonically increasing message ID
 _lock = threading.Lock()
+
+def _next_msg_id() -> int:
+    global _msg_counter
+    _msg_counter += 1
+    return _msg_counter
 
 def _msgs() -> list[dict]:
     """Get or create the message list for the current repo/mode."""
@@ -85,6 +91,7 @@ _CHAT_TIMEOUT = int(os.getenv("VIBECODE_CHAT_TIMEOUT", "600"))  # 10 min default
 def _restore_from_db() -> None:
     global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages_by_repo, _current_repo_key
     global _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_running
+    global _msg_counter
     try:
         db = get_sync_db()
     except Exception:
@@ -108,6 +115,7 @@ def _restore_from_db() -> None:
             _batch_total = data.get("batch_total", 0)
             # Auto-resume if server restarted mid-batch (remaining prompts in queue)
             _batch_running = _batch_position < _batch_total and len(_batch_prompts) > _batch_position
+            _msg_counter = data.get("msg_counter", 0)
             if _batch_running:
                 threading.Thread(target=_process_batch_worker, daemon=True).start()
                 logger.info("Auto-resuming batch: %d/%d remaining", _batch_total - _batch_position, _batch_total)
@@ -137,6 +145,7 @@ def _persist_to_db() -> None:
             "batch_position": _batch_position,
             "batch_total": _batch_total,
             "batch_running": _batch_running,
+            "msg_counter": _msg_counter,
         })
         db.execute(
             "INSERT OR REPLACE INTO kv_store (key, value) VALUES ('chat_session', ?)",
@@ -349,7 +358,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             _conversation_mode = mode
             _current_repo_key = _repo_key(repo)
             _last_event_index = 0
-        _msgs().append({
+        _msgs().append({"id": _next_msg_id(), 
             "role": "user",
             "content": prompt,
             "timestamp": int(time.time() * 1000),
@@ -367,34 +376,35 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
         logger.error("Wait for response crashed: %s", e, exc_info=True)
         response = None
 
-    # Phase 3: Save result under lock — replace live [MSG] event placeholders
-    # with a single clean assistant message (avoids duplicated/concatenated display).
+    # Phase 3: Save result under lock — strip cumulative prefixes and save
+    # clean assistant message. Keep live [MSG] events so users see tool output.
     with _lock:
         if response:
+            # Strip previous assistant message prefixes from the cumulative
+            # API response. Try ALL first, fall back to just the LATEST one.
+            original = response
             msgs = _msgs()
-            msgs[:] = [
-                m for m in msgs
-                if not (
-                    m.get("role") == "event"
-                    and isinstance(m.get("content"), str)
-                    and m["content"].startswith("[MSG] ")
-                )
-            ]
-            # Strip ALL previous assistant message prefixes from the cumulative
-            # API response (each MessageEvent from OpenHands Cloud includes all
-            # prior assistant responses as a prefix — we only want the new text).
-            for m in msgs:
-                if m.get("role") == "assistant" and m.get("content"):
-                    prev = m["content"]
-                    if prev and response.startswith(prev):
-                        response = response[len(prev):]
+            # Collect all previous assistant contents
+            prev_contents = [m["content"] for m in msgs
+                           if m.get("role") == "assistant" and m.get("content")]
+            # Strip oldest-to-newest (ALL prior)
+            for prev in prev_contents:
+                if prev and response.startswith(prev):
+                    response = response[len(prev):]
             response = response.strip()
+            # If ALL stripping removed everything, try just the LATEST one
+            if not response and prev_contents:
+                response = original
+                latest = prev_contents[-1]
+                if latest and response.startswith(latest):
+                    response = response[len(latest):]
+                response = response.strip()
             if not response:
                 return {
                     "error": "Agent did not produce a new response (prefix stripping removed everything)",
                     "conversation_id": _conversation_id,
                 }
-            _msgs().append({
+            _msgs().append({"id": _next_msg_id(), 
                 "role": "assistant",
                 "content": response,
                 "timestamp": int(time.time() * 1000),
@@ -512,7 +522,7 @@ def _process_batch_worker() -> None:
                     return
                 # 30-minute global batch timeout
                 if time.time() - _batch_started_at > 1800:
-                    _msgs().append({
+                    _msgs().append({"id": _next_msg_id(), 
                         "role": "error",
                         "content": "Batch timed out after 30 minutes. Remaining prompts skipped.",
                         "timestamp": int(time.time() * 1000),
@@ -553,7 +563,7 @@ def _process_batch_worker() -> None:
                     skip = False
                 if not skip:
                     with _lock:
-                        _msgs().append({
+                        _msgs().append({"id": _next_msg_id(), 
                             "role": "assistant",
                             "content": f"[ERROR] [{pos}/{total}] Failed: {result['error']}",
                             "timestamp": int(time.time() * 1000),
@@ -572,7 +582,7 @@ def _process_batch_worker() -> None:
     except BaseException as e:
         logger.error("Batch worker FATAL crash: %s", e, exc_info=True)
         with _lock:
-            _msgs().append({
+            _msgs().append({"id": _next_msg_id(), 
                 "role": "event",
                 "content": f"[ERROR] Worker crashed\nType: {type(e).__name__}\nMessage: {e}",
                 "kind": "ErrorEvent",
@@ -914,7 +924,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             }
             label = status_labels.get(status, f"[STATUS] Status: {status} ({elapsed}s)")
             with _lock:
-                _msgs().append({
+                _msgs().append({"id": _next_msg_id(), 
                     "role": "event",
                     "content": label,
                     "kind": "SystemEvent",
@@ -1003,7 +1013,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 if text:
                     all_new_msgs.append(text)
                     with _lock:
-                        _msgs().append({
+                        _msgs().append({"id": _next_msg_id(), 
                             "role": "event",
                             "content": f"[MSG] {text}",
                             "kind": kind,
@@ -1017,7 +1027,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             event_preview = _format_event_preview(evt)
             if event_preview:
                 with _lock:
-                    _msgs().append({
+                    _msgs().append({"id": _next_msg_id(), 
                         "role": "event",
                         "content": event_preview,
                         "kind": kind,
@@ -1047,7 +1057,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 parts.append(f"Type: {err_type}")
             parts.append(f"Message: {err_detail}")
             with _lock:
-                _msgs().append({
+                _msgs().append({"id": _next_msg_id(), 
                     "role": "event",
                     "content": "\n".join(parts),
                     "kind": "ErrorEvent",
@@ -1115,7 +1125,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
         if not all_new_msgs:
             with _lock:
-                _msgs().append({
+                _msgs().append({"id": _next_msg_id(), 
                     "role": "event",
                     "content": f"[WARN] No response from agent after {elapsed}s (status: {last_status or 'unknown'}). The agent may be stuck or the LLM may not be configured correctly on the server.",
                     "kind": "SystemEvent",

@@ -5,27 +5,33 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api_service.dart';
 
 class ChatMessage {
+  final int? id; // server-side unique ID (null for client-only messages)
   final String role; // "user" | "assistant" | "event"
   final String content;
   final int timestamp;
 
   const ChatMessage({
+    this.id,
     required this.role,
     required this.content,
     required this.timestamp,
   });
 
   Map<String, dynamic> toJson() => {
+        if (id != null) 'id': id,
         'role': role,
         'content': content,
         'timestamp': timestamp,
       };
 
   factory ChatMessage.fromJson(Map<String, dynamic> json) => ChatMessage(
+        id: json['id'] as int?,
         role: (json['role'] ?? 'user').toString(),
         content: (json['content'] ?? '').toString(),
         timestamp: (json['timestamp'] ?? 0) as int,
       );
+
+  String get dedupKey => id != null ? 'id:$id' : '$role:$content';
 }
 
 /// Single-mode chat: everything goes through the server-side batch queue.
@@ -169,9 +175,8 @@ class ChatProvider extends ChangeNotifier {
         final merged = <ChatMessage>[];
         final seen = <String>{};
         for (final m in [...serverMsgs, ..._messages]) {
-          // Role+content dedup: server timestamps differ from client cached
-          // timestamps, so timestamp is intentionally omitted from the key.
-          final key = '${m.role}:${m.content}';
+          // Dedup by server ID when available, fall back to role:content
+          final key = m.dedupKey;
           if (seen.add(key)) merged.add(m);
         }
         merged.sort((a, b) => a.timestamp.compareTo(b.timestamp));
@@ -324,8 +329,8 @@ class ChatProvider extends ChangeNotifier {
           final merged = <ChatMessage>[];
           final seen = <String>{};
           for (final m in [...serverMsgs, ..._messages]) {
-            // Role+content dedup: server timestamps differ from client timestamps
-            final key = '${m.role}:${m.content}';
+            // Dedup by server ID when available, fall back to role:content
+            final key = m.dedupKey;
             if (seen.add(key)) merged.add(m);
           }
           // Sort by timestamp so messages appear chronologically
