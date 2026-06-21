@@ -256,6 +256,12 @@ class ChatProvider extends ChangeNotifier {
         logViewer('ChatProvider.send: queued pos=$_queuePosition total=$_queueTotal — polling');
         _notify();
         _startPolling(repo: repo, branch: branch, mode: mode);
+      } else if (result['status'] == 'appended') {
+        // Appended to running batch — poll active, just update total
+        _queueTotal = (result['total'] as int?) ?? _queueTotal;
+        _loading = true;
+        logViewer('ChatProvider.send: appended to batch (total=$_queueTotal)');
+        _notify();
       } else {
         logViewer('ChatProvider.send: unexpected status=${result['status']}');
         _error = (result['error']?.toString()) ?? 'Server did not accept the request';
