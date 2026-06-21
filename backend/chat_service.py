@@ -1076,7 +1076,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             for fname in reversed(event_files):
                 with zf.open(fname) as f:
                     evt = json.loads(f.read())
-                if evt.get("kind") == "MessageEvent" and evt.get("source") == "assistant":
+                if evt.get("kind") == "MessageEvent" and evt.get("source") == "agent":
                     llm_msg = evt.get("llm_message") or evt.get("message") or {}
                     if isinstance(llm_msg, dict):
                         content = llm_msg.get("content") or []
