@@ -939,7 +939,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             r2 = httpx.get(
                 f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
                 headers=_headers(),
-                params={"limit": 100},  # API max is 100 per spec
+                params={"limit": 1000, "sort": "-created_at"},  # newest first, high limit
                 timeout=10,
             )
             r2.raise_for_status()
@@ -1075,13 +1075,54 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         logger.warning("No assistant messages found after %ds (status=%s)", elapsed, last_status)
         logger.warning("All event kinds seen: %s", sorted(_event_kinds))
         logger.warning("Total events in last poll: %d, stored messages: %d", len(all_events), len(_msgs()))
-        with _lock:
-            _msgs().append({
-                "role": "event",
-                "content": f"[WARN] No response from agent after {elapsed}s (status: {last_status or 'unknown'}). The agent may be stuck or the LLM may not be configured correctly on the server.",
-                "kind": "SystemEvent",
-                "timestamp": int(time.time() * 1000),
-            })
+
+        # Final attempt: fetch the latest events (newest-first) — handles
+        # conversations with >100 events where limit=1000 might still miss
+        # events if the API caps the response or sorts oldest-first.
+        if last_status in ("completed", "finished"):
+            try:
+                r3 = httpx.get(
+                    f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
+                    headers=_headers(),
+                    params={"limit": 200, "sort": "-created_at"},
+                    timeout=10,
+                )
+                r3.raise_for_status()
+                final_data = r3.json()
+                final_events = final_data if isinstance(final_data, list) else final_data.get("items", [])
+                for evt in final_events:
+                    evt_id = evt.get("id", "")
+                    if evt_id and evt_id in _seen_event_ids:
+                        continue
+                    if evt_id:
+                        _seen_event_ids.add(evt_id)
+                    kind = evt.get("kind", "")
+                    source = evt.get("source", "")
+                    if kind == "MessageEvent" and source != "user":
+                        llm_msg = evt.get("llm_message") or evt.get("message") or {}
+                        if isinstance(llm_msg, dict):
+                            content = llm_msg.get("content") or []
+                            if isinstance(content, list):
+                                parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip()]
+                                if parts:
+                                    all_new_msgs.append("\n".join(parts))
+                                    logger.info("Final fetch found %d text parts from MessageEvent id=%s", len(parts), evt_id)
+                        elif isinstance(llm_msg, str) and llm_msg.strip():
+                            all_new_msgs.append(llm_msg.strip())
+                            logger.info("Final fetch found string message id=%s", evt_id)
+                        break  # found the latest assistant message
+                logger.info("Final fetch: %d events, found_msg=%s", len(final_events), bool(all_new_msgs))
+            except Exception as e:
+                logger.warning("Final fetch error: %s", e)
+
+        if not all_new_msgs:
+            with _lock:
+                _msgs().append({
+                    "role": "event",
+                    "content": f"[WARN] No response from agent after {elapsed}s (status: {last_status or 'unknown'}). The agent may be stuck or the LLM may not be configured correctly on the server.",
+                    "kind": "SystemEvent",
+                    "timestamp": int(time.time() * 1000),
+                })
 
     _conversation_status = "idle"
     response = "\n\n".join(all_new_msgs) if all_new_msgs else None
