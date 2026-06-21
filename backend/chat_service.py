@@ -33,7 +33,6 @@ _last_event_index: int = 0
 _sandbox_id: str | None = None
 _event_kinds: set[str] = set()  # diagnostic: all event kinds seen in current conversation
 _seen_event_ids: set[str] = set()  # ID-based event dedup (immune to API limit=N truncation)
-_last_event_ts: int = 0  # timestamp of last event seen, for incremental pagination
 _current_repo_key: str = ""  # current repo — determines which chat history to show
 _messages_by_repo: dict[str, list[dict]] = {}  # per-repo chat history
 _lock = threading.Lock()
@@ -173,7 +172,6 @@ def _headers() -> dict:
 
 def reset() -> None:
     """Clear the current chat session AND cancel any running batch."""
-    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key, _last_event_ts, _seen_event_ids
     global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_prompt_branches, _batch_position, _batch_total, _batch_skip_prompt
     with _lock:
         # Cancel running batch
@@ -194,7 +192,6 @@ def reset() -> None:
         _conversation_mode = "code"
         _last_event_index = 0
         _seen_event_ids.clear()
-        _last_event_ts = 0
         _event_kinds.clear()
         _sandbox_id = None
         _messages_by_repo.pop(_current_repo_key, None)  # clear current repo's history
@@ -263,7 +260,6 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
     Creates a new conversation when repo or mode changes.
     HTTP calls (create/send) happen OUTSIDE _lock so get_state() polling is never blocked.
     """
-    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _sandbox_id, _last_event_ts, _seen_event_ids
 
     if not CLOUD_API_KEY:
         return {"error": "OPENHANDS_CLOUD_API_KEY not configured on server"}
@@ -282,7 +278,6 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             _conversation_id = None
             _last_event_index = 0
             _seen_event_ids.clear()
-            _last_event_ts = 0
             _sandbox_id = None
             _event_kinds.clear()
             _conversation_repo = repo
@@ -319,7 +314,6 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                         _conversation_id = None
                         _last_event_index = 0
                         _seen_event_ids.clear()
-                        _last_event_ts = 0
                         _sandbox_id = None
                         _persist_to_db()
                     if recent_msgs:
@@ -347,7 +341,6 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                         _conversation_id = None
                         _last_event_index = 0
                         _seen_event_ids.clear()
-                        _last_event_ts = 0
                         _sandbox_id = None
                         _persist_to_db()
                     return {"error": send_err or "Failed to send message to conversation"}
@@ -359,7 +352,6 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                 _conversation_id = None
                 _last_event_index = 0
                 _seen_event_ids.clear()
-                _last_event_ts = 0
                 _sandbox_id = None
                 _persist_to_db()
         return {"error": f"Cloud API error: {e.response.status_code}"}
@@ -377,7 +369,6 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             _current_repo_key = _repo_key(repo)
             _last_event_index = 0
             _seen_event_ids.clear()
-            _last_event_ts = 0
         _msgs().append({
             "role": "user",
             "content": prompt,
@@ -710,6 +701,16 @@ def _send_message(conversation_id: str, prompt: str) -> tuple[bool, str | None]:
 
         data = resp.json()
 
+        # Log full response to find where the agent response lives
+        logger.info("send-message response keys: %s", list(data.keys()))
+        for k, v in data.items():
+            if isinstance(v, str) and len(v) > 10:
+                logger.info("  %s: %s...", k, v[:300])
+            elif isinstance(v, (list, dict)):
+                logger.info("  %s: %s (len=%d)", k, type(v).__name__, len(v))
+            else:
+                logger.info("  %s: %s", k, repr(v)[:100])
+
         # Check success field in response body
         if not data.get("success", True):
             sandbox_status = data.get("sandbox_status", "unknown")
@@ -869,7 +870,6 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
     Uses ID-based event dedup (same as agent_runner.py) — immune to API limit=N truncation.
     """
-    global _conversation_status, _sandbox_id, _seen_event_ids, _last_event_ts
 
     if timeout is None:
         timeout = _CHAT_TIMEOUT
@@ -941,82 +941,32 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                     "timestamp": int(time.time() * 1000),
                 })
 
-        # -- Get events with pagination (after= timestamp) --
-        # Fetch all available pages in one go so we don't fall behind
-        # in long conversations (400+ events).
+        # -- Get events (SAME endpoint as agent_runner) --
         all_events = []
-        events_page_count = 0
-        while events_page_count < 10:  # max 10 pages per poll cycle
-            params: dict = {"limit": 100}
-            if _last_event_ts:
-                params["after"] = _last_event_ts
-            try:
-                r2 = httpx.get(
-                    f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
-                    headers=_headers(),
-                    params=params,
-                    timeout=10,
-                )
-                r2.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 422 and "after" in params:
-                    logger.info("events/search rejected 'after' param, retrying without")
-                    params.pop("after")
-                    r2 = httpx.get(
-                        f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
-                        headers=_headers(),
-                        params=params,
-                        timeout=10,
-                    )
-                    r2.raise_for_status()
-                else:
-                    raise
-            try:
-                events_data = r2.json()
-            except Exception as e:
-                logger.warning("Events poll error: %s", e)
-                break
+        try:
+            r2 = httpx.get(
+                f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
+                headers=_headers(),
+                params={"limit": 100},
+                timeout=10,
+            )
+            r2.raise_for_status()
+            events_data = r2.json()
+        except Exception as e:
+            logger.warning("Events poll error: %s", e)
+            continue
 
-            # Robust extraction: try "items", "events", "data", "results", or bare list
-            if isinstance(events_data, list):
-                page_events = events_data
-            elif isinstance(events_data, dict):
-                page_events = (
-                    events_data.get("items")
-                    or events_data.get("events")
-                    or events_data.get("data")
-                    or events_data.get("results")
-                    or []
-                )
-            else:
-                page_events = []
-
-            if not page_events:
-                break
-
-            events_page_count += 1
-            all_events.extend(page_events)
-
-            # Advance cursor for next page
-            last_evt = page_events[-1]
-            new_cursor = last_evt.get("timestamp") or last_evt.get("created_at") or 0
-            if isinstance(new_cursor, str):
-                try:
-                    new_cursor = int(datetime.fromisoformat(new_cursor.replace("Z", "+00:00")).timestamp() * 1000)
-                except (ValueError, TypeError):
-                    new_cursor = 0
-            logger.info("Page %d cursor: new=%s current=%s (advance=%s)",
-                       events_page_count, new_cursor, _last_event_ts, 
-                       isinstance(new_cursor, (int, float)) and new_cursor > _last_event_ts)
-            if isinstance(new_cursor, (int, float)) and new_cursor > _last_event_ts:
-                _last_event_ts = int(new_cursor)
-            else:
-                logger.info("Pagination stopped: cursor not advancing (page %d)", events_page_count)
-                break  # no progress, stop paginating
-
-        if events_page_count > 1:
-            logger.info("Conversation %s: fetched %d pages, %d total events",
-                        _conversation_id, events_page_count, len(all_events))
+        # Robust extraction
+        if isinstance(events_data, list):
+            all_events = events_data
+        elif isinstance(events_data, dict):
+            all_events = (
+                events_data.get("items")
+                or events_data.get("events")
+                or events_data.get("data")
+                or events_data.get("results")
+                or []
+            )
 
         # -- Process all collected events --
 
@@ -1045,8 +995,6 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                     ts = int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000)
                 except (ValueError, TypeError):
                     ts = 0
-            if isinstance(ts, (int, float)) and ts > _last_event_ts:
-                _last_event_ts = int(ts)
             kind = evt.get("kind", "")
             source = evt.get("source", "")
             tool = evt.get("tool_name", "")
@@ -1138,81 +1086,18 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 })
             return None
 
-    # When conversation finishes, paginate through remaining events
-    # with after= to find the latest assistant MessageEvent.
-    if last_status in ("completed", "finished"):
-        final_response = None
-        cursor = _last_event_ts
-        for page in range(10):  # max 10 pages (1000 events)
-            try:
-                params: dict = {"limit": 100}
-                if cursor:
-                    params["after"] = cursor
-                r3 = httpx.get(
-                    f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
-                    headers=_headers(),
-                    params=params,
-                    timeout=10,
-                )
-                r3.raise_for_status()
-                final_data = r3.json()
-                final_events = final_data if isinstance(final_data, list) else final_data.get("items", [])
-                if not final_events:
-                    break
-                # Update cursor from last event in page for next iteration
-                last_evt = final_events[-1]
-                new_cursor = last_evt.get("timestamp") or last_evt.get("created_at") or 0
-                if isinstance(new_cursor, str):
-                    try:
-                        new_cursor = int(datetime.fromisoformat(new_cursor.replace("Z", "+00:00")).timestamp() * 1000)
-                    except (ValueError, TypeError):
-                        new_cursor = 0
-                logger.info("Final fetch page %d: cursor new=%s current=%s events=%d",
-                           page, new_cursor, cursor, len(final_events))
-                if isinstance(new_cursor, (int, float)) and new_cursor > cursor:
-                    cursor = int(new_cursor)
-                else:
-                    logger.info("Final fetch: cursor not advancing at page %d, stopping", page)
-                    break  # no progress
-                # Search for unseen assistant MessageEvent
-                for evt in reversed(final_events):
-                    evt_id = evt.get("id", "")
-                    if evt_id and evt_id in _seen_event_ids:
-                        continue
-                    kind = evt.get("kind", "")
-                    source = evt.get("source", "")
-                    if kind == "MessageEvent" and source != "user":
-                        llm_msg = evt.get("llm_message") or evt.get("message") or {}
-                        if isinstance(llm_msg, dict):
-                            content = llm_msg.get("content") or []
-                            if isinstance(content, list):
-                                parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip()]
-                                if parts:
-                                    final_response = "\n".join(parts)
-                        elif isinstance(llm_msg, str) and llm_msg.strip():
-                            final_response = llm_msg.strip()
-                        if final_response:
-                            logger.info("Final fetch page %d: found MessageEvent id=%s", page, evt_id)
-                            break
-                if final_response:
-                    break
-            except Exception as e:
-                logger.warning("Final fetch page %d error: %s", page, e)
-                break
-        if not final_response:
-            logger.info("Final fetch: paginated through events, no new assistant MessageEvent")
-
-        if final_response:
-            all_new_msgs = [final_response]
-
     if not all_new_msgs:
-            with _lock:
-                _msgs().append({
-                    "role": "event",
-                    "content": f"[WARN] No response from agent after {elapsed}s (status: {last_status or 'unknown'}). The agent may be stuck or the LLM may not be configured correctly on the server.",
-                    "kind": "SystemEvent",
-                    "timestamp": int(time.time() * 1000),
-                })
+        elapsed = int(time.time() - start)
+        logger.warning("No assistant messages found after %ds (status=%s)", elapsed, last_status)
+        logger.warning("All event kinds seen: %s", sorted(_event_kinds))
+        logger.warning("Total events in last poll: %d, stored messages: %d", len(all_events), len(_msgs()))
+        with _lock:
+                    _msgs().append({
+                        "role": "event",
+                        "content": f"[WARN] No response from agent after {elapsed}s (status: {last_status or 'unknown'}). The agent may be stuck or the LLM may not be configured correctly on the server.",
+                        "kind": "SystemEvent",
+                        "timestamp": int(time.time() * 1000),
+                    })
 
     _conversation_status = "idle"
     response = "\n\n".join(all_new_msgs) if all_new_msgs else None
