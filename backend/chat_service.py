@@ -1,8 +1,8 @@
 """Chat service — reusable conversation with token-efficient message continuation.
 
-Uses OpenHands Cloud REST API (SAME endpoints as agent_runner.py for consistency):
+Uses OpenHands Cloud REST API (verified against OpenAPI spec):
 - First message: POST /api/v1/app-conversations (creates conversation)
-- Subsequent:   POST /api/v1/conversation/{id}/events/send (reuses conversation)
+- Subsequent:   POST /api/v1/app-conversations/{id}/send-message (reuses conversation)
 - Status poll:  GET  /api/v1/app-conversations?ids={id}
 - Events poll:  GET  /api/v1/conversation/{id}/events/search
 
@@ -116,6 +116,7 @@ def _headers() -> dict:
     return {
         "Authorization": f"Bearer {CLOUD_API_KEY}",
         "Content-Type": "application/json",
+        "Accept": "application/json",
     }
 
 
@@ -188,9 +189,13 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                         new_conv_id, repo, mode)
         else:
             resp = httpx.post(
-                f"{CLOUD_API_URL}/api/v1/conversation/{current_conv_id}/events/send",
+                f"{CLOUD_API_URL}/api/v1/app-conversations/{current_conv_id}/send-message",
                 headers=_headers(),
-                json={"message": prompt},
+                json={
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt}],
+                    "run": True,
+                },
                 timeout=30,
             )
             resp.raise_for_status()
