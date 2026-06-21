@@ -94,15 +94,17 @@ def _persist_to_db() -> None:
     except Exception:
         return
     try:
-        # Trim in-memory to prevent unbounded growth
-        if len(_msgs()) > 500:
-            _msgs()[:] = _msgs()[-400:]
+        # Trim each repo's messages to prevent unbounded growth
+        for key in list(_messages_by_repo.keys()):
+            if len(_messages_by_repo[key]) > 500:
+                _messages_by_repo[key] = _messages_by_repo[key][-400:]
         data = json.dumps({
             "conversation_id": _conversation_id,
             "repo": _conversation_repo,
             "mode": _conversation_mode,
             "last_event_index": _last_event_index,
-            "messages": _msgs()[-200:],  # keep last 200 messages max
+            "messages_by_repo": _messages_by_repo,
+            "current_repo_key": _current_repo_key,
             # Batch state for survival across restarts
             "batch_prompts": _batch_prompts,
             "batch_position": _batch_position,
