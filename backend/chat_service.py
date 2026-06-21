@@ -272,44 +272,112 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
 
     # Phase 1a: Quick check under lock — do we need a new conversation?
     with _lock:
-        # Always start fresh — create new conversation per message to avoid
-        # events/search pagination limits on long-running conversations.
-        _conversation_id = None
-        _last_event_index = 0
-        _seen_event_ids.clear()
-        _last_event_ts = 0
-        _sandbox_id = None
-        _event_kinds.clear()
-        _conversation_repo = repo
-        _conversation_branch = branch
-        _conversation_mode = mode
-        _persist_to_db()
+        ctx_changed = (
+            _conversation_id is not None
+            and (repo != _conversation_repo or branch != _conversation_branch or mode != _conversation_mode)
+        )
+        if ctx_changed:
+            logger.info("Context changed: repo %s→%s branch %s→%s mode %s→%s — starting new conversation",
+                        _conversation_repo, repo, _conversation_branch, branch, _conversation_mode, mode)
+            _conversation_id = None
+            _last_event_index = 0
+            _seen_event_ids.clear()
+            _last_event_ts = 0
+            _sandbox_id = None
+            _event_kinds.clear()
+            _conversation_repo = repo
+            _conversation_branch = branch
+            _conversation_mode = mode
+            _persist_to_db()
+        need_new_conv = _conversation_id is None
+        if not need_new_conv:
+            current_conv_id = _conversation_id  # snapshot to use outside lock
 
-    # Phase 1b: HTTP calls OUTSIDE lock — always create a fresh conversation
-    # per message. This avoids the events/search limit=100 pagination problem
-    # that makes responses invisible in long-running conversations (>100 events).
-    # Chat history is maintained in _msgs(), not in the OpenHands conversation.
+    # Phase 1b: HTTP calls OUTSIDE lock (create may poll start-tasks for up to 150s)
     try:
-        new_conv_id = _create_conversation(prompt, repo, branch, mode)
-        logger.info("Created conversation %s (repo=%s mode=%s)",
-                    new_conv_id, repo, mode)
+        if need_new_conv:
+            new_conv_id = _create_conversation(prompt, repo, branch, mode)
+            logger.info("Created conversation %s (repo=%s mode=%s)",
+                        new_conv_id, repo, mode)
+        else:
+            logger.info("Reusing conversation %s (repo=%s branch=%s mode=%s)",
+                        current_conv_id, repo, branch, mode)
+            success, send_err = _send_message(current_conv_id, prompt)
+            if not success:
+                # If sandbox is paused/gone, auto-recover: reset + create new
+                # conversation with same prompt. The caller never sees a 409.
+                if send_err and "409" in str(send_err):
+                    logger.warning("Sandbox paused/gone for conversation %s — recovering", current_conv_id)
+                    recent_msgs: list = []
+                    with _lock:
+                        # Capture recent context before resetting so the new
+                        # conversation knows what was discussed (not just UI history).
+                        for m in _msgs()[-6:]:
+                            role = m.get("role", "")
+                            if role in ("user", "assistant") and m.get("content"):
+                                recent_msgs.append(m)
+                        _conversation_id = None
+                        _last_event_index = 0
+                        _seen_event_ids.clear()
+                        _last_event_ts = 0
+                        _sandbox_id = None
+                        _persist_to_db()
+                    if recent_msgs:
+                        context = "\n".join(
+                            f"{m['role'].capitalize()}: {m['content']}" for m in recent_msgs
+                        )
+                        enhanced = (
+                            f"[RECOVERY CONTEXT — sandbox restarted, conversation recreated]\n"
+                            f"Below is a summary of recent messages from BEFORE the restart.\n"
+                            f"IMPORTANT: These exchanges already happened. Do NOT repeat actions\n"
+                            f"that were already completed (e.g., creating files, git operations).\n"
+                            f"Continue naturally from where the conversation left off.\n\n"
+                            f"{context}\n"
+                            f"---\n"
+                            f"Current task: {prompt}"
+                        )
+                    else:
+                        enhanced = prompt
+                    new_conv_id = _create_conversation(enhanced, repo, branch, mode)
+                    logger.info("Recovered: created new conversation %s (%d context msgs)",
+                                new_conv_id, len(recent_msgs))
+                    need_new_conv = True  # Phase 1c will store it
+                else:
+                    with _lock:
+                        _conversation_id = None
+                        _last_event_index = 0
+                        _seen_event_ids.clear()
+                        _last_event_ts = 0
+                        _sandbox_id = None
+                        _persist_to_db()
+                    return {"error": send_err or "Failed to send message to conversation"}
+            logger.info("Sent to conversation %s", current_conv_id)
     except httpx.HTTPStatusError as e:
         logger.error("HTTP error: %s %s", e.response.status_code, e.response.text[:200])
+        if e.response.status_code in (404, 409, 410):
+            with _lock:
+                _conversation_id = None
+                _last_event_index = 0
+                _seen_event_ids.clear()
+                _last_event_ts = 0
+                _sandbox_id = None
+                _persist_to_db()
         return {"error": f"Cloud API error: {e.response.status_code}"}
     except Exception as e:
-        logger.error("Chat error: %s", e, exc_info=True)
+        logger.error("Chat error (keeping conversation): %s", e, exc_info=True)
         return {"error": str(e)}
 
     # Phase 1c: Update state + save user message under lock
     with _lock:
-        _conversation_id = new_conv_id
-        _conversation_repo = repo
-        _conversation_branch = branch
-        _conversation_mode = mode
-        _current_repo_key = _repo_key(repo)
-        _last_event_index = 0
-        _seen_event_ids.clear()
-        _last_event_ts = 0
+        if need_new_conv:
+            _conversation_id = new_conv_id
+            _conversation_repo = repo
+            _conversation_branch = branch
+            _conversation_mode = mode
+            _current_repo_key = _repo_key(repo)
+            _last_event_index = 0
+            _seen_event_ids.clear()
+            _last_event_ts = 0
         _msgs().append({
             "role": "user",
             "content": prompt,
@@ -601,6 +669,76 @@ def cancel_batch_prompt(index: int) -> dict:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _send_message(conversation_id: str, prompt: str) -> tuple[bool, str | None]:
+    """Send a follow-up message to an existing conversation via send-message endpoint.
+
+    Returns (success, error_message). Handles 409 (sandbox paused/gone)
+    by attempting to resume the sandbox and retrying once.
+
+    Verified against OpenHands Cloud OpenAPI spec.
+    """
+    global _sandbox_id
+
+    body = {
+        "role": "user",
+        "content": [{"type": "text", "text": prompt}],
+        "run": True,
+    }
+
+    for attempt in range(2):
+        try:
+            resp = httpx.post(
+                f"{CLOUD_API_URL}/api/v1/app-conversations/{conversation_id}/send-message",
+                headers=_headers(),
+                json=body,
+                timeout=30,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 409:
+                logger.warning("send-message 409: sandbox not running for %s", conversation_id)
+                if attempt == 0 and _sandbox_id:
+                    # Try resume sandbox, then retry
+                    resume_err = _resume_sandbox(_sandbox_id)
+                    if resume_err:
+                        return False, f"Sandbox not running and resume failed: {resume_err}"
+                    continue  # retry send-message
+                return False, f"Sandbox not running (409). Please wait and try again."
+            raise  # re-raise other HTTP errors
+
+        data = resp.json()
+
+        # Check success field in response body
+        if not data.get("success", True):
+            sandbox_status = data.get("sandbox_status", "unknown")
+            msg = data.get("message", "")
+            logger.error("send-message returned success=false (sandbox=%s): %s", sandbox_status, msg)
+            return False, f"Agent not available (sandbox status: {sandbox_status}). {msg}".strip()
+
+        # Update sandbox_id from response if we don't have it
+        sandbox_status = data.get("sandbox_status", "")
+        logger.info("send-message OK (sandbox=%s)", sandbox_status)
+        return True, None
+
+    return False, "Sandbox not running after resume attempt"
+
+
+def _resume_sandbox(sandbox_id: str) -> str | None:
+    """Resume a paused sandbox. Returns None on success, error message on failure."""
+    try:
+        resp = httpx.post(
+            f"{CLOUD_API_URL}/api/v1/sandboxes/{sandbox_id}/resume",
+            headers=_headers(),
+            timeout=30,
+        )
+        resp.raise_for_status()
+        logger.info("Sandbox %s resumed", sandbox_id)
+        return None
+    except Exception as e:
+        logger.error("Failed to resume sandbox %s: %s", sandbox_id, e)
+        return str(e)
 
 
 def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
