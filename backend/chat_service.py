@@ -786,6 +786,9 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             _event_kinds.add(kind)
 
             if kind == "MessageEvent":
+                # Skip user messages (initial prompt echo) — only show agent text
+                if source == "user":
+                    continue
                 # API returns llm_message (a Message object), not plain "message"
                 llm_msg = evt.get("llm_message") or evt.get("message") or {}
                 text = ""
@@ -984,16 +987,12 @@ def _format_event_preview(evt: dict) -> str | None:
                 extra = f" (exit={exit_code})" if exit_code is not None and exit_code != 0 else ""
                 return f"{tag}{short}{extra}"
         elif tool in ("file_editor", "str_replace_editor"):
-            cmd = (action.get("command") or "").strip()
             diff = obs.get("diff", "")
             if diff:
                 return f"📄 Diff ({len(diff)} chars)"
             path = obs.get("path", "")
             if path:
-                if cmd == "view":
-                    lines = obs.get("content", "")
-                    return f"📄 Lines from: {path}"
-                return f"📄 Saved: {path}"
+                return f"📖 File read: {path}"
         elif tool in ("tavily_search", "tavily_tavily_search"):
             results = obs.get("results", [])
             if isinstance(results, list) and results:
