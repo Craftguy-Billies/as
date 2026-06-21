@@ -709,7 +709,6 @@ class _ChatBubble extends StatelessWidget {
               style: TextStyle(
                 color: accent.withAlpha(200),
                 fontSize: 11,
-                fontFamily: 'monospace',
                 height: 1.3,
               ),
             ),
@@ -933,7 +932,6 @@ class ClientLogScreen extends StatelessWidget {
                 child: Text(
                   line,
                   style: TextStyle(
-                    fontFamily: 'monospace',
                     fontSize: 11,
                     color: color,
                     height: 1.4,
