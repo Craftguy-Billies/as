@@ -46,6 +46,10 @@ _batch_mode: str = "code"
 _batch_running: bool = False
 _batch_cancelled: bool = False
 
+# Current conversation status (for UI visibility)
+_conversation_status: str = "idle"
+_CHAT_TIMEOUT = int(os.getenv("VIBECODE_CHAT_TIMEOUT", "600"))  # 10 min default
+
 # -- Restore state from DB on module load --
 def _restore_from_db() -> None:
     global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages
@@ -117,13 +121,14 @@ def _headers() -> dict:
 
 def reset() -> None:
     """Clear the current chat session."""
-    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages
+    global _conversation_id, _conversation_repo, _conversation_mode, _last_event_index, _messages, _conversation_status
     with _lock:
         _conversation_id = None
         _conversation_repo = ""
         _conversation_mode = "code"
         _last_event_index = 0
         _messages = []
+        _conversation_status = "idle"
         _persist_to_db()
     logger.info("Chat session reset")
 
@@ -136,8 +141,10 @@ def get_state() -> dict:
             "conversation_id": _conversation_id,
             "repo": _conversation_repo,
             "mode": _conversation_mode,
+            "conversation_status": _conversation_status,
             "batch": {
                 "running": _batch_running,
+                "cancelled": _batch_cancelled,
                 "position": _batch_position + (1 if _batch_running else 0),
                 "total": _batch_total,
                 "prompts": list(_batch_prompts),
@@ -253,7 +260,7 @@ def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "main", mode
     Call get_state() to track progress.
     If a batch is already running, appends to it.
     """
-    global _batch_prompts, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _batch_running
+    global _batch_prompts, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _batch_running, _batch_cancelled
 
     cleaned = [p.strip() for p in prompts if p.strip()]
     if not cleaned:
@@ -267,6 +274,7 @@ def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "main", mode
             logger.info("Batch appended: +%d prompts (now %d total)", len(cleaned), _batch_total)
             return {"status": "appended", "added": len(cleaned), "total": _batch_total}
 
+        _batch_cancelled = False  # reset from any previous cancellation
         _batch_prompts = cleaned
         _batch_position = 0
         _batch_total = len(cleaned)
@@ -366,8 +374,9 @@ def _process_batch_worker() -> None:
 
 def cancel_batch() -> dict:
     """Cancel the running batch queue. Non-blocking — sets flag for worker."""
-    global _batch_cancelled, _batch_running, _batch_prompts, _batch_position, _batch_total
+    global _batch_cancelled, _batch_running, _batch_prompts, _batch_position, _batch_total, _conversation_status
     _batch_cancelled = True  # non-blocking flag, worker checks each iteration
+    _conversation_status = "idle"
     with _lock:
         was_running = _batch_running
         _batch_running = False
@@ -490,18 +499,23 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     return conversation_id
 
 
-def _wait_for_response(timeout: int = 300) -> str | None:
+def _wait_for_response(timeout: int | None = None) -> str | None:
     """Poll conversation status + events until the agent finishes (SAME logic as agent_runner).
-    
-    Timeout: 300s (5 min). Complex tasks may need this — the agent may be thinking/typing.
-    
+
+    Timeout: VIBECODE_CHAT_TIMEOUT env var (default 600s = 10 min).
+
     Also appends live events (tool calls, observations) to _messages so the client
     can see what the agent is doing via polling get_state().
     """
-    global _last_event_index
+    global _last_event_index, _conversation_status
+
+    if timeout is None:
+        timeout = _CHAT_TIMEOUT
 
     start = time.time()
     all_new_msgs: list[str] = []
+    last_status = ""
+    last_event_count = 0
 
     while time.time() - start < timeout:
         time.sleep(3)
@@ -526,6 +540,33 @@ def _wait_for_response(timeout: int = 300) -> str | None:
 
         status = items[0].get("execution_status", "")
 
+        # Report status changes to UI
+        if status != last_status:
+            last_status = status
+            _conversation_status = status
+            elapsed = int(time.time() - start)
+            logger.info("Conversation %s status=%s (elapsed %ds)",
+                        _conversation_id, status, elapsed)
+
+            # Stream status as visible event
+            status_labels = {
+                "starting": f"🔵 Agent is starting up... ({elapsed}s)",
+                "running": f"🟢 Agent is working... ({elapsed}s)",
+                "completed": f"✅ Task completed ({elapsed}s)",
+                "finished": f"✅ Task finished ({elapsed}s)",
+                "failed": f"❌ Task failed ({elapsed}s)",
+                "error": f"❌ Error ({elapsed}s)",
+                "stopped": f"⏹️ Task stopped ({elapsed}s)",
+            }
+            label = status_labels.get(status, f"📋 Status: {status} ({elapsed}s)")
+            with _lock:
+                _messages.append({
+                    "role": "event",
+                    "content": label,
+                    "kind": "SystemEvent",
+                    "timestamp": int(time.time() * 1000),
+                })
+
         # -- Get events (SAME endpoint as agent_runner) --
         try:
             r2 = httpx.get(
@@ -540,7 +581,25 @@ def _wait_for_response(timeout: int = 300) -> str | None:
             logger.warning("Events poll error: %s", e)
             continue
 
-        all_events = events_data if isinstance(events_data, list) else events_data.get("items", [])
+        # Robust extraction: try "items", "events", "data", "results", or bare list
+        if isinstance(events_data, list):
+            all_events = events_data
+        elif isinstance(events_data, dict):
+            all_events = (
+                events_data.get("items")
+                or events_data.get("events")
+                or events_data.get("data")
+                or events_data.get("results")
+                or []
+            )
+        else:
+            all_events = []
+
+        new_count = len(all_events) - _last_event_index
+        if new_count > 0 and len(all_events) != last_event_count:
+            last_event_count = len(all_events)
+            logger.info("Conversation %s: %d total events, %d new (index=%d)",
+                        _conversation_id, len(all_events), new_count, _last_event_index)
 
         # Stream EVERYTHING the agent does as live events (text, tools, observations)
         for evt in all_events[_last_event_index:]:
@@ -582,8 +641,10 @@ def _wait_for_response(timeout: int = 300) -> str | None:
         _last_event_index = len(all_events)
 
         if status in ("completed", "finished"):
+            _conversation_status = "idle"
             break
         elif status in ("failed", "error", "stopped"):
+            _conversation_status = "idle"
             err_detail = items[0].get("error_message", "unknown error")
             err_type = items[0].get("error_type", "")
             logger.warning("Conversation %s: type=%s detail=%s", status, err_type, err_detail)
@@ -602,16 +663,19 @@ def _wait_for_response(timeout: int = 300) -> str | None:
             return None
 
     if not all_new_msgs:
-        logger.warning("No assistant messages found after %.0fs", time.time() - start)
+        elapsed = int(time.time() - start)
+        logger.warning("No assistant messages found after %ds (status=%s)", elapsed, last_status)
         with _lock:
             _messages.append({
                 "role": "event",
-                "content": "⚠️ No response from agent (timeout or empty result)",
+                "content": f"⚠️ No response from agent after {elapsed}s (status: {last_status or 'unknown'}). The agent may be stuck or the LLM may not be configured correctly on the server.",
                 "kind": "SystemEvent",
                 "timestamp": int(time.time() * 1000),
             })
 
+    _conversation_status = "idle"
     return "\n\n".join(all_new_msgs) if all_new_msgs else None
+
 
 
 def _format_event_preview(evt: dict) -> str | None:
