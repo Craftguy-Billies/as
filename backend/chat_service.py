@@ -1016,6 +1016,12 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             if evt_id:
                 _seen_event_ids.add(evt_id)
             ts = evt.get("timestamp") or evt.get("created_at") or 0
+            # API returns timestamps as ISO strings — convert to epoch millis
+            if isinstance(ts, str):
+                try:
+                    ts = int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000)
+                except (ValueError, TypeError):
+                    ts = 0
             if isinstance(ts, (int, float)) and ts > _last_event_ts:
                 _last_event_ts = int(ts)
             kind = evt.get("kind", "")
@@ -1109,67 +1115,90 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 })
             return None
 
-    if not all_new_msgs:
-        elapsed = int(time.time() - start)
-        logger.warning("No assistant messages found after %ds (status=%s)", elapsed, last_status)
-        logger.warning("All event kinds seen: %s", sorted(_event_kinds))
-        logger.warning("Total events in last poll: %d, stored messages: %d", len(all_events), len(_msgs()))
+    # When conversation finishes, always run final fetch to get the actual
+    # assistant response. Uses after= pagination to skip already-seen events.
+    if last_status in ("completed", "finished"):
+        final_response = None
+        # Try events/search with after= pagination first
+        try:
+            final_params: dict = {"limit": 100}
+            if _last_event_ts:
+                final_params["after"] = _last_event_ts
+            r3 = httpx.get(
+                f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
+                headers=_headers(),
+                params=final_params,
+                timeout=10,
+            )
+            r3.raise_for_status()
+            final_data = r3.json()
+            final_events = final_data if isinstance(final_data, list) else final_data.get("items", [])
+            for evt in reversed(final_events):
+                evt_id = evt.get("id", "")
+                if evt_id and evt_id in _seen_event_ids:
+                    continue
+                kind = evt.get("kind", "")
+                source = evt.get("source", "")
+                if kind == "MessageEvent" and source != "user":
+                    llm_msg = evt.get("llm_message") or evt.get("message") or {}
+                    if isinstance(llm_msg, dict):
+                        content = llm_msg.get("content") or []
+                        if isinstance(content, list):
+                            parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip()]
+                            if parts:
+                                final_response = "\n".join(parts)
+                    elif isinstance(llm_msg, str) and llm_msg.strip():
+                        final_response = llm_msg.strip()
+                    if final_response:
+                        logger.info("Final fetch: found latest MessageEvent id=%s in %d events",
+                                   evt_id, len(final_events))
+                        break
+            if not final_response:
+                logger.info("Final fetch events/search: %d events, no new assistant MessageEvent", len(final_events))
+        except Exception as e:
+            logger.warning("Final fetch events/search error: %s", e)
 
-        # Final attempt: fetch the full conversation object — may contain
-        # the last message directly, bypassing events/search pagination limits.
-        if last_status in ("completed", "finished"):
+        # Fallback: try conversation detail endpoint
+        if not final_response:
             try:
-                r3 = httpx.get(
+                r4 = httpx.get(
                     f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}",
                     headers=_headers(),
                     timeout=10,
                 )
-                r3.raise_for_status()
-                conv = r3.json()
-                logger.info("Final fetch conversation keys: %s", list(conv.keys()) if isinstance(conv, dict) else type(conv).__name__)
-
-                # Try to extract the last assistant message from the conversation object
+                r4.raise_for_status()
+                conv = r4.json()
+                # Try last_message field
                 last_msg = conv.get("last_message") or conv.get("latest_message") or {}
                 if isinstance(last_msg, dict):
                     content = last_msg.get("content") or last_msg.get("text") or ""
                     if isinstance(content, list):
                         parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip()]
                         if parts:
-                            all_new_msgs.append("\n".join(parts))
-                            logger.info("Final fetch: found response via conversation.last_message")
+                            final_response = "\n".join(parts)
                     elif isinstance(content, str) and content.strip():
-                        all_new_msgs.append(content.strip())
-                        logger.info("Final fetch: found response via conversation.last_message (string)")
-
-                # Try messages list
-                if not all_new_msgs:
+                        final_response = content.strip()
+                # Try messages array
+                if not final_response:
                     msgs = conv.get("messages") or conv.get("chat") or []
                     for m in reversed(msgs) if isinstance(msgs, list) else []:
                         if isinstance(m, dict) and m.get("role") == "assistant":
                             content = m.get("content") or m.get("text") or ""
                             if isinstance(content, str) and content.strip():
-                                all_new_msgs.append(content.strip())
-                                logger.info("Final fetch: found response via conversation.messages")
+                                final_response = content.strip()
                                 break
-
-                # Log all keys and sub-structures for diagnosis
-                if not all_new_msgs:
-                    logger.info("Final fetch: no response found. conv keys: %s", 
-                               list(conv.keys()) if isinstance(conv, dict) else "not_dict")
-                    # Log first few keys' types
-                    if isinstance(conv, dict):
-                        for k, v in list(conv.items())[:10]:
-                            if isinstance(v, (list, dict)):
-                                logger.info("  %s: %s (len=%d)", k, type(v).__name__, len(v))
-                            elif isinstance(v, str) and len(str(v)) > 100:
-                                logger.info("  %s: str (len=%d) = %s...", k, len(str(v)), str(v)[:200])
-                            else:
-                                logger.info("  %s: %s", k, repr(v)[:200])
-
+                if final_response:
+                    logger.info("Final fetch: found response via conversation endpoint")
+                else:
+                    logger.info("Final fetch conversation: keys=%s, no response found",
+                               list(conv.keys())[:15] if isinstance(conv, dict) else type(conv).__name__)
             except Exception as e:
                 logger.warning("Final fetch conversation error: %s", e)
 
-        if not all_new_msgs:
+        if final_response:
+            all_new_msgs = [final_response]
+
+    if not all_new_msgs:
             with _lock:
                 _msgs().append({
                     "role": "event",
