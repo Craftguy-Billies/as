@@ -540,6 +540,8 @@ def cancel_batch_prompt(index: int) -> dict:
             return {"error": f"Invalid index {index} (queue size: {len(_batch_prompts)})"}
         if index < _batch_position:
             return {"error": "Prompt already processed"}
+        if index == _batch_position and _batch_skip_prompt:
+            return {"error": "Cancel already in progress for current prompt"}
 
         removed = _batch_prompts.pop(index)
         mode_removed = _batch_prompt_modes.pop(index) if index < len(_batch_prompt_modes) else "code"
