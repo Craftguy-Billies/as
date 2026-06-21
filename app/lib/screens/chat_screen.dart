@@ -832,6 +832,7 @@ class _ChatBubble extends StatelessWidget {
     final m = dt.minute.toString().padLeft(2, '0');
     return '$h:$m';
   }
+}
 
 // ---------------------------------------------------------------------------
 // Typing indicator

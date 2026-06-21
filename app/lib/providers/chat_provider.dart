@@ -409,7 +409,7 @@ class ChatProvider extends ChangeNotifier {
   /// Let server handle removal; next poll syncs authoritative state.
   Future<void> cancelPrompt(int index) async {
     if (index < 0 || index >= _batchPrompts.length) return;
-    logViewer('ChatProvider.cancelPrompt: #$index "${_batchPrompts[index].truncate(60)}..."');
+    logViewer('ChatProvider.cancelPrompt: #$index "${_batchPrompts[index].length > 60 ? "${_batchPrompts[index].substring(0, 60)}..." : _batchPrompts[index]}"');
 
     try {
       final result = await _api.cancelPrompt(index);
