@@ -297,7 +297,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             logger.info("Sent to conversation %s", current_conv_id)
     except httpx.HTTPStatusError as e:
         logger.error("HTTP error: %s %s", e.response.status_code, e.response.text[:200])
-        if e.response.status_code in (404, 410):
+        if e.response.status_code in (404, 409, 410):
             with _lock:
                 _conversation_id = None
                 _last_event_index = 0
@@ -616,6 +616,7 @@ def _send_message(conversation_id: str, prompt: str) -> tuple[bool, str | None]:
                 json=body,
                 timeout=30,
             )
+            resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 409:
                 logger.warning("send-message 409: sandbox not running for %s", conversation_id)
@@ -628,7 +629,6 @@ def _send_message(conversation_id: str, prompt: str) -> tuple[bool, str | None]:
                 return False, f"Sandbox not running (409). Please wait and try again."
             raise  # re-raise other HTTP errors
 
-        resp.raise_for_status()
         data = resp.json()
 
         # Check success field in response body
