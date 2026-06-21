@@ -1126,17 +1126,56 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 })
             return None
 
+    # When finished and events/search can't reach latest events (limit=100),
+    # use trajectory zip to get the actual response. Runs regardless of
+    # whether all_new_msgs has stale entries from earlier polling.
+    if last_status in ("completed", "finished"):
+        try:
+            import io, zipfile
+            r3 = httpx.get(
+                f"{CLOUD_API_URL}/api/v1/app-conversations/{_conversation_id}/download",
+                headers=_headers(),
+                timeout=30,
+            )
+            r3.raise_for_status()
+            zf = zipfile.ZipFile(io.BytesIO(r3.content))
+            event_files = sorted([n for n in zf.namelist() if n.startswith("event_") and n.endswith(".json")])
+            if event_files:
+                for fname in reversed(event_files):
+                    with zf.open(fname) as f:
+                        evt = json.loads(f.read())
+                    kind = evt.get("kind", "")
+                    source = evt.get("source", "")
+                    if kind == "MessageEvent" and source == "assistant":
+                        llm_msg = evt.get("message") or evt.get("llm_message") or {}
+                        if isinstance(llm_msg, dict):
+                            content = llm_msg.get("content") or []
+                            if isinstance(content, list):
+                                parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip()]
+                                if parts:
+                                    all_new_msgs = ["\n".join(parts)]
+                                    logger.info("Trajectory zip: found assistant MessageEvent in %s (%d files)", fname, len(event_files))
+                                    break
+                        elif isinstance(llm_msg, str) and llm_msg.strip():
+                            all_new_msgs = [llm_msg.strip()]
+                            logger.info("Trajectory zip: found assistant string in %s (%d files)", fname, len(event_files))
+                            break
+                if not all_new_msgs:
+                    logger.info("Trajectory zip: %d files, no assistant MessageEvent", len(event_files))
+        except Exception as e:
+            logger.warning("Trajectory zip error: %s", e)
+
     if not all_new_msgs:
         elapsed = int(time.time() - start)
         logger.warning("No assistant messages found after %ds (status=%s)", elapsed, last_status)
         logger.warning("All event kinds seen: %s", sorted(_event_kinds))
         logger.warning("Total events in last poll: %d, stored messages: %d", len(all_events), len(_msgs()))
         with _lock:
-                    _msgs().append({
-                        "role": "event",
-                        "content": f"[WARN] No response from agent after {elapsed}s (status: {last_status or 'unknown'}). The agent may be stuck or the LLM may not be configured correctly on the server.",
-                        "kind": "SystemEvent",
-                        "timestamp": int(time.time() * 1000),
+            _msgs().append({
+                    "role": "event",
+                    "content": f"[WARN] No response from agent after {elapsed}s (status: {last_status or 'unknown'}). The agent may be stuck or the LLM may not be configured correctly on the server.",
+                    "kind": "SystemEvent",
+                    "timestamp": int(time.time() * 1000),
                     })
 
     _conversation_status = "idle"
