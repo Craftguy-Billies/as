@@ -890,22 +890,16 @@ def _format_event_preview(evt: dict) -> str | None:
             stdout = obs.get("stdout", "") or obs.get("output", "") or obs.get("content", "")
             stderr = obs.get("stderr", "")
             exit_code = obs.get("exit_code")
-            parts = []
-            if stdout:
-                parts.append(f"📤 stdout:\n{stdout}")
-            if stderr:
-                parts.append(f"📤 stderr:\n{stderr}")
-            if exit_code is not None and exit_code != 0:
-                parts.append(f"📤 exit_code={exit_code}")
-            if parts:
-                return "\n".join(parts)
+            out = stdout or stderr
+            if out:
+                short = str(out)[:200].replace("\n", " ").strip()
+                tag = "📤 " if not stderr else "⚠️ stderr: "
+                extra = f" (exit={exit_code})" if exit_code is not None and exit_code != 0 else ""
+                return f"{tag}{short}{extra}"
         elif tool in ("file_editor", "str_replace_editor"):
             diff = obs.get("diff", "")
             if diff:
-                return f"📄 Diff:\n{diff}"
-            content = obs.get("content", "")
-            if content:
-                return f"📄 {content}"
+                return f"📄 Diff ({len(diff)} chars)"
             path = obs.get("path", "")
             if path:
                 return f"📄 Saved: {path}"
@@ -924,30 +918,15 @@ def _format_event_preview(evt: dict) -> str | None:
         elif tool == "browser_get_content":
             text = obs.get("text", "") or obs.get("content", "")
             if text:
-                return f"🌐 Page content ({len(str(text))} chars)"
+                return f"🌐 Page: ({len(str(text))} chars)"
         else:
-            # Unknown observation — dump raw keys
-            return f"→ {tool}: {str(obs)}"
+            # skip unknown observations
+            return None
 
     elif kind == "ErrorEvent":
         msg = evt.get("message", "")
-        obs = evt.get("observation", "")
         error_type = evt.get("error_type", "") or evt.get("type", "")
-        parts = [f"❌ ERROR"]
-        if error_type:
-            parts.append(f"Type: {error_type}")
-        if msg:
-            parts.append(f"Message: {msg}")
-        if obs:
-            obs_str = str(obs)
-            if obs_str.strip():
-                parts.append(f"Details: {obs_str}")
-        # Also dump any other useful fields
-        for key in ("traceback", "stack_trace", "cause"):
-            val = evt.get(key, "")
-            if val:
-                parts.append(f"{key}: {val}")
-        return "\n".join(parts)
-
-    # Catch-all: dump raw event (with emoji prefix for visibility)
-    return f"📋 [{kind}] {json.dumps(evt, default=str)}"
+        text = msg or error_type or "Unknown error"
+        return f"❌ {text[:300]}"
+    # Catch-all: skip unknown event types
+    return None
