@@ -504,19 +504,21 @@ class _ChatScreenState extends State<ChatScreen> {
                 height: 44,
                 width: 44,
                 child: Material(
-                  color: loading ? const Color(0xFF7C3AED).withValues(alpha: 0.5) : const Color(0xFF7C3AED),
+                  color: const Color(0xFF7C3AED),
                   shape: const CircleBorder(),
                   child: InkWell(
-                    onTap: loading ? null : _send,
+                    onTap: _send,
                     customBorder: const CircleBorder(),
                     child: Center(
-                      child: loading
-                          ? const SizedBox(
-                              height: 20,
-                              width: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                            )
-                          : const Icon(Icons.send_rounded, color: Colors.white, size: 20),
+                      child: processing
+                          ? const Icon(Icons.add_rounded, color: Colors.white, size: 20)
+                          : loading
+                              ? const SizedBox(
+                                  height: 20,
+                                  width: 20,
+                                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                )
+                              : const Icon(Icons.send_rounded, color: Colors.white, size: 20),
                     ),
                   ),
                 ),
