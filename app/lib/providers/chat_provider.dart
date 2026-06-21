@@ -75,6 +75,11 @@ class ChatProvider extends ChangeNotifier {
     _notify();
   }
 
+  void _resetShowIndex() {
+    _showFromIndex = (_messages.length - _pageSize).clamp(0, _messages.length);
+    _notify();
+  }
+
   // Batch queue prompt list for per-prompt cancel UI
   List<String> _batchPrompts = [];
   List<String> _batchModes = [];   // "plan" or "code" per prompt
@@ -126,7 +131,7 @@ class ChatProvider extends ChangeNotifier {
             _messages = msgs
                 .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
                 .toList();
-            _notify();
+            _resetShowIndex();
           }
           serverRepo = (data['repo']?.toString()) ?? '';
           serverMode = (data['mode']?.toString()) ?? 'code';
@@ -135,7 +140,7 @@ class ChatProvider extends ChangeNotifier {
           _messages = data
               .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
               .toList();
-          _notify();
+          _resetShowIndex();
         }
       } catch (_) {
         await prefs.remove(_cacheKey);
@@ -158,7 +163,7 @@ class ChatProvider extends ChangeNotifier {
         }
         _messages = merged;
         await _saveToCache();
-        _notify();
+        _resetShowIndex();
       }
     } catch (e) {
       logViewer('ChatProvider.loadFromCache: server merge failed: $e');
@@ -192,10 +197,6 @@ class ChatProvider extends ChangeNotifier {
     } catch (e) {
       logViewer('ChatProvider.loadFromCache: repo fetch failed: $e');
     }
-
-    // Show latest messages first — scroll to bottom on first render
-    _showFromIndex = (_messages.length - _pageSize).clamp(0, _messages.length);
-    logViewer('ChatProvider.loadFromCache: showFrom=$_showFromIndex of ${_messages.length}');
   }
 
   // -- Send: queue prompt(s) on server, then poll for progress --
