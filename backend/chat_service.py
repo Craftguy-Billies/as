@@ -368,7 +368,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
     # Track message count before wait so we can replace live [MSG] events
     # with the clean assistant response afterwards.
     with _lock:
-        _msg_count_before = len(_messages)
+        _msg_count_before = len(_msgs())
     try:
         response = _wait_for_response()
     except Exception as e:
@@ -379,8 +379,9 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
     # with a single clean assistant message (avoids duplicated/concatenated display).
     with _lock:
         if response:
-            _messages[:] = [
-                m for m in _messages
+            msgs = _msgs()
+            msgs[:] = [
+                m for m in msgs
                 if not (
                     m.get("role") == "event"
                     and isinstance(m.get("content"), str)
