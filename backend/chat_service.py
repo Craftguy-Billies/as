@@ -33,6 +33,8 @@ _last_event_index: int = 0
 _sandbox_id: str | None = None
 _event_kinds: set[str] = set()  # diagnostic: all event kinds seen in current conversation
 _seen_event_ids: set[str] = set()  # ID-based event dedup (immune to API limit=N truncation)
+_agent_server_url: str | None = None  # direct agent server URL (session-key auth)
+_session_api_key: str | None = None   # session key for agent server
 _current_repo_key: str = ""  # current repo — determines which chat history to show
 _messages_by_repo: dict[str, list[dict]] = {}  # per-repo chat history
 _lock = threading.Lock()
@@ -877,7 +879,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     if timeout is None:
         timeout = _CHAT_TIMEOUT
 
-    global _conversation_status, _sandbox_id, _seen_event_ids
+    global _conversation_status, _sandbox_id, _seen_event_ids, _agent_server_url, _session_api_key
 
     start = time.time()
     all_new_msgs: list[str] = []
@@ -919,6 +921,14 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             _sandbox_id = sid
             logger.info("Conversation %s sandbox_id=%s", _conversation_id, sid)
 
+        # Capture agent server URL + session key for direct event access
+        conv_url = items[0].get("conversation_url", "")
+        session_key = items[0].get("session_api_key", "")
+        global _agent_server_url, _session_api_key
+        if conv_url and session_key:
+            _agent_server_url = conv_url.rsplit("/api/conversations", 1)[0]
+            _session_api_key = session_key
+
         # Report status changes to UI
         if status != last_status:
             last_status = status
@@ -946,15 +956,25 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                     "timestamp": int(time.time() * 1000),
                 })
 
-        # -- Get events (SAME endpoint as agent_runner) --
+        # -- Get events (prefer agent server — may return all events) --
         all_events = []
         try:
-            r2 = httpx.get(
-                f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
-                headers=_headers(),
-                params={"limit": 100},
-                timeout=10,
-            )
+            if _agent_server_url and _session_api_key:
+                # Agent server endpoint (session-key auth)
+                agent_headers = {"X-Session-API-Key": _session_api_key}
+                r2 = httpx.get(
+                    f"{_agent_server_url}/api/conversations/{_conversation_id}/events/search",
+                    headers=agent_headers,
+                    params={"limit": 200},
+                    timeout=10,
+                )
+            else:
+                r2 = httpx.get(
+                    f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
+                    headers=_headers(),
+                    params={"limit": 100},
+                    timeout=10,
+                )
             r2.raise_for_status()
             events_data = r2.json()
         except Exception as e:
