@@ -1169,7 +1169,7 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
             f"Example:\n"
             f"## 2026-06-22T10:27 — Fixed login redirect bug\n"
             f"**Request:** Fix the redirect loop after login\n"
-            f"**Status:** ✅ Success\n"
+            f"**Status:** [OK] Success\n"
             f"**What was done:** Edited auth.dart to check session expiry "
             f"before redirect. Added unit test for expired sessions. "
             f"Committed with message 'fix: login redirect loop' and pushed.\n"

@@ -154,7 +154,13 @@ async def _process_task(task_id: str) -> None:
                     sandbox_id=result.get("sandbox_id"),
                 )
                 prompt_preview = task_dict["prompt"][:80] + ("..." if len(task_dict["prompt"]) > 80 else "")
-                await send_push_notification(db, task_id, "✅ Task Complete", prompt_preview)
+                await send_push_notification(db, task_id, "Task Complete", prompt_preview)
+                # Append to VIBECODER_LOG.md
+                try:
+                    from chat_service import _auto_append_log
+                    _auto_append_log(task_dict.get("repo", ""), task_dict["prompt"], result.get("response", ""), ok=True)
+                except Exception:
+                    pass
             else:
                 await _update_task_status(
                     db, task_id, "failed",
@@ -163,9 +169,15 @@ async def _process_task(task_id: str) -> None:
                     sandbox_id=result.get("sandbox_id"),
                 )
                 await send_push_notification(
-                    db, task_id, "❌ Task Failed",
+                    db, task_id, "Task Failed",
                     result.get("error_message", "Task failed")[:120],
                 )
+                # Append failure to VIBECODER_LOG.md
+                try:
+                    from chat_service import _auto_append_log
+                    _auto_append_log(task_dict.get("repo", ""), task_dict["prompt"], result.get("error_message", ""), ok=False)
+                except Exception:
+                    pass
 
     except Exception as e:
         import traceback

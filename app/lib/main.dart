@@ -79,7 +79,7 @@ class _VibeCodeAppState extends State<VibeCodeApp> {
       ],
       child: MaterialApp(
         navigatorKey: _navKey,
-        title: 'VibeCode',
+        title: 'Vibe Coder',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           brightness: Brightness.dark,

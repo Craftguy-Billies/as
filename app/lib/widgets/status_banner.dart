@@ -40,21 +40,21 @@ class StatusBanner extends StatelessWidget {
         color = Colors.grey;
       case 'starting':
         icon = Icons.play_circle_outline;
-        text = mode == 'plan' ? '📋 Planning...' : '⚡ Starting agent...';
+        text = mode == 'plan' ? 'Planning...' : 'Starting agent...';
         color = Colors.amber;
       case 'running':
         icon = Icons.sync;
-        text = mode == 'plan' ? '🔨 Implementing plan...' : '⚡ Agent is working...';
+        text = mode == 'plan' ? 'Implementing plan...' : 'Agent is working...';
         color = Colors.blue;
       case 'completed':
         icon = Icons.check_circle;
-        text = '✅ Completed';
+        text = 'Completed';
         color = Colors.green;
       case 'failed':
         icon = Icons.error;
         text = errorMsg != null && errorMsg.isNotEmpty
-            ? '❌ $errorMsg'
-            : '❌ Failed';
+            ? '[FAIL] $errorMsg'
+            : '[FAIL] Failed';
         color = Colors.red;
       default:
         icon = Icons.help;

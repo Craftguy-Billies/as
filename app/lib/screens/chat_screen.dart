@@ -1066,8 +1066,8 @@ class _TaskLogSheetState extends State<_TaskLogSheet> {
                 }
                 final e = filtered[i - 1];
                 final status = (e['status'] ?? '').toString();
-                final isOK = status.contains('[OK]') || status.contains('✅') || status.toLowerCase().contains('success');
-                final isFail = status.contains('[FAIL]') || status.contains('❌') || status.toLowerCase().contains('failed');
+                final isOK = status.contains('[OK]') || status.toLowerCase().contains('success');
+                final isFail = status.contains('[FAIL]') || status.toLowerCase().contains('failed');
                 final isExpanded = _expandedIndex == (i - 1);
                 return GestureDetector(
                   onTap: () => setState(() {
