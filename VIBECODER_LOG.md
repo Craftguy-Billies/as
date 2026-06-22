@@ -16,7 +16,9 @@
 ## 2026-06-22T17:06 — and then one more issue, i dont know is it only happening when initiate or chat…
 
 ## 2026-06-22T17:09 — now look at all ur previous edit. u know what are u doing right? and i believe t…
-**Request:** now look at all ur previous edit. u know what are u doing right? and i believe the problem of swallowed (hidden) small progress is only happening after i say the problem of total no single change copy
+
+## 2026-06-22T17:15 — and then, the queueing position is correct? last message sent is always at the b…
+**Request:** and then, the queueing position is correct? last message sent is always at the backest? now think of several use cases of the app regarding to ur 6 fixes, its all working right? no bugs, no ux ui issu
 **Status:** [OK] Success
 **What was done:** All changes reviewed. Here's the full audit: --- Complete change audit — all 5 commits 1. Repo/branch pre-fill (commit ) Files: , After , if is empty but has the cached value → copies it to controller and persists to SharedPreferences.
 
