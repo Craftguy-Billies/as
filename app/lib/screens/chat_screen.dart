@@ -27,23 +27,23 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    // Sync restore — MUST happen before first build so TextField
+    // never shows "owner/repo" placeholder when a repo is saved.
+    final prefs = context.read<PreferencesService>();
+    _repoCtrl.text = prefs.lastRepo;
+    _branchCtrl.text = prefs.lastBranch;
+    _showRepoBar = _repoCtrl.text.isNotEmpty;
+    debugPrint('[ChatScreen.initState] restored repo=${_repoCtrl.text} branch=${_branchCtrl.text} showRepoBar=$_showRepoBar');
+
+    // Async init: ChatProvider + cache + model
     WidgetsBinding.instance.addPostFrameCallback((_) => _init());
   }
 
   Future<void> _init() async {
-    // Step 1: Restore last repo/branch from PreferencesService (single source of truth)
-    final prefs = context.read<PreferencesService>();
-    final savedRepo = prefs.lastRepo;
-    final savedBranch = prefs.lastBranch;
-    debugPrint('[ChatScreen._init] PreferencesService: repo=$savedRepo branch=$savedBranch');
+    final savedRepo = _repoCtrl.text.trim();
+    final savedBranch = _branchCtrl.text.trim();
 
-    _repoCtrl.text = savedRepo;
-    _branchCtrl.text = savedBranch;
-    if (savedRepo.isNotEmpty) {
-      setState(() => _showRepoBar = true);
-    }
-
-    // Step 2: Populate ChatProvider with saved repo + fetch branches
+    // Populate ChatProvider with saved repo + fetch branches
     final prov = context.read<ChatProvider>();
     if (savedRepo.isNotEmpty) {
       prov.initRepoFromHome(savedRepo);
@@ -52,11 +52,10 @@ class _ChatScreenState extends State<ChatScreen> {
       debugPrint('[ChatScreen._init] no saved repo — ChatProvider not initialized');
     }
 
-    // Step 3: Load cached messages + merge with server
+    // Load cached messages + merge with server
     try {
       await prov.loadFromCache();
       debugPrint('[ChatScreen._init] loadFromCache done, serverRepo=${prov.serverRepo} serverBranch=${prov.serverBranch}');
-      // Fallback: cache may not have repo (empty cache, old format, etc.)
       if (prov.serverRepo.isEmpty && savedRepo.isNotEmpty) {
         debugPrint('[ChatScreen._init] FALLBACK: serverRepo empty after cache, restoring $savedRepo');
         prov.initRepoFromHome(savedRepo);
@@ -66,7 +65,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     if (mounted) setState(() => _hasLoaded = true);
 
-    // Step 4: Load model preference
+    // Load model preference
     try {
       final sp = await SharedPreferences.getInstance();
       setState(() => _activeModel = sp.getString('last_model') ?? '');

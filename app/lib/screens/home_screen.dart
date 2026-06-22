@@ -26,18 +26,19 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    // Sync restore — must happen before first build
     final prefs = context.read<PreferencesService>();
     _repoCtrl.text = prefs.lastRepo;
     _branchCtrl.text = prefs.lastBranch;
-    WidgetsBinding.instance.addPostFrameCallback((_) => _autoConnect());
-
-    // Populate ChatProvider with saved repo + fetch branches, then load messages
     final savedRepo = _repoCtrl.text.trim();
     final savedBranch = _branchCtrl.text.trim();
-    debugPrint('[HomeScreen.initState] savedRepo=$savedRepo savedBranch=$savedBranch');
+    debugPrint('[HomeScreen.initState] restored repo=$savedRepo branch=$savedBranch');
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => _autoConnect());
+
+    // Populate ChatProvider with saved repo + fetch branches
     if (savedRepo.isNotEmpty) {
-      final prov = context.read<ChatProvider>();
-      prov.initRepoFromHome(savedRepo);
+      context.read<ChatProvider>().initRepoFromHome(savedRepo);
     }
     context.read<ChatProvider>().loadFromCache().then((_) {
       final prov = context.read<ChatProvider>();
