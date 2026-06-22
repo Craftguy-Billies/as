@@ -47,6 +47,18 @@ class _HomeScreenState extends State<HomeScreen> {
         debugPrint('[HomeScreen.initState] FALLBACK: serverRepo empty after cache, restoring $savedRepo');
         prov.initRepoFromHome(savedRepo);
       }
+      // Sync text controllers from ChatProvider — covers the case where the
+      // cache JSON has repo/branch but PreferencesService.lastRepo is empty.
+      if (mounted && _repoCtrl.text.isEmpty && prov.serverRepo.isNotEmpty) {
+        _repoCtrl.text = prov.serverRepo;
+        context.read<PreferencesService>().saveLastPrompt(prov.serverRepo, _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim(), 'code');
+        debugPrint('[HomeScreen.initState] synced _repoCtrl from serverRepo: ${prov.serverRepo}');
+      }
+      if (mounted && _branchCtrl.text.isEmpty && prov.serverBranch.isNotEmpty) {
+        _branchCtrl.text = prov.serverBranch;
+        context.read<PreferencesService>().saveLastPrompt(_repoCtrl.text.trim(), prov.serverBranch, 'code');
+        debugPrint('[HomeScreen.initState] synced _branchCtrl from serverBranch: ${prov.serverBranch}');
+      }
     }).catchError((e) {
       debugPrint('[HomeScreen.initState] loadFromCache error: $e');
     });

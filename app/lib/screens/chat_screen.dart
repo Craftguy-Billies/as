@@ -60,6 +60,19 @@ class _ChatScreenState extends State<ChatScreen> {
         debugPrint('[ChatScreen._init] FALLBACK: serverRepo empty after cache, restoring $savedRepo');
         prov.initRepoFromHome(savedRepo);
       }
+      // Sync text controllers from ChatProvider — covers the case where the
+      // cache JSON has repo/branch but PreferencesService.lastRepo is empty.
+      if (mounted && _repoCtrl.text.isEmpty && prov.serverRepo.isNotEmpty) {
+        _repoCtrl.text = prov.serverRepo;
+        _saveRepoPrefs();
+        setState(() => _showRepoBar = true);
+        debugPrint('[ChatScreen._init] synced _repoCtrl from serverRepo: ${prov.serverRepo}');
+      }
+      if (mounted && _branchCtrl.text.isEmpty && prov.serverBranch.isNotEmpty) {
+        _branchCtrl.text = prov.serverBranch;
+        _saveRepoPrefs();
+        debugPrint('[ChatScreen._init] synced _branchCtrl from serverBranch: ${prov.serverBranch}');
+      }
     } catch (e, st) {
       debugPrint('[ChatScreen._init] loadFromCache error: $e\n$st');
     }
