@@ -30,6 +30,8 @@ class _HomeScreenState extends State<HomeScreen> {
     _branchCtrl.text = prefs.lastBranch;
     _mode = prefs.lastMode;
     WidgetsBinding.instance.addPostFrameCallback((_) => _autoConnect());
+    // Populate branch dropdown on cold start
+    context.read<ChatProvider>().loadFromCache();
   }
 
   Future<void> _autoConnect() async {
@@ -296,7 +298,11 @@ class _HomeScreenState extends State<HomeScreen> {
                                 offset: const Offset(0, 34),
                                 color: const Color(0xFF1A1A2E),
                                 constraints: const BoxConstraints(maxWidth: 140, maxHeight: 250),
-                                child: const Icon(Icons.arrow_drop_down, color: Colors.white54, size: 18),
+                                child: const SizedBox(
+                                  width: 32,
+                                  height: 32,
+                                  child: Icon(Icons.arrow_drop_down, color: Colors.white54, size: 22),
+                                ),
                                 onSelected: (v) {
                                   _branchCtrl.text = v;
                                   prefsService.saveLastPrompt(_repoCtrl.text, v, _mode);

@@ -377,7 +377,11 @@ class _ChatScreenState extends State<ChatScreen> {
                           offset: const Offset(0, 30),
                           color: const Color(0xFF1A1A2E),
                           constraints: const BoxConstraints(maxWidth: 140, maxHeight: 250),
-                          child: const Icon(Icons.arrow_drop_down, color: Colors.white54, size: 18),
+                          child: const SizedBox(
+                            width: 28,
+                            height: 28,
+                            child: Icon(Icons.arrow_drop_down, color: Colors.white54, size: 20),
+                          ),
                           onSelected: (v) {
                             _branchCtrl.text = v;
                             _saveRepoPrefs();
