@@ -748,13 +748,17 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
         if repo:
             full_prompt = (
                 f"Repository: {repo} (branch: {branch}).\n"
-                "IMPORTANT — PLAN MODE:\n"
-                "1. FIRST, analyze the task and research the codebase. Read files, search, "
-                "understand the architecture. Create a detailed implementation plan saved "
-                "to .agents_tmp/PLAN.md. Do NOT implement anything yet.\n"
-                "2. After creating the plan, present your findings and ask "
-                "whether to proceed with implementation.\n"
-                "IMPORTANT: Stop after EXPLORATION + ANALYSIS.\n\n"
+                f"IMPORTANT — PLAN MODE:\n"
+                f"1. FIRST, analyze the task and research the codebase. Read files, search, "
+                f"understand the architecture. Create a detailed implementation plan saved "
+                f"to .agents_tmp/PLAN.md. Do NOT implement anything yet.\n"
+                f"2. After creating the plan, present your findings and ask "
+                f"whether to proceed with implementation.\n"
+                f"3. You are in READ-ONLY mode. Do NOT edit, create, or delete any files "
+                f"other than .agents_tmp/PLAN.md. Do NOT run git commit or git push.\n"
+                f"IMPORTANT: Stop after EXPLORATION + ANALYSIS.\n\n"
+                f"🔒 REPO RESTRICTION: You are confined to repository `{repo}`. "
+                f"Switch branches freely, but NEVER touch any other repo.\n\n"
                 f"Task: {prompt}"
             )
         else:
@@ -764,15 +768,22 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
                 "and create a detailed plan saved to .agents_tmp/PLAN.md. "
                 "Do NOT implement anything.\n"
                 "2. After creating the plan, present it to the user and ask "
-                "whether to proceed.\n\n"
+                "whether to proceed.\n"
+                "3. READ-ONLY: Do NOT edit, create, or delete any files "
+                "other than .agents_tmp/PLAN.md.\n\n"
                 f"Task: {prompt}"
             )
     elif repo:
         full_prompt = (
             f"Repository: {repo} (branch: {branch}).\n"
-            "IMPORTANT: First run `git pull` to get the latest code. "
-            "When implementing changes: review relevant files, make edits, "
-            "commit with a descriptive message, and push.\n\n"
+            f"IMPORTANT: First run `git pull` to get the latest code. "
+            f"When implementing changes: review relevant files, make edits, "
+            f"commit with a descriptive message, and push.\n\n"
+            f"🔒 REPO RESTRICTION: You are confined to repository `{repo}`. "
+            f"You may switch branches within it freely, but you MUST NOT "
+            f"clone, fetch, push to, or interact with any other repository. "
+            f"All file edits, git operations, and commits must stay within "
+            f"`{repo}`.\n\n"
             f"{prompt}"
         )
     else:
