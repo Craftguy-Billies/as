@@ -1020,9 +1020,18 @@ class _TaskLogSheet extends StatelessWidget {
                     children: [
                       Row(
                         children: [
-                          Text(
-                            status,
-                            style: const TextStyle(fontSize: 14),
+                          Icon(
+                            isOK
+                                ? Icons.check_circle_outline
+                                : isFail
+                                    ? Icons.cancel_outlined
+                                    : Icons.warning_amber_outlined,
+                            size: 18,
+                            color: isOK
+                                ? Colors.green
+                                : isFail
+                                    ? Colors.redAccent
+                                    : Colors.orange,
                           ),
                           const SizedBox(width: 8),
                           Expanded(
