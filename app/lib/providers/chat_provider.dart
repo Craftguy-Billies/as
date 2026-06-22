@@ -239,6 +239,8 @@ class ChatProvider extends ChangeNotifier {
 
     // Auto-fetch task log
     fetchTaskLog();
+    // Auto-fetch branches (cold start: _branches is empty)
+    fetchBranches();
   }
 
   // -- Send: queue prompt(s) on server, then poll for progress --
@@ -430,7 +432,13 @@ class ChatProvider extends ChangeNotifier {
 
   // -- Repo management --
   Future<void> switchRepo(String repo, String mode, {String branch = 'main'}) async {
-    if (repo == serverRepo && mode == serverMode && branch == serverBranch) return;
+    if (repo == serverRepo && mode == serverMode && branch == serverBranch) {
+      // Same context — but branches may be stale on cold start
+      if (_branches.isEmpty && repo.isNotEmpty) {
+        fetchBranches();
+      }
+      return;
+    }
     serverRepo = repo;
     serverBranch = branch;
     serverMode = mode;
