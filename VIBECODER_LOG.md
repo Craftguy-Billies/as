@@ -15,7 +15,14 @@
 **What was done:** Pushed. Here's a summary of the fix: What was fixed Bug: On cold boot, the repo text field showed the placeholder instead of the last used repo, even though the repo was available in the dropdown. Root cause: Repo/branch is stored in two places: 1.
 
 ## 2026-06-22T16:57 — second, sometimes the small words (under "agent is working" there should be some…
+
+## 2026-06-22T16:57 — second, sometimes the small words (under "agent is working" there should be some…
 **Request:** second, sometimes the small words (under "agent is working" there should be some status before showing "task finished" like task description xxxx, or file: xxx, or read: xxx, etc). but sometimes it wa
+**Status:** [OK] Success
+**What was done:** Pushed. Here's a summary of both fixes: Fix 1: Repo/branch pre-fill on cold boot Bug: Text field showed placeholder instead of last used repo. Root cause: Repo stored in two places — (for text field) and cache JSON (for ).
+
+## 2026-06-22T17:02 — and then, for the batch processing queue, there are also bugs. why i will direct…
+**Request:** and then, for the batch processing queue, there are also bugs. why i will direct sent the message out even it is expected to be queueing, working one by one? and when that happens, unexpected behaviou
 **Status:** [OK] Success
 **What was done:** Pushed. Here's a summary of both fixes: Fix 1: Repo/branch pre-fill on cold boot Bug: Text field showed placeholder instead of last used repo. Root cause: Repo stored in two places — (for text field) and cache JSON (for ).
 
