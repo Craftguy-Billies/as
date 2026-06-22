@@ -341,10 +341,10 @@ def _auto_append_log(repo: str, prompt: str, response: str, *, ok: bool) -> None
             logger.info("VIBECODER_LOG.md appended: %s — %s", ts, one_line)
             _task_log_cache.pop(repo, None)
         else:
-            logger.debug("VIBECODER_LOG.md append failed: HTTP %s %s",
-                         put_resp.status_code, put_resp.text[:200])
+            logger.warning("VIBECODER_LOG.md append FAILED: HTTP %s — %s",
+                         put_resp.status_code, put_resp.text[:300])
     except Exception as e:
-        logger.debug("VIBECODER_LOG.md append error: %s", e)
+        logger.warning("VIBECODER_LOG.md append error: %s", e)
 
 
 def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code") -> dict:

@@ -232,6 +232,9 @@ class ChatProvider extends ChangeNotifier {
     } catch (e) {
       logViewer('ChatProvider.loadFromCache: repo fetch failed: $e');
     }
+
+    // Auto-fetch task log
+    fetchTaskLog();
   }
 
   // -- Send: queue prompt(s) on server, then poll for progress --
@@ -401,6 +404,7 @@ class ChatProvider extends ChangeNotifier {
             _queuePosition = 0;
             _queueTotal = 0;  // hide progress bar
             logViewer('ChatProvider.poll: DONE pos=$_queuePosition total=$_queueTotal');
+            fetchTaskLog();  // refresh task log after batch completes
           }
         }
 
