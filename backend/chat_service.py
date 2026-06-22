@@ -504,7 +504,7 @@ def _auto_append_log(repo: str, prompt: str, response: str, *, ok: bool) -> None
         logger.warning("VIBECODER_LOG.md append error: %s", e)
 
 
-def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code") -> dict:
+def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _from_batch: bool = False) -> dict:
     """Send a chat message and wait for the agent response (synchronous).
 
     Creates a new conversation when repo or mode changes.
@@ -515,17 +515,17 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code") -> d
     if not CLOUD_API_KEY:
         return {"error": "OPENHANDS_CLOUD_API_KEY not configured on server"}
 
-    # Guard: if a batch is running, auto-enqueue instead of processing directly.
-    # This prevents parallel send() calls which would interleave and cause
-    # conflicting conversation state (send-message on same conversation).
-    with _lock:
-        if _batch_running:
-            _batch_prompts.append(prompt)
-            _batch_prompt_modes.append(mode)
-            _batch_total = len(_batch_prompts)
-            _persist_to_db()
-            logger.info("Batch running — auto-enqueued prompt (now %d total)", _batch_total)
-            return {"status": "enqueued", "position": _batch_position, "total": _batch_total}
+    # Guard: if called externally while batch is running, auto-enqueue instead.
+    # Batch worker passes _from_batch=True to bypass this guard.
+    if not _from_batch:
+        with _lock:
+            if _batch_running:
+                _batch_prompts.append(prompt)
+                _batch_prompt_modes.append(mode)
+                _batch_total = len(_batch_prompts)
+                _persist_to_db()
+                logger.info("Batch running — auto-enqueued prompt (now %d total)", _batch_total)
+                return {"status": "appended", "position": _batch_position, "total": _batch_total}
 
     # Reset event cursors so each message starts fresh
     _last_event_index = 0
@@ -837,7 +837,7 @@ def _process_batch_worker() -> None:
             # Send the prompt (this blocks — uses the same send() function)
             logger.info("Batch [%d/%d]: %.80s...", pos, total, prompt)
             try:
-                result = send(prompt, repo=repo, branch=branch, mode=mode)
+                result = send(prompt, repo=repo, branch=branch, mode=mode, _from_batch=True)
                 logger.info("Batch [%d/%d]: send() returned status=%s has_error=%s msgs=%d",
                             pos, total,
                             result.get("status") if result else "None",
