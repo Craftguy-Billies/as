@@ -956,6 +956,7 @@ class _TaskLogSheet extends StatelessWidget {
             if (entries.isEmpty) {
               return Center(
                 child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Icon(Icons.inbox_outlined, size: 48, color: Colors.grey[700]),
@@ -966,7 +967,42 @@ class _TaskLogSheet extends StatelessWidget {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      'Tasks will appear here as the AI writes to VIBECODER_LOG.md',
+                      'Completed tasks appear here automatically',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.grey[700], fontSize: 12),
+                    ),
+                  ],
+                ),
+              );
+            }
+            // Latest first, filter entries older than 1 day
+            final now = DateTime.now();
+            final filtered = entries.where((e) {
+              final ts = e['timestamp']?.toString() ?? '';
+              if (ts.isEmpty) return true;
+              try {
+                final t = DateTime.parse(ts);
+                return now.difference(t).inHours < 24;
+              } catch (_) {
+                return true;
+              }
+            }).toList().reversed.toList();
+            if (filtered.isEmpty) {
+              return Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.inbox_outlined, size: 48, color: Colors.grey[700]),
+                    const SizedBox(height: 12),
+                    Text(
+                      'No recent tasks',
+                      style: TextStyle(color: Colors.grey[500], fontSize: 16),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Tasks from the last 24 hours appear here',
+                      textAlign: TextAlign.center,
                       style: TextStyle(color: Colors.grey[700], fontSize: 12),
                     ),
                   ],
@@ -976,7 +1012,7 @@ class _TaskLogSheet extends StatelessWidget {
             return ListView.builder(
               controller: scrollCtrl,
               padding: const EdgeInsets.all(16),
-              itemCount: entries.length + 1,
+              itemCount: filtered.length + 1,
               itemBuilder: (_, i) {
                 if (i == 0) {
                   return Padding(
@@ -986,7 +1022,7 @@ class _TaskLogSheet extends StatelessWidget {
                         const Icon(Icons.checklist, color: Color(0xFF7C3AED), size: 20),
                         const SizedBox(width: 8),
                         Text(
-                          'Task Log  ·  ${entries.length} done',
+                          'Task Log  ·  ${filtered.length} done',
                           style: const TextStyle(
                             color: Colors.white,
                             fontSize: 16,
@@ -997,7 +1033,7 @@ class _TaskLogSheet extends StatelessWidget {
                     ),
                   );
                 }
-                final e = entries[i - 1];
+                final e = filtered[i - 1];
                 final status = (e['status'] ?? '').toString();
                 final isOK = status.contains('[OK]') || status.contains('✅') || status.toLowerCase().contains('success');
                 final isFail = status.contains('[FAIL]') || status.contains('❌') || status.toLowerCase().contains('failed');

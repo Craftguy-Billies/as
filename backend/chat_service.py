@@ -9,6 +9,7 @@ Uses OpenHands Cloud REST API (verified against OpenAPI spec):
 Thread-safe: _lock serializes access to module-level session state.
 State persisted to SQLite — survives server restart.
 """
+import base64
 import httpx
 import json
 import logging
@@ -254,6 +255,87 @@ def get_repos() -> list[dict]:
     return result
 
 
+def _auto_append_log(repo: str, prompt: str, response: str, *, ok: bool) -> None:
+    """Programmatically append a task entry to VIBECODER_LOG.md via GitHub API.
+
+    Deduplicates by checking if the prompt already appears in the log.
+    Skips silently if repo is empty or GitHub API fails.
+    """
+    if not repo:
+        return
+    try:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+        one_line = prompt[:80].replace("\n", " ").strip()
+        if len(prompt) > 80:
+            one_line += "…"
+
+        # Summary: first 2-3 sentences from response, max ~80 words
+        import re
+        sentences = re.split(r'(?<=[.!?])\s+', response.strip())
+        summary_sentences = sentences[:3]
+        summary = " ".join(summary_sentences)
+        words = summary.split()
+        if len(words) > 80:
+            summary = " ".join(words[:80]) + "…"
+        if not summary:
+            summary = "(no output)"
+
+        status = "[OK] Success" if ok else "[FAIL] Failed"
+
+        entry = (
+            f"\n\n## {ts} — {one_line}\n"
+            f"**Request:** {prompt[:200].replace(chr(10), ' ')}\n"
+            f"**Status:** {status}\n"
+            f"**What was done:** {summary}\n"
+        )
+
+        # Dedup: skip if identical prompt already logged
+        existing_content = ""
+        existing_sha = ""
+        get_resp = httpx.get(
+            f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
+            headers={"Accept": "application/vnd.github.raw+json"},
+            timeout=10,
+        )
+        if get_resp.status_code == 200:
+            existing_content = get_resp.text
+            if prompt[:200] in existing_content:
+                logger.debug("VIBECODER_LOG.md: skipping duplicate for %.80s", prompt)
+                return
+
+        # Get SHA for update (need separate call without raw header)
+        sha_resp = httpx.get(
+            f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
+            headers={"Accept": "application/vnd.github+json"},
+            timeout=10,
+        )
+        if sha_resp.status_code == 200:
+            existing_sha = sha_resp.json().get("sha", "")
+
+        new_content = existing_content + entry
+        body = {
+            "message": f"vibecoder: {one_line[:60]}",
+            "content": base64.b64encode(new_content.encode()).decode(),
+        }
+        if existing_sha:
+            body["sha"] = existing_sha
+
+        put_resp = httpx.put(
+            f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
+            headers={"Accept": "application/vnd.github+json"},
+            json=body,
+            timeout=15,
+        )
+        if put_resp.status_code in (200, 201):
+            logger.info("VIBECODER_LOG.md appended: %s — %s", ts, one_line)
+            # Clear task log cache so next poll picks up the update
+            _task_log_cache.pop(repo, None)
+        else:
+            logger.debug("VIBECODER_LOG.md append failed: HTTP %s", put_resp.status_code)
+    except Exception as e:
+        logger.debug("VIBECODER_LOG.md append error: %s", e)
+
+
 def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code") -> dict:
     """Send a chat message and wait for the agent response (synchronous).
 
@@ -418,11 +500,16 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code") -> d
                 "timestamp": int(time.time() * 1000),
             })
             _persist_to_db()
+
+            # Auto-append to VIBECODER_LOG.md (programmatic enforcement)
+            _auto_append_log(repo, prompt, response, ok=True)
+
             return {
                 "response": response,
                 "conversation_id": _conversation_id,
             }
         else:
+            _auto_append_log(repo, prompt, str(response), ok=False)
             return {
                 "error": "Agent did not produce a response (timeout or conversation error)",
                 "conversation_id": _conversation_id,
