@@ -31,6 +31,7 @@ _conversation_mode: str = "code"
 _last_event_index: int = 0
 _sandbox_id: str | None = None
 _event_kinds: set[str] = set()  # diagnostic: all event kinds seen in current conversation
+_seen_event_ids: set[str] = set()  # dedup: event IDs already added to chat
 _current_repo_key: str = ""  # current repo — determines which chat history to show
 _messages_by_repo: dict[str, list[dict]] = {}  # per-repo chat history
 _msg_counter: int = 0  # monotonically increasing message ID
@@ -263,7 +264,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
     if not CLOUD_API_KEY:
         return {"error": "OPENHANDS_CLOUD_API_KEY not configured on server"}
 
-    # Reset event cursor so each message processes fresh events
+    # Reset event cursor so each message starts fresh
     _last_event_index = 0
 
     logger.info("Chat send: prompt=%.80s... repo=%s mode=%s", prompt, repo, mode)
@@ -982,9 +983,16 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
         # Stream EVERYTHING the agent does as live events (text, tools, observations)
         for evt in all_events[_last_event_index:]:
+            evt_id = evt.get("id", "")
             kind = evt.get("kind", "")
             source = evt.get("source", "")
             tool = evt.get("tool_name", "")
+
+            # Skip already-seen events (dedup across send() calls)
+            if evt_id and evt_id in _seen_event_ids:
+                continue
+            if evt_id:
+                _seen_event_ids.add(evt_id)
 
             # Track event kinds for diagnostics
             _event_kinds.add(kind)

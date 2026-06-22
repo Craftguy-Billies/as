@@ -31,7 +31,8 @@ class ChatMessage {
         timestamp: (json['timestamp'] ?? 0) as int,
       );
 
-  String get dedupKey => id != null ? 'id:$id' : '$role:$content';
+  // Dedup by role:content — server + client versions of same msg merge.
+  String get dedupKey => '$role:$content';
 }
 
 /// Single-mode chat: everything goes through the server-side batch queue.
