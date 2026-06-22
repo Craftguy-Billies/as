@@ -296,9 +296,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                   ),
                                   contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
                                   isDense: true,
-                                  suffixIcon: branches.isNotEmpty
-                                      ? const Icon(Icons.arrow_drop_down, color: Colors.white54, size: 16)
-                                      : null,
+                                  suffixIcon: const Icon(Icons.arrow_drop_down, color: Colors.white54, size: 16),
                                 ),
                               );
                             },
