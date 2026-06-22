@@ -338,52 +338,61 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
               const SizedBox(width: 6),
-              // Branch autocomplete (dropdown + free text)
-              SizedBox(
-                width: 80,
-                child: Consumer<ChatProvider>(
-                  builder: (_, prov, __) {
-                    final branches = prov.branches;
-                    final current = _branchCtrl.text.isEmpty ? 'main' : _branchCtrl.text;
-                    return Autocomplete<String>(
-                      optionsBuilder: (value) {
-                        if (value.text.isEmpty) return branches;
-                        return branches.where((b) => b.toLowerCase().contains(value.text.toLowerCase()));
-                      },
-                      initialValue: TextEditingValue(text: current),
-                      onSelected: (v) {
-                        _branchCtrl.text = v;
-                        _saveRepoPrefs();
-                      },
-                      fieldViewBuilder: (_, ctrl, focusNode, ___) {
-                        // Keep _branchCtrl in sync with autocomplete controller
-                        ctrl.text = _branchCtrl.text.isEmpty ? 'main' : _branchCtrl.text;
-                        return TextField(
-                          controller: ctrl,
-                          focusNode: focusNode,
-                          style: const TextStyle(color: Colors.white, fontSize: 12),
-                          onChanged: (v) {
+              // Branch: free-text TextField + popup for suggestions
+              Consumer<ChatProvider>(
+                builder: (_, prov, __) {
+                  final branches = prov.branches;
+                  final filtered = branches.isEmpty
+                      ? <String>[]
+                      : branches.where((b) {
+                          final t = _branchCtrl.text.trim();
+                          return t.isEmpty || b.toLowerCase().contains(t.toLowerCase());
+                        }).toList();
+                  return Container(
+                    width: 90,
+                    height: 30,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1A1A2E),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _branchCtrl,
+                            style: const TextStyle(color: Colors.white, fontSize: 12),
+                            onChanged: (_) => _saveRepoPrefs(),
+                            decoration: InputDecoration(
+                              hintText: 'main',
+                              hintStyle: TextStyle(color: Colors.grey[700], fontSize: 11),
+                              border: InputBorder.none,
+                              contentPadding: const EdgeInsets.only(left: 6, bottom: 2),
+                              isDense: true,
+                            ),
+                          ),
+                        ),
+                        PopupMenuButton<String>(
+                          padding: EdgeInsets.zero,
+                          iconSize: 0,
+                          offset: const Offset(0, 30),
+                          color: const Color(0xFF1A1A2E),
+                          constraints: const BoxConstraints(maxWidth: 140, maxHeight: 250),
+                          child: const Icon(Icons.arrow_drop_down, color: Colors.white54, size: 18),
+                          onSelected: (v) {
                             _branchCtrl.text = v;
                             _saveRepoPrefs();
                           },
-                          decoration: InputDecoration(
-                            hintText: 'main',
-                            hintStyle: TextStyle(color: Colors.grey[700], fontSize: 11),
-                            filled: true,
-                            fillColor: const Color(0xFF1A1A2E),
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(8),
-                              borderSide: BorderSide.none,
-                            ),
-                            contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
-                            isDense: true,
-                            suffixIcon: const Icon(Icons.arrow_drop_down, color: Colors.white54, size: 16),
-                          ),
-                        );
-                      },
-                    );
-                  },
-                ),
+                          itemBuilder: (_) {
+                            if (filtered.isEmpty) {
+                              return [const PopupMenuItem(value: '', enabled: false, child: Text('No branches', style: TextStyle(color: Colors.white54, fontSize: 12)))];
+                            }
+                            return filtered.map((b) => PopupMenuItem(value: b, child: Text(b, style: const TextStyle(color: Colors.white, fontSize: 12)))).toList();
+                          },
+                        ),
+                      ],
+                    ),
+                  );
+                },
               ),
               const SizedBox(width: 6),
               // Mode label (code-only, plan mode hidden)
