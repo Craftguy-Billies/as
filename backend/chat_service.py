@@ -255,6 +255,17 @@ def get_repos() -> list[dict]:
     return result
 
 
+def _gh_headers(extra: dict | None = None) -> dict:
+    """GitHub API headers with optional auth token."""
+    h = {"Accept": "application/vnd.github+json"}
+    token = os.getenv("GITHUB_TOKEN", "")
+    if token:
+        h["Authorization"] = f"Bearer {token}"
+    if extra:
+        h.update(extra)
+    return h
+
+
 def _auto_append_log(repo: str, prompt: str, response: str, *, ok: bool) -> None:
     """Programmatically append a task entry to VIBECODER_LOG.md via GitHub API.
 
@@ -294,7 +305,7 @@ def _auto_append_log(repo: str, prompt: str, response: str, *, ok: bool) -> None
         existing_sha = ""
         get_resp = httpx.get(
             f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
-            headers={"Accept": "application/vnd.github.raw+json"},
+            headers=_gh_headers({"Accept": "application/vnd.github.raw+json"}),
             timeout=10,
         )
         if get_resp.status_code == 200:
@@ -306,7 +317,7 @@ def _auto_append_log(repo: str, prompt: str, response: str, *, ok: bool) -> None
         # Get SHA for update (need separate call without raw header)
         sha_resp = httpx.get(
             f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
-            headers={"Accept": "application/vnd.github+json"},
+            headers=_gh_headers(),
             timeout=10,
         )
         if sha_resp.status_code == 200:
@@ -322,16 +333,16 @@ def _auto_append_log(repo: str, prompt: str, response: str, *, ok: bool) -> None
 
         put_resp = httpx.put(
             f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
-            headers={"Accept": "application/vnd.github+json"},
+            headers=_gh_headers(),
             json=body,
             timeout=15,
         )
         if put_resp.status_code in (200, 201):
             logger.info("VIBECODER_LOG.md appended: %s — %s", ts, one_line)
-            # Clear task log cache so next poll picks up the update
             _task_log_cache.pop(repo, None)
         else:
-            logger.debug("VIBECODER_LOG.md append failed: HTTP %s", put_resp.status_code)
+            logger.debug("VIBECODER_LOG.md append failed: HTTP %s %s",
+                         put_resp.status_code, put_resp.text[:200])
     except Exception as e:
         logger.debug("VIBECODER_LOG.md append error: %s", e)
 
@@ -500,20 +511,17 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code") -> d
                 "timestamp": int(time.time() * 1000),
             })
             _persist_to_db()
+            conv_id = _conversation_id
 
-            # Auto-append to VIBECODER_LOG.md (programmatic enforcement)
-            _auto_append_log(repo, prompt, response, ok=True)
-
-            return {
-                "response": response,
-                "conversation_id": _conversation_id,
-            }
-        else:
-            _auto_append_log(repo, prompt, str(response), ok=False)
-            return {
-                "error": "Agent did not produce a response (timeout or conversation error)",
-                "conversation_id": _conversation_id,
-            }
+    if response:
+        _auto_append_log(repo, prompt, response, ok=True)
+        return {"response": response, "conversation_id": conv_id}
+    else:
+        _auto_append_log(repo, prompt, str(response), ok=False)
+        return {
+            "error": "Agent did not produce a response (timeout or conversation error)",
+            "conversation_id": _conversation_id,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -882,9 +890,7 @@ def get_task_log(repo: str) -> list[dict]:
     try:
         resp = httpx.get(
             f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
-            headers={
-                "Accept": "application/vnd.github.raw+json",
-            },
+            headers=_gh_headers({"Accept": "application/vnd.github.raw+json"}),
             timeout=10,
         )
         if resp.status_code != 200:
