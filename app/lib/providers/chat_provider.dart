@@ -499,9 +499,9 @@ class ChatProvider extends ChangeNotifier {
   }
 
   Future<void> fetchTaskLog() async {
-    if (_savedRepo.isEmpty) return;
+    if (serverRepo.isEmpty) return;
     try {
-      _taskLog = await _api.getTaskLog(_savedRepo);
+      _taskLog = await _api.getTaskLog(serverRepo);
       _notify();
     } catch (e) {
       logViewer('ChatProvider.fetchTaskLog: $e');
