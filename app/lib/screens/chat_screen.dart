@@ -511,7 +511,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       children: [
                         Text(
                           prov.queueTotal > 0
-                              ? 'Processing ${prov.queuePosition}/${prov.queueTotal}'
+                              ? '${prov.queueDone}/${prov.queueTotal} done'
                               : 'Processing…',
                           style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600),
                         ),
@@ -520,7 +520,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           ClipRRect(
                             borderRadius: BorderRadius.circular(2),
                             child: LinearProgressIndicator(
-                              value: prov.queuePosition / prov.queueTotal,
+                              value: prov.queueTotal > 0 ? prov.queueDone / prov.queueTotal : 0,
                               backgroundColor: const Color(0xFF2A2A2A),
                               valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF7C3AED)),
                               minHeight: 3,
@@ -545,7 +545,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 ],
               ),
             ),
-          // Per-prompt cancel chips — horizontal scrollable
+          // Per-prompt chips — horizontal scrollable, shows done/running/pending
           if (processing && prov.batchPrompts.isNotEmpty)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -556,7 +556,8 @@ class _ChatScreenState extends State<ChatScreen> {
                   scrollDirection: Axis.horizontal,
                   itemCount: prov.batchPrompts.length,
                   itemBuilder: (_, i) {
-                    final isRunning = i == prov.queuePosition - 1;  // position is 1-based display
+                    final isDone = i < prov.queueDone;        // already completed
+                    final isRunning = !isDone && i == prov.queuePosition;  // currently processing
                     final mode = i < prov.batchModes.length ? prov.batchModes[i] : 'code';
                     final isPlan = mode == 'plan';
                     final text = prov.batchPrompts[i];
@@ -565,9 +566,11 @@ class _ChatScreenState extends State<ChatScreen> {
                       padding: const EdgeInsets.only(right: 6),
                       child: Container(
                         decoration: BoxDecoration(
-                          color: isRunning
-                              ? const Color(0xFF312E81).withValues(alpha: 0.6)
-                              : const Color(0xFF2A2A3E),
+                          color: isDone
+                              ? const Color(0xFF1A3A1A).withValues(alpha: 0.6)
+                              : isRunning
+                                  ? const Color(0xFF312E81).withValues(alpha: 0.6)
+                                  : const Color(0xFF2A2A3E),
                           borderRadius: BorderRadius.circular(8),
                           border: isRunning
                               ? Border.all(color: const Color(0xFF7C3AED), width: 1)
@@ -601,18 +604,24 @@ class _ChatScreenState extends State<ChatScreen> {
                               child: Text(
                                 truncated,
                                 style: TextStyle(
-                                  color: isRunning ? Colors.white : Colors.white54,
+                                  color: isDone ? Colors.green : isRunning ? Colors.white : Colors.white54,
                                   fontSize: 11,
                                 ),
                               ),
                             ),
-                            GestureDetector(
-                              onTap: () => prov.cancelPrompt(i),
-                              child: const Padding(
+                            if (!isDone)
+                              GestureDetector(
+                                onTap: () => prov.cancelPrompt(i),
+                                child: const Padding(
+                                  padding: EdgeInsets.symmetric(horizontal: 6),
+                                  child: Icon(Icons.close, color: Colors.redAccent, size: 14),
+                                ),
+                              )
+                            else
+                              const Padding(
                                 padding: EdgeInsets.symmetric(horizontal: 6),
-                                child: Icon(Icons.close, color: Colors.redAccent, size: 14),
+                                child: Icon(Icons.check, color: Colors.green, size: 14),
                               ),
-                            ),
                           ],
                         ),
                       ),

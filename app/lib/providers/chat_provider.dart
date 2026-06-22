@@ -51,6 +51,7 @@ class ChatProvider extends ChangeNotifier {
   // Queue progress (updated from server every poll)
   int _queuePosition = 0;
   int _queueTotal = 0;
+  int _queueDone = 0;  // number of completed prompts
   int _pollFailures = 0;
   int _pollGeneration = 0;
   Timer? _pollTimer;
@@ -64,6 +65,7 @@ class ChatProvider extends ChangeNotifier {
   String? get error => _error;
   int get queuePosition => _queuePosition;
   int get queueTotal => _queueTotal;
+  int get queueDone => _queueDone;
   bool get isProcessing => _queueTotal > 0;
   String serverRepo = '';
   String serverBranch = '';
@@ -130,6 +132,7 @@ class ChatProvider extends ChangeNotifier {
       _error,
       _queuePosition,
       _queueTotal,
+      _queueDone,
       _showFromIndex,
       msgs.isEmpty ? 0 : msgs.last.timestamp,
       msgs.isEmpty ? 0 : msgs.first.timestamp,
@@ -277,6 +280,7 @@ class ChatProvider extends ChangeNotifier {
       _showFromIndex = 0;
       _queuePosition = 0;
       _queueTotal = 0;
+      _queueDone = 0;
       _pollTimer?.cancel();
       await _saveToCache();
       _notify();
@@ -327,12 +331,14 @@ class ChatProvider extends ChangeNotifier {
         logViewer('ChatProvider.send: unexpected status=${result['status']}');
         _error = (result['error']?.toString()) ?? 'Server did not accept the request';
         _queueTotal = 0;
+        _queueDone = 0;
         _notify();
       }
     } catch (e) {
       logViewer('ChatProvider.send: ERROR ${ApiService.friendlyError(e)}');
       _error = ApiService.friendlyError(e);
       _queueTotal = 0;
+      _queueDone = 0;
       _notify();
     }
   }
@@ -404,10 +410,11 @@ class ChatProvider extends ChangeNotifier {
         final batch = state['batch'] as Map<String, dynamic>?;
         if (batch != null) {
           final wasLoading = _loading;
-          logViewer('ChatProvider.poll: batch running=${batch['running']} pos=${batch['position']} total=${batch['total']} wasLoading=$wasLoading');
+          logViewer('ChatProvider.poll: batch running=${batch['running']} pos=${batch['position']} total=${batch['total']} done=${batch['done']} wasLoading=$wasLoading');
           _loading = batch['running'] == true;
           _queuePosition = (batch['position'] as int?) ?? _queuePosition;
           _queueTotal = (batch['total'] as int?) ?? _queueTotal;
+          _queueDone = (batch['done'] as int?) ?? _queuePosition;
 
           // Parse prompt list for per-prompt cancel UI
           final prompts = batch['prompts'] as List?;
@@ -473,6 +480,7 @@ class ChatProvider extends ChangeNotifier {
     _pollTimer?.cancel();
     _queuePosition = 0;
     _queueTotal = 0;
+    _queueDone = 0;
     _loading = false;
     _loadingSince = null;
     // Fetch messages for this repo from server
@@ -583,6 +591,7 @@ class ChatProvider extends ChangeNotifier {
     _loadingSince = null;
     _queuePosition = 0;
     _queueTotal = 0;
+    _queueDone = 0;
     _batchPrompts = [];
     _batchModes = [];
     _notify();
@@ -624,6 +633,7 @@ class ChatProvider extends ChangeNotifier {
     _loadingSince = null;
     _queuePosition = 0;
     _queueTotal = 0;
+    _queueDone = 0;
     _notify();
 
     try {

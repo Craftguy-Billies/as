@@ -370,6 +370,8 @@ def get_state(repo: str = "", mode: str = "") -> dict:
     with _lock:
         if repo or mode:
             _current_repo_key = _repo_key(repo)
+        # Build batch status: position is 0-based index of current prompt.
+        # done = number of completed prompts (prompts[0:done] are finished).
         return {
             "messages": list(_msgs()),
             "conversation_id": _conversation_id,
@@ -382,8 +384,9 @@ def get_state(repo: str = "", mode: str = "") -> dict:
             "batch": {
                 "running": _batch_running,
                 "cancelled": _batch_cancelled,
-                "position": _batch_position + (1 if _batch_running else 0),
+                "position": _batch_position,
                 "total": _batch_total,
+                "done": _batch_position,
                 "prompts": list(_batch_prompts),
                 "modes": list(_batch_prompt_modes),
             },
@@ -501,6 +504,18 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code") -> d
 
     if not CLOUD_API_KEY:
         return {"error": "OPENHANDS_CLOUD_API_KEY not configured on server"}
+
+    # Guard: if a batch is running, auto-enqueue instead of processing directly.
+    # This prevents parallel send() calls which would interleave and cause
+    # conflicting conversation state (send-message on same conversation).
+    with _lock:
+        if _batch_running:
+            _batch_prompts.append(prompt)
+            _batch_prompt_modes.append(mode)
+            _batch_total = len(_batch_prompts)
+            _persist_to_db()
+            logger.info("Batch running — auto-enqueued prompt (now %d total)", _batch_total)
+            return {"status": "enqueued", "position": _batch_position, "total": _batch_total}
 
     # Reset event cursors so each message starts fresh
     _last_event_index = 0
