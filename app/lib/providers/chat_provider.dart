@@ -71,6 +71,9 @@ class ChatProvider extends ChangeNotifier {
   List<Map<String, dynamic>> _savedRepos = [];
   List<Map<String, dynamic>> get savedRepos => _savedRepos;
 
+  List<String> _branches = [];
+  List<String> get branches => _branches;
+
   List<Map<String, dynamic>> _taskLog = [];
   List<Map<String, dynamic>> get taskLog => _taskLog;
   String _taskLogRepo = '';
@@ -460,6 +463,8 @@ class ChatProvider extends ChangeNotifier {
     refreshRepos();
     // Load task log for this repo
     fetchTaskLog();
+    // Load branch list for this repo
+    fetchBranches();
   }
 
   Future<void> refreshRepos() async {
@@ -514,6 +519,17 @@ class ChatProvider extends ChangeNotifier {
       _notify();
     } catch (e) {
       logViewer('ChatProvider.fetchTaskLog: $e');
+    }
+  }
+
+  Future<void> fetchBranches() async {
+    if (serverRepo.isEmpty) return;
+    try {
+      _branches = await _api.getBranches(serverRepo);
+      logViewer('ChatProvider.fetchBranches: ${_branches.length} branches for $serverRepo');
+      _notify();
+    } catch (e) {
+      logViewer('ChatProvider.fetchBranches: $e');
     }
   }
 

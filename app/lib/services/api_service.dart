@@ -375,4 +375,17 @@ class ApiService {
     } catch (_) {}
     return [];
   }
+
+  Future<List<String>> getBranches(String repo) async {
+    if (repo.isEmpty) return [];
+    try {
+      final uri = Uri.parse('$_url/api/chat/branches').replace(queryParameters: {'repo': repo});
+      final resp = await http.get(uri).timeout(const Duration(seconds: 10));
+      if (resp.statusCode == 200) {
+        final list = json.decode(resp.body);
+        return (list as List).cast<String>();
+      }
+    } catch (_) {}
+    return [];
+  }
 }

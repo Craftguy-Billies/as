@@ -337,25 +337,41 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
               const SizedBox(width: 6),
-              // Branch input
+              // Branch dropdown
               SizedBox(
-                width: 72,
-                child: TextField(
-                  controller: _branchCtrl,
-                  style: const TextStyle(color: Colors.white, fontSize: 13),
-                  onChanged: (_) => _saveRepoPrefs(),
-                  decoration: InputDecoration(
-                    hintText: 'main',
-                    hintStyle: TextStyle(color: Colors.grey[700], fontSize: 12),
-                    filled: true,
-                    fillColor: const Color(0xFF1A1A2E),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide.none,
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                    isDense: true,
-                  ),
+                width: 80,
+                child: Consumer<ChatProvider>(
+                  builder: (_, prov, __) {
+                    final branches = prov.branches;
+                    final current = _branchCtrl.text.isEmpty ? 'main' : _branchCtrl.text;
+                    return DropdownButtonFormField<String>(
+                      value: branches.contains(current) ? current : null,
+                      hint: Text(current, style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                      isExpanded: true,
+                      icon: const Icon(Icons.arrow_drop_down, color: Colors.white54, size: 18),
+                      dropdownColor: const Color(0xFF1A1A2E),
+                      style: const TextStyle(color: Colors.white, fontSize: 12),
+                      decoration: InputDecoration(
+                        filled: true,
+                        fillColor: const Color(0xFF1A1A2E),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide.none,
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                        isDense: true,
+                      ),
+                      items: branches.isEmpty
+                          ? [DropdownMenuItem(value: current, child: Text(current, style: const TextStyle(fontSize: 12)))]
+                          : branches.map((b) => DropdownMenuItem(value: b, child: Text(b, style: const TextStyle(fontSize: 12)))).toList(),
+                      onChanged: (val) {
+                        if (val != null) {
+                          _branchCtrl.text = val;
+                          _saveRepoPrefs();
+                        }
+                      },
+                    );
+                  },
                 ),
               ),
               const SizedBox(width: 6),

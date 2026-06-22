@@ -113,7 +113,7 @@ async def stream_logs():
 # Chat (token-efficient conversation reuse)
 # ---------------------------------------------------------------------------
 
-from chat_service import send as chat_send, reset as chat_reset, get_state as chat_state, get_repos as chat_repos, get_task_log as chat_task_log, enqueue_batch as chat_enqueue_batch, cancel_batch as chat_cancel_batch, cancel_batch_prompt as chat_cancel_batch_prompt
+from chat_service import send as chat_send, reset as chat_reset, get_state as chat_state, get_repos as chat_repos, get_task_log as chat_task_log, enqueue_batch as chat_enqueue_batch, cancel_batch as chat_cancel_batch, cancel_batch_prompt as chat_cancel_batch_prompt, get_branches as chat_branches
 
 
 class ChatRequest(BaseModel):
@@ -159,6 +159,16 @@ async def chat_task_log_entries(repo: str = Query("")):
         return []
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, chat_task_log, repo)
+    return result
+
+
+@app.get("/api/chat/branches")
+async def chat_branches_list(repo: str = Query("")):
+    """Return branch list for a GitHub repo."""
+    if not repo:
+        return []
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, chat_branches, repo)
     return result
 
 

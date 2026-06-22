@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/task_provider.dart';
 import '../providers/settings_provider.dart';
+import '../providers/chat_provider.dart';
 import '../services/api_service.dart';
 import '../services/preferences_service.dart';
 import '../widgets/task_tile.dart';
@@ -257,22 +258,39 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                     const SizedBox(width: 6),
                     SizedBox(
-                      width: 72,
-                      child: TextField(
-                        controller: _branchCtrl,
-                        style: const TextStyle(color: Colors.white70, fontSize: 14),
-                        decoration: InputDecoration(
-                          hintText: 'main',
-                          hintStyle: TextStyle(color: Colors.grey[700]),
-                          filled: true,
-                          fillColor: const Color(0xFF1A1A2E),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide.none,
-                          ),
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-                          isDense: true,
-                        ),
+                      width: 80,
+                      child: Consumer<ChatProvider>(
+                        builder: (_, prov, __) {
+                          final branches = prov.branches;
+                          final current = _branchCtrl.text.isEmpty ? 'main' : _branchCtrl.text;
+                          return DropdownButtonFormField<String>(
+                            value: branches.contains(current) ? current : null,
+                            hint: Text(current, style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                            isExpanded: true,
+                            icon: const Icon(Icons.arrow_drop_down, color: Colors.white54, size: 18),
+                            dropdownColor: const Color(0xFF1A1A2E),
+                            style: const TextStyle(color: Colors.white, fontSize: 12),
+                            decoration: InputDecoration(
+                              filled: true,
+                              fillColor: const Color(0xFF1A1A2E),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: BorderSide.none,
+                              ),
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                              isDense: true,
+                            ),
+                            items: branches.isEmpty
+                                ? [DropdownMenuItem(value: current, child: Text(current, style: const TextStyle(fontSize: 12)))]
+                                : branches.map((b) => DropdownMenuItem(value: b, child: Text(b, style: const TextStyle(fontSize: 12)))).toList(),
+                            onChanged: (val) {
+                              if (val != null) {
+                                _branchCtrl.text = val;
+                                _saveRepoPrefs();
+                              }
+                            },
+                          );
+                        },
                       ),
                     ),
                     const SizedBox(width: 6),
