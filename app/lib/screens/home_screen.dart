@@ -20,7 +20,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final _promptCtrl = TextEditingController();
   final _repoCtrl = TextEditingController();
   final _branchCtrl = TextEditingController();
-  String _mode = 'code';
+  // _mode removed (always 'code')
   bool _sending = false;
 
   @override
@@ -29,7 +29,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final prefs = context.read<PreferencesService>();
     _repoCtrl.text = prefs.lastRepo;
     _branchCtrl.text = prefs.lastBranch;
-    _mode = prefs.lastMode;
+    // _mode removed (always 'code')
     WidgetsBinding.instance.addPostFrameCallback((_) => _autoConnect());
     // Populate branch dropdown on cold start
     context.read<ChatProvider>().loadFromCache().then((_) {
@@ -86,10 +86,10 @@ class _HomeScreenState extends State<HomeScreen> {
       final branch = _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim();
       final taskProv = context.read<TaskProvider>();
       final task = await taskProv
-          .createPrompt(prompt: prompt, repo: repo, branch: branch, mode: _mode)
+          .createPrompt(prompt: prompt, repo: repo, branch: branch, mode: 'code')
           .timeout(const Duration(seconds: 15));
       if (task != null && mounted) {
-        context.read<PreferencesService>().saveLastPrompt(repo, branch, _mode);
+        context.read<PreferencesService>().saveLastPrompt(repo, branch, 'code');
         _promptCtrl.clear();
         Navigator.pushNamed(context, '/tasks/${task.id}');
       } else {
@@ -267,7 +267,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     const SizedBox(width: 6),
                     BranchPopup(
                       controller: _branchCtrl,
-                      onChanged: () => context.read<PreferencesService>().saveLastPrompt(_repoCtrl.text, _branchCtrl.text, _mode),
+                      onChanged: () => context.read<PreferencesService>().saveLastPrompt(_repoCtrl.text, _branchCtrl.text, 'code'),
                       width: 90,
                       height: 34,
                       borderRadius: 12,

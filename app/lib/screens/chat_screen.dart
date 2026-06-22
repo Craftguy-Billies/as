@@ -21,7 +21,6 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _hasLoaded = false;
   bool _showRepoBar = false;
   int _lastMsgCount = -1;  // auto-scroll to bottom when new msgs arrive
-  String _mode = 'code';
   String _activeModel = '';
 
   @override
@@ -31,22 +30,27 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _init() async {
-    try {
-      final prov = context.read<ChatProvider>();
-      await prov.loadFromCache();
-    } catch (_) {}
-    if (mounted) setState(() => _hasLoaded = true);
-    // Restore last repo/branch/mode from preferences
+    // Restore last repo/branch from preferences
     try {
       final prefs = await _loadPrefs();
       _repoCtrl.text = prefs['repo'] ?? '';
       _branchCtrl.text = prefs['branch'] ?? '';
       setState(() {
-        _mode = prefs['mode'] ?? 'code';
-        // Auto-show repo bar if a repo was previously configured
         if ((prefs['repo'] ?? '').isNotEmpty) _showRepoBar = true;
       });
     } catch (_) {}
+
+    // Populate provider with saved repo + fetch branches, then load messages
+    final prov = context.read<ChatProvider>();
+    final savedRepo = _repoCtrl.text.trim();
+    if (savedRepo.isNotEmpty) {
+      prov.initRepoFromHome(savedRepo);
+    }
+    try {
+      await prov.loadFromCache();
+    } catch (_) {}
+    if (mounted) setState(() => _hasLoaded = true);
+
     // Load model from server
     try {
       final sp = await SharedPreferences.getInstance();
@@ -69,7 +73,7 @@ class _ChatScreenState extends State<ChatScreen> {
       await Future.wait([
         sp.setString('last_repo', _repoCtrl.text.trim()),
         sp.setString('last_branch', _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim()),
-        sp.setString('last_mode', _mode),
+        sp.setString('last_mode', 'code'),
       ]);
     } catch (_) {}
   }
@@ -89,7 +93,16 @@ class _ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty) return;
 
     final repo = _repoCtrl.text.trim();
-    if (repo.isNotEmpty && !RegExp(r'^[\w.-]+/[\w.-]+$').hasMatch(repo)) {
+    if (repo.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please enter a repository (owner/repo)'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+    if (!RegExp(r'^[\w.-]+/[\w.-]+$').hasMatch(repo)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Invalid repo format. Use: owner/repo'),
@@ -105,8 +118,8 @@ class _ChatScreenState extends State<ChatScreen> {
     final branch = _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim();
     final prov = context.read<ChatProvider>();
 
-    debugPrint('ChatScreen._send: mode=$_mode repo=$repo');
-    prov.send(text, repo: repo, branch: branch, mode: _mode);
+    debugPrint('ChatScreen._send: mode=code repo=$repo');
+    prov.send(text, repo: repo, branch: branch, mode: 'code');
   }
 
   @override
@@ -137,9 +150,7 @@ class _ChatScreenState extends State<ChatScreen> {
             final activeRepo = chatProv.serverRepo.isNotEmpty
                 ? chatProv.serverRepo
                 : _repoCtrl.text.trim();
-            final activeMode = chatProv.serverMode.isNotEmpty
-                ? chatProv.serverMode
-                : _mode;
+            final activeMode = 'code';
             final parts = <String>[];
             if (activeRepo.isNotEmpty) parts.add(activeRepo);
             if (activeRepo.isNotEmpty && chatProv.serverBranch.isNotEmpty) parts.add(chatProv.serverBranch);
@@ -289,7 +300,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         onChanged: (_) => _saveRepoPrefs(),
                         onSubmitted: (_) {
                           final r = _repoCtrl.text.trim();
-                          if (r.isNotEmpty) prov.switchRepo(r, _mode, branch: _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim());
+                          if (r.isNotEmpty) prov.switchRepo(r, 'code', branch: _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim());
                         },
                         decoration: InputDecoration(
                           hintText: 'owner/repo',
@@ -313,12 +324,10 @@ class _ChatScreenState extends State<ChatScreen> {
                         tooltip: 'Saved repos',
                         onSelected: (r) {
                           final repo = r['repo']?.toString() ?? '';
-                          final mode = r['mode']?.toString() ?? 'code';
                           _repoCtrl.text = repo == '(none)' ? '' : repo;
                           _saveRepoPrefs();
                           if (repo.isNotEmpty) {
-                            _mode = mode;
-                            prov.switchRepo(repo, mode, branch: _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim());
+                            prov.switchRepo(repo, 'code', branch: _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim());
                           }
                         },
                         itemBuilder: (_) => prov.savedRepos.map((r) {

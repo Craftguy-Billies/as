@@ -66,7 +66,7 @@ class ChatProvider extends ChangeNotifier {
   int get queueTotal => _queueTotal;
   bool get isProcessing => _queueTotal > 0;
   String serverRepo = '';
-  String serverBranch = 'main';
+  String serverBranch = '';
   String serverMode = 'code';
   List<Map<String, dynamic>> _savedRepos = [];
   List<Map<String, dynamic>> get savedRepos => _savedRepos;
@@ -224,7 +224,7 @@ class ChatProvider extends ChangeNotifier {
         _loadingSince = DateTime.now();
         _notify();
         _startPolling(repo: state?['repo']?.toString() ?? '',
-                      branch: 'main',
+                      branch: state?['branch']?.toString() ?? '',
                       mode: state?['mode']?.toString() ?? 'code');
       }
     } catch (e) {
@@ -249,7 +249,7 @@ class ChatProvider extends ChangeNotifier {
   Future<void> send(
     String prompt, {
     String repo = '',
-    String branch = 'main',
+    String branch = '',
     String mode = 'code',
   }) async {
     final trimmed = prompt.trim();
@@ -446,7 +446,7 @@ class ChatProvider extends ChangeNotifier {
     fetchBranches();
   }
 
-  Future<void> switchRepo(String repo, String mode, {String branch = 'main'}) async {
+  Future<void> switchRepo(String repo, String mode, {String branch = ''}) async {
     if (repo == serverRepo && mode == serverMode && branch == serverBranch) {
       // Same context — but branches may be stale on cold start
       if (_branches.isEmpty && repo.isNotEmpty) {
