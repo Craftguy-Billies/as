@@ -941,7 +941,14 @@ class _TypingIndicatorState extends State<_TypingIndicator>
 // ---------------------------------------------------------------------------
 // Task queue bottom sheet
 // ---------------------------------------------------------------------------
-class _TaskLogSheet extends StatelessWidget {
+class _TaskLogSheet extends StatefulWidget {
+  @override
+  State<_TaskLogSheet> createState() => _TaskLogSheetState();
+}
+
+class _TaskLogSheetState extends State<_TaskLogSheet> {
+  int? _expandedIndex;
+
   @override
   Widget build(BuildContext context) {
     return DraggableScrollableSheet(
@@ -1037,104 +1044,160 @@ class _TaskLogSheet extends StatelessWidget {
                 final status = (e['status'] ?? '').toString();
                 final isOK = status.contains('[OK]') || status.contains('✅') || status.toLowerCase().contains('success');
                 final isFail = status.contains('[FAIL]') || status.contains('❌') || status.toLowerCase().contains('failed');
-                return Container(
-                  margin: const EdgeInsets.only(bottom: 10),
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1A1A1A),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: isOK
-                          ? Colors.green.withValues(alpha: 0.3)
-                          : isFail
-                              ? Colors.red.withValues(alpha: 0.3)
-                              : Colors.grey.withValues(alpha: 0.2),
-                    ),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // Row 1: status icon + AI report (main content)
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.only(top: 2),
-                            child: Icon(
-                              isOK
-                                  ? Icons.check_circle_outline
-                                  : isFail
-                                      ? Icons.cancel_outlined
-                                      : Icons.warning_amber_outlined,
-                              size: 18,
-                              color: isOK
-                                  ? Colors.green
-                                  : isFail
-                                      ? Colors.redAccent
-                                      : Colors.orange,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              (e['details'] ?? e['summary'] ?? '').toString(),
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
-                              ),
-                              maxLines: 4,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ],
+                final isExpanded = _expandedIndex == (i - 1);
+                return GestureDetector(
+                  onTap: () => setState(() {
+                    _expandedIndex = isExpanded ? null : (i - 1);
+                  }),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
+                    margin: const EdgeInsets.only(bottom: 10),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1A1A1A),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: isOK
+                            ? Colors.green.withValues(alpha: 0.3)
+                            : isFail
+                                ? Colors.red.withValues(alpha: 0.3)
+                                : Colors.grey.withValues(alpha: 0.2),
                       ),
-                      // Row 2: user prompt (secondary)
-                      if ((e['request'] ?? '').isNotEmpty &&
-                          (e['request'] ?? '') != (e['summary'] ?? '')) ...[
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Row 1: status icon + AI report
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.only(top: 2),
+                              child: Icon(
+                                isOK
+                                    ? Icons.check_circle_outline
+                                    : isFail
+                                        ? Icons.cancel_outlined
+                                        : Icons.warning_amber_outlined,
+                                size: 18,
+                                color: isOK
+                                    ? Colors.green
+                                    : isFail
+                                        ? Colors.redAccent
+                                        : Colors.orange,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                (e['details'] ?? e['summary'] ?? '').toString(),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                                maxLines: isExpanded ? null : 4,
+                                overflow: isExpanded ? null : TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                        // Expanded section: full request + status
+                        AnimatedCrossFade(
+                          firstChild: const SizedBox(width: double.infinity),
+                          secondChild: Padding(
+                            padding: const EdgeInsets.only(top: 10),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                // Status line
+                                Row(
+                                  children: [
+                                    Icon(
+                                      isOK
+                                          ? Icons.check_circle
+                                          : isFail
+                                              ? Icons.cancel
+                                              : Icons.warning_amber,
+                                      size: 14,
+                                      color: isOK
+                                          ? Colors.green
+                                          : isFail
+                                              ? Colors.redAccent
+                                              : Colors.orange,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      status,
+                                      style: TextStyle(
+                                        color: isOK
+                                            ? Colors.green
+                                            : isFail
+                                                ? Colors.redAccent
+                                                : Colors.orange,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                // Full request
+                                if ((e['request'] ?? '').isNotEmpty) ...[
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    'Your request:',
+                                    style: TextStyle(color: Colors.grey[600], fontSize: 10),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    e['request']!,
+                                    style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                                  ),
+                                ],
+                                if ((e['files'] ?? '').isNotEmpty) ...[
+                                  const SizedBox(height: 6),
+                                  Row(
+                                    children: [
+                                      Icon(Icons.insert_drive_file_outlined, size: 12, color: Colors.grey[600]),
+                                      const SizedBox(width: 4),
+                                      Expanded(
+                                        child: Text(
+                                          e['files']!,
+                                          style: TextStyle(color: Colors.grey[500], fontSize: 11),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                          crossFadeState: isExpanded
+                              ? CrossFadeState.showSecond
+                              : CrossFadeState.showFirst,
+                          duration: const Duration(milliseconds: 200),
+                        ),
+                        // Timestamp + tap hint
                         const SizedBox(height: 6),
                         Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
                           children: [
-                            Icon(Icons.chat_bubble_outline, size: 11, color: Colors.grey[600]),
-                            const SizedBox(width: 4),
-                            Expanded(
-                              child: Text(
-                                e['request']!,
-                                style: TextStyle(color: Colors.grey[500], fontSize: 11),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
+                            if (!isExpanded)
+                              Padding(
+                                padding: const EdgeInsets.only(right: 8),
+                                child: Text(
+                                  'Tap to expand',
+                                  style: TextStyle(color: Colors.grey[800], fontSize: 9),
+                                ),
                               ),
+                            Text(
+                              e['timestamp'] ?? '',
+                              style: TextStyle(color: Colors.grey[700], fontSize: 10),
                             ),
                           ],
                         ),
                       ],
-                      if ((e['files'] ?? '').isNotEmpty) ...[
-                        const SizedBox(height: 4),
-                        Row(
-                          children: [
-                            Icon(Icons.insert_drive_file_outlined, size: 12, color: Colors.grey[600]),
-                            const SizedBox(width: 4),
-                            Expanded(
-                              child: Text(
-                                e['files']!,
-                                style: TextStyle(color: Colors.grey[600], fontSize: 10),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.end,
-                        children: [
-                          Text(
-                            e['timestamp'] ?? '',
-                            style: TextStyle(color: Colors.grey[700], fontSize: 10),
-                          ),
-                        ],
-                      ),
-                    ],
+                    ),
                   ),
                 );
               },
