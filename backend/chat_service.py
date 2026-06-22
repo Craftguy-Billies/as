@@ -1106,7 +1106,8 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                             parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip()]
                             if parts:
                                 raw = "\n".join(parts)
-                                logger.info("Trajectory zip: found agent MessageEvent — raw (%.100s...)", raw)
+                                evt_ts = evt.get("timestamp", 0)
+                                logger.info("Trajectory zip: found agent MessageEvent ts=%s — raw (%.100s...)", evt_ts, raw)
                                 all_new_msgs = [raw]
                                 found = True
                                 break
