@@ -982,7 +982,7 @@ class _TaskLogSheet extends StatelessWidget {
               if (ts.isEmpty) return true;
               try {
                 final t = DateTime.parse(ts);
-                return now.difference(t).inHours < 24;
+                return now.difference(t).inHours < 72;
               } catch (_) {
                 return true;
               }
