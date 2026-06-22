@@ -383,9 +383,14 @@ class ApiService {
       final resp = await http.get(uri).timeout(const Duration(seconds: 10));
       if (resp.statusCode == 200) {
         final list = json.decode(resp.body);
-        return (list as List).cast<String>();
+        final branches = (list as List).cast<String>();
+        debugPrint('getBranches($repo): ${branches.length} branches');
+        return branches;
       }
-    } catch (_) {}
+      debugPrint('getBranches($repo): HTTP ${resp.statusCode} ${resp.body}');
+    } catch (e) {
+      debugPrint('getBranches($repo): ERROR $e');
+    }
     return [];
   }
 }

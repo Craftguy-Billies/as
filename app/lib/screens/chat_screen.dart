@@ -342,11 +342,11 @@ class _ChatScreenState extends State<ChatScreen> {
               Consumer<ChatProvider>(
                 builder: (_, prov, __) {
                   final branches = prov.branches;
+                  final typed = _branchCtrl.text.trim();
                   final filtered = branches.isEmpty
                       ? <String>[]
                       : branches.where((b) {
-                          final t = _branchCtrl.text.trim();
-                          return t.isEmpty || b.toLowerCase().contains(t.toLowerCase());
+                          return typed.isEmpty || b.toLowerCase().contains(typed.toLowerCase());
                         }).toList();
                   return Container(
                     width: 90,
@@ -387,10 +387,21 @@ class _ChatScreenState extends State<ChatScreen> {
                             _saveRepoPrefs();
                           },
                           itemBuilder: (_) {
-                            if (filtered.isEmpty) {
-                              return [const PopupMenuItem(value: '', enabled: false, child: Text('No branches', style: TextStyle(color: Colors.white54, fontSize: 12)))];
+                            if (branches.isEmpty && !prov.branchesAttempted) {
+                              return [const PopupMenuItem(value: '', enabled: false, child: Text('Loading…', style: TextStyle(color: Colors.white54, fontSize: 12)))];
                             }
-                            return filtered.map((b) => PopupMenuItem(value: b, child: Text(b, style: const TextStyle(color: Colors.white, fontSize: 12)))).toList();
+                            final items = <PopupMenuItem<String>>[];
+                            if (filtered.isEmpty) {
+                              items.add(const PopupMenuItem(value: '', enabled: false, child: Text('No branches found', style: TextStyle(color: Colors.white54, fontSize: 12))));
+                            }
+                            for (final b in filtered) {
+                              items.add(PopupMenuItem(value: b, child: Text(b, style: const TextStyle(color: Colors.white, fontSize: 12))));
+                            }
+                            // Always include currently typed text as an option
+                            if (typed.isNotEmpty && !filtered.contains(typed)) {
+                              items.add(PopupMenuItem(value: typed, child: Text('Use "$typed"', style: const TextStyle(color: Colors.blueAccent, fontSize: 12))));
+                            }
+                            return items;
                           },
                         ),
                       ],

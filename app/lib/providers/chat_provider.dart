@@ -73,6 +73,8 @@ class ChatProvider extends ChangeNotifier {
 
   List<String> _branches = [];
   List<String> get branches => _branches;
+  bool get branchesAttempted => _branchesAttempted;
+  bool _branchesAttempted = false;  // differentiate "loading" from "empty"
 
   List<Map<String, dynamic>> _taskLog = [];
   List<Map<String, dynamic>> get taskLog => _taskLog;
@@ -456,6 +458,7 @@ class ChatProvider extends ChangeNotifier {
     serverBranch = branch;
     serverMode = mode;
     _branches = [];  // clear immediately to avoid stale flash from previous repo
+    _branchesAttempted = false;
     _pollTimer?.cancel();
     _queuePosition = 0;
     _queueTotal = 0;
@@ -548,10 +551,13 @@ class ChatProvider extends ChangeNotifier {
     if (serverRepo.isEmpty) return;
     try {
       _branches = await _api.getBranches(serverRepo);
+      _branchesAttempted = true;
       logViewer('ChatProvider.fetchBranches: ${_branches.length} branches for $serverRepo');
       _notify();
     } catch (e) {
+      _branchesAttempted = true;
       logViewer('ChatProvider.fetchBranches: $e');
+      _notify();
     }
   }
 
