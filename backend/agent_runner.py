@@ -241,12 +241,12 @@ def _build_default_mcp_config(mcp_servers: Optional[list[dict]] = None) -> Optio
             "args": ["mcp-server-fetch"],
         }
 
-    # Tavily web search if API key provided
+    # Tavily web search if API key provided (uvx = always available in sandbox)
     tavily_key = os.getenv("TAVILY_API_KEY", "")
     if tavily_key:
         servers["tavily"] = {
-            "command": "npx",
-            "args": ["-y", "@tavily/mcp-server-tavily"],
+            "command": "uvx",
+            "args": ["tavily-mcp"],
             "env": {"TAVILY_API_KEY": tavily_key},
         }
 
