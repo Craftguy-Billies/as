@@ -330,6 +330,7 @@ class ChatProvider extends ChangeNotifier {
       } else {
         logViewer('ChatProvider.send: unexpected status=${result['status']}');
         _error = (result['error']?.toString()) ?? 'Server did not accept the request';
+        _queuePosition = 0;
         _queueTotal = 0;
         _queueDone = 0;
         _notify();
@@ -337,6 +338,7 @@ class ChatProvider extends ChangeNotifier {
     } catch (e) {
       logViewer('ChatProvider.send: ERROR ${ApiService.friendlyError(e)}');
       _error = ApiService.friendlyError(e);
+      _queuePosition = 0;
       _queueTotal = 0;
       _queueDone = 0;
       _notify();
@@ -354,6 +356,9 @@ class ChatProvider extends ChangeNotifier {
         _pollTimer?.cancel();
         _loading = false;
         _loadingSince = null;
+        _queuePosition = 0;
+        _queueTotal = 0;
+        _queueDone = 0;
         _error = 'Polling timed out (30 min). Queue may still run on server.';
         logViewer('ChatProvider.poll: TIMEOUT');
         _notify();

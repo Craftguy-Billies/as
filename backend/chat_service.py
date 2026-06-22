@@ -243,7 +243,7 @@ def _log_sync_to_github(repo: str, entries: list[dict]) -> None:
 # -- Restore state from DB on module load --
 def _restore_from_db() -> None:
     global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _last_event_timestamp, _messages_by_repo, _current_repo_key
-    global _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_running
+    global _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_running, _batch_cancelled, _batch_skip_prompt
     global _msg_counter
     try:
         db = get_sync_db()
@@ -268,12 +268,16 @@ def _restore_from_db() -> None:
             _batch_prompt_modes = data.get("batch_prompt_modes", [])
             _batch_position = data.get("batch_position", 0)
             _batch_total = data.get("batch_total", 0)
+            _batch_cancelled = data.get("batch_cancelled", False)
+            _batch_skip_prompt = data.get("batch_skip_prompt", False)
             # Auto-resume if server restarted mid-batch (remaining prompts in queue)
             _batch_running = _batch_position < _batch_total and len(_batch_prompts) > _batch_position
             _msg_counter = data.get("msg_counter", 0)
-            if _batch_running:
+            if _batch_running and not _batch_cancelled:
                 threading.Thread(target=_process_batch_worker, daemon=True).start()
                 logger.info("Auto-resuming batch: %d/%d remaining", _batch_total - _batch_position, _batch_total)
+            elif _batch_cancelled:
+                logger.info("Batch was cancelled before restart — not resuming")
     except Exception as e:
         logger.warning("Failed to restore chat session from DB: %s", e)
 
@@ -302,6 +306,11 @@ def _persist_to_db() -> None:
             "batch_position": _batch_position,
             "batch_total": _batch_total,
             "batch_running": _batch_running,
+            "batch_cancelled": _batch_cancelled,
+            "batch_skip_prompt": _batch_skip_prompt,
+            "batch_repo": _batch_repo,
+            "batch_branch": _batch_branch,
+            "batch_mode": _batch_mode,
             "msg_counter": _msg_counter,
         })
         db.execute(
@@ -355,6 +364,7 @@ def reset() -> None:
         _seen_event_ids.clear()
         _sandbox_id = None
         _messages_by_repo.pop(_current_repo_key, None)  # clear current repo's history
+        _current_repo_key = ""
         _conversation_status = "idle"
         _persist_to_db()
     logger.info("Chat session reset")
