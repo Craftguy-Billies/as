@@ -400,6 +400,9 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                 if latest and response.startswith(latest):
                     response = response[len(latest):]
                 response = response.strip()
+            # If still nothing, use original — duplicate is better than silence
+            if not response and original.strip():
+                response = original.strip()
             logger.info("Phase 3: response after strip (%.100s...)", response)
             if not response:
                 return {
