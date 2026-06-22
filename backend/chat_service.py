@@ -130,13 +130,52 @@ def _log_sync_worker() -> None:
 
 
 def _log_sync_to_github(repo: str, entries: list[dict]) -> None:
-    """Write all cached entries to VIBECODER_LOG.md on GitHub."""
+    """Merge local entries with existing GitHub VIBECODER_LOG.md, then write back.
+
+    Reads the existing file from GitHub (if any), parses it, merges with local
+    entries, deduplicates by prompt prefix, and writes the merged result.
+    This prevents losing entries written by parallel processes or earlier sessions.
+    """
     if not repo or not entries:
         return
     try:
-        # Build markdown from entries
-        lines = []
-        for e in reversed(entries):  # chronological order
+        # 1. Fetch existing file from GitHub
+        existing_entries: list[dict] = []
+        existing_sha = ""
+        sha_resp = httpx.get(
+            f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
+            headers=_gh_headers(),
+            timeout=10,
+        )
+        if sha_resp.status_code == 200:
+            body = sha_resp.json()
+            existing_sha = body.get("sha", "")
+            raw = base64.b64decode(body.get("content", "")).decode("utf-8", errors="replace")
+            existing_entries = _parse_log_md(raw)
+        elif sha_resp.status_code != 404:
+            logger.warning("VIBECODER_LOG.md sync: GET failed HTTP %s", sha_resp.status_code)
+            return
+
+        # 2. Merge: local entries + existing, dedup by prompt prefix (case-insensitive)
+        seen = set()
+        merged: list[dict] = []
+        for e in entries:
+            key = (e.get("request", "") or e.get("summary", ""))[:200].strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                merged.append(e)
+        for e in existing_entries:
+            key = (e.get("request", "") or e.get("summary", ""))[:200].strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                merged.append(e)
+
+        # 3. Sort: latest first
+        merged.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
+
+        # 4. Build markdown (chronological: oldest first for readability)
+        lines = ["## VibeCoder Task Log\n"]
+        for e in reversed(merged):
             ts = e.get("timestamp", "")
             summary = e.get("summary", "")
             request = e.get("request", "")
@@ -145,47 +184,54 @@ def _log_sync_to_github(repo: str, entries: list[dict]) -> None:
             files = e.get("files", "")
             lines.append(f"\n\n## {ts} — {summary}")
             if request:
-                lines.append(f"**Request:** {request}")
+                lines.append(f"\n**Request:** {request}")
             if status:
-                lines.append(f"**Status:** {status}")
+                lines.append(f"\n**Status:** {status}")
             if details:
-                lines.append(f"**What was done:** {details}")
+                lines.append(f"\n**What was done:** {details}")
             if files:
-                lines.append(f"**Files:** {files}")
-        new_content = "## VibeCoder Task Log\n\n" + "".join(lines)
+                lines.append(f"\n**Files changed:** {files}")
+        new_content = "".join(lines)
 
-        # Get existing SHA
-        sha_resp = httpx.get(
-            f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
-            headers=_gh_headers(),
-            timeout=10,
-        )
-        existing_sha = ""
-        if sha_resp.status_code == 200:
-            existing_sha = sha_resp.json().get("sha", "")
-        elif sha_resp.status_code != 404:
-            logger.warning("VIBECODER_LOG.md sync: GET failed HTTP %s", sha_resp.status_code)
-            return
-
-        body = {
-            "message": f"vibecoder: log update ({len(entries)} tasks)",
+        # 5. PUT back to GitHub with retry
+        body_put = {
+            "message": f"vibecoder: log update ({len(merged)} tasks)",
             "content": base64.b64encode(new_content.encode()).decode(),
         }
         if existing_sha:
-            body["sha"] = existing_sha
+            body_put["sha"] = existing_sha
 
-        put_resp = httpx.put(
-            f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
-            headers=_gh_headers(),
-            json=body,
-            timeout=15,
-        )
-        if put_resp.status_code in (200, 201):
-            logger.info("VIBECODER_LOG.md synced: %s (%d tasks)", repo, len(entries))
+        put_ok = False
+        last_status = 0
+        for attempt in range(3):
+            if attempt > 0:
+                time.sleep(2 ** attempt)  # 2s, 4s, 8s backoff
+                # Re-fetch SHA in case it changed
+                sha_resp2 = httpx.get(
+                    f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
+                    headers=_gh_headers(), timeout=10,
+                )
+                if sha_resp2.status_code == 200:
+                    body_put["sha"] = sha_resp2.json().get("sha", existing_sha)
+
+            put_resp = httpx.put(
+                f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
+                headers=_gh_headers(),
+                json=body_put,
+                timeout=15,
+            )
+            last_status = put_resp.status_code
+            if last_status in (200, 201):
+                put_ok = True
+                break
+            logger.warning("VIBECODER_LOG.md sync attempt %d/3: HTTP %s",
+                          attempt + 1, last_status)
+
+        if put_ok:
+            logger.info("VIBECODER_LOG.md synced: %s (%d tasks merged)", repo, len(merged))
         else:
-            logger.warning("VIBECODER_LOG.md sync FAILED: HTTP %s — %s",
-                         put_resp.status_code, put_resp.text[:200])
-            # Re-mark dirty so it retries next time
+            logger.warning("VIBECODER_LOG.md sync FAILED after 3 attempts: HTTP %s — %s",
+                          last_status, "")
             with _log_sync_lock:
                 _log_dirty.add(repo)
     except Exception as e:
@@ -379,6 +425,7 @@ def _auto_append_log(repo: str, prompt: str, response: str, *, ok: bool) -> None
     
     GitHub sync happens asynchronously in a background thread.
     Deduplicates by checking if the prompt already appears.
+    Response summary is cleaned: markdown stripped, code blocks removed.
     """
     if not repo:
         return
@@ -388,16 +435,33 @@ def _auto_append_log(repo: str, prompt: str, response: str, *, ok: bool) -> None
         if len(prompt) > 80:
             one_line += "…"
 
-        # Summary: first 2-3 sentences from response, max ~80 words
+        # Clean response for summary: strip markdown, code blocks, links
         import re
-        sentences = re.split(r'(?<=[.!?])\s+', response.strip())
-        summary_sentences = sentences[:3]
-        summary = " ".join(summary_sentences)
-        words = summary.split()
-        if len(words) > 80:
-            summary = " ".join(words[:80]) + "…"
-        if not summary:
+        cleaned = response.strip() if response else ""
+        # Remove code blocks (```...```)
+        cleaned = re.sub(r'```[\s\S]*?```', ' ', cleaned)
+        # Remove inline code (`...`)
+        cleaned = re.sub(r'`[^`]+`', ' ', cleaned)
+        # Remove markdown links [...](...)
+        cleaned = re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', cleaned)
+        # Remove markdown headers (# ..., ## ...)
+        cleaned = re.sub(r'^#{1,6}\s+', '', cleaned, flags=re.MULTILINE)
+        # Remove bold/italic markers
+        cleaned = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', cleaned)
+        # Collapse whitespace
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+
+        if not cleaned:
             summary = "(no output)"
+        else:
+            sentences = re.split(r'(?<=[.!?])\s+', cleaned)
+            summary_sentences = [s for s in sentences[:3] if len(s) > 5]  # skip very short fragments
+            summary = " ".join(summary_sentences) if summary_sentences else cleaned[:200]
+            words = summary.split()
+            if len(words) > 80:
+                summary = " ".join(words[:80]) + "…"
+            if not summary:
+                summary = "(no output)"
 
         status = "[OK] Success" if ok else "[FAIL] Failed"
 
@@ -1060,30 +1124,50 @@ def _parse_entry_ts(ts: str) -> datetime:
 
 
 def _parse_log_md(content: str) -> list[dict]:
-    """Parse VIBECODER_LOG.md into task entry dicts."""
+    """Parse VIBECODER_LOG.md into task entry dicts.
+
+    Robust: accepts any well-formed entry with `## timestamp — summary`.
+    Fields are optional — missing fields get empty defaults.
+    Unknown fields are preserved as-is.
+    """
     import re
     entries = []
     # Match: ## 2026-06-22T10:27 — One-line summary
     header_pat = re.compile(r'^##\s+(\S+)\s+—\s+(.+)$', re.MULTILINE)
+    # Match any **Key:** Value line (key is anything between ** and **)
     field_pat = re.compile(r'^\*\*([^*]+)\*\*:\s*(.+)$', re.MULTILINE)
 
     # Split by ## headers
     sections = re.split(r'\n(?=## )', content)
     for section in sections:
         section = section.strip()
-        if not section:
+        if not section or not section.startswith("## "):
             continue
         header = header_pat.search(section)
         if not header:
-            continue
-        entry = {
-            "timestamp": header.group(1),
-            "summary": header.group(2),
-            "request": "",
-            "status": "unknown",
-            "details": "",
-            "files": "",
-        }
+            # Try relaxed: just "## timestamp" without em-dash
+            simple = re.match(r'^##\s+(\S+)', section)
+            if simple:
+                entry = {
+                    "timestamp": simple.group(1),
+                    "summary": section.split("\n", 1)[0][len(simple.group(0)):].strip().lstrip("—- "),
+                    "request": "",
+                    "status": "",
+                    "details": "",
+                    "files": "",
+                }
+            else:
+                continue
+        else:
+            entry = {
+                "timestamp": header.group(1),
+                "summary": header.group(2),
+                "request": "",
+                "status": "",
+                "details": "",
+                "files": "",
+            }
+
         for m in field_pat.finditer(section):
             key = m.group(1).strip().lower()
             val = m.group(2).strip()
@@ -1091,10 +1175,12 @@ def _parse_log_md(content: str) -> list[dict]:
                 entry["request"] = val
             elif "status" in key:
                 entry["status"] = val
-            elif "what was done" in key:
+            elif "what was done" in key or "details" in key:
                 entry["details"] = val
-            elif "files changed" in key:
+            elif "files" in key:
                 entry["files"] = val
+            # Unknown fields are silently preserved (not used by UI but not lost)
+
         entries.append(entry)
 
     # File is written oldest-first; reverse to latest-first (consistent with in-memory cache)
@@ -1156,29 +1242,6 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
             f"clone, fetch, push to, or interact with any other repository. "
             f"All file edits, git operations, and commits must stay within "
             f"`{repo}`.\n\n"
-            f"MANDATORY PROGRESS LOG: After completing your work, you MUST "
-            f"append a summary to `VIBECODER_LOG.md` at the repo root. "
-            f"Use this EXACT format (do NOT rewrite the file, only APPEND):\n\n"
-            f"```\n"
-            f"## {{{{timestamp}}}} — {{{{one-line summary}}}}\n"
-            f"**Request:** {{{{first sentence of the task}}}}\n"
-            f"**Status:** [OK] Success | [FAIL] Failed | [WARN] Partial\n"
-            f"**What was done:** {{{{2-4 sentence summary of every action taken, "
-            f"files changed, commits made. Be specific, not vague. "
-            f"Include what you DID, not what you thought about doing.}}}}\n"
-            f"**Files changed:** {{{{comma-separated list}}}}\n"
-            f"```\n\n"
-            f"Example:\n"
-            f"## 2026-06-22T10:27 — Fixed login redirect bug\n"
-            f"**Request:** Fix the redirect loop after login\n"
-            f"**Status:** [OK] Success\n"
-            f"**What was done:** Edited auth.dart to check session expiry "
-            f"before redirect. Added unit test for expired sessions. "
-            f"Committed with message 'fix: login redirect loop' and pushed.\n"
-            f"**Files changed:** lib/auth.dart, test/auth_test.dart\n\n"
-            f"This VIBECODER_LOG.md is how the user tracks progress across "
-            f"many queued tasks. Skip it and they lose visibility. "
-            f"Always append, never overwrite, include every task.\n\n"
             f"{prompt}"
         )
     else:
