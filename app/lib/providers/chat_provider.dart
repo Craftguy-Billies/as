@@ -436,6 +436,14 @@ class ChatProvider extends ChangeNotifier {
   }
 
   // -- Repo management --
+  /// Called from home screen init: set repo and fetch branches without
+  /// clearing messages or touching poll state (no conversation yet).
+  void initRepoFromHome(String repo) {
+    if (repo.isEmpty || repo == serverRepo) return;
+    serverRepo = repo;
+    fetchBranches();
+  }
+
   Future<void> switchRepo(String repo, String mode, {String branch = 'main'}) async {
     if (repo == serverRepo && mode == serverMode && branch == serverBranch) {
       // Same context — but branches may be stale on cold start

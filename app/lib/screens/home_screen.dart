@@ -31,7 +31,12 @@ class _HomeScreenState extends State<HomeScreen> {
     _mode = prefs.lastMode;
     WidgetsBinding.instance.addPostFrameCallback((_) => _autoConnect());
     // Populate branch dropdown on cold start
-    context.read<ChatProvider>().loadFromCache();
+    context.read<ChatProvider>().loadFromCache().then((_) {
+      final prov = context.read<ChatProvider>();
+      if (prov.serverRepo.isEmpty && _repoCtrl.text.trim().isNotEmpty) {
+        prov.initRepoFromHome(_repoCtrl.text.trim());
+      }
+    });
   }
 
   Future<void> _autoConnect() async {
