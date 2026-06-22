@@ -355,36 +355,6 @@ class _ChatScreenState extends State<ChatScreen> {
                         _branchCtrl.text = v;
                         _saveRepoPrefs();
                       },
-                      optionsViewBuilder: (_, onSelected, options) {
-                        if (options.isEmpty) {
-                          return const Align(
-                            alignment: Alignment.topLeft,
-                            child: Material(
-                              color: Color(0xFF1A1A2E),
-                              child: Padding(
-                                padding: EdgeInsets.all(12),
-                                child: Text('Loading branches…', style: TextStyle(color: Colors.white54, fontSize: 12)),
-                              ),
-                            ),
-                          );
-                        }
-                        return Align(
-                          alignment: Alignment.topLeft,
-                          child: Material(
-                            color: const Color(0xFF1A1A2E),
-                            child: ListView.builder(
-                              shrinkWrap: true,
-                              padding: EdgeInsets.zero,
-                              itemCount: options.length,
-                              itemBuilder: (_, i) => ListTile(
-                                dense: true,
-                                title: Text(options.elementAt(i), style: const TextStyle(color: Colors.white, fontSize: 12)),
-                                onTap: () => onSelected(options.elementAt(i)),
-                              ),
-                            ),
-                          ),
-                        );
-                      },
                       fieldViewBuilder: (_, ctrl, focusNode, ___) {
                         // Keep _branchCtrl in sync with autocomplete controller
                         ctrl.text = _branchCtrl.text.isEmpty ? 'main' : _branchCtrl.text;
