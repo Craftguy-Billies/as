@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/chat_provider.dart';
 import '../providers/task_provider.dart';
+import '../widgets/branch_popup.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -339,77 +340,9 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
               const SizedBox(width: 6),
               // Branch: free-text TextField + popup for suggestions
-              Consumer<ChatProvider>(
-                builder: (_, prov, __) {
-                  final branches = prov.branches;
-                  final typed = _branchCtrl.text.trim();
-                  final filtered = branches.isEmpty
-                      ? <String>[]
-                      : branches.where((b) {
-                          return typed.isEmpty || b.toLowerCase().contains(typed.toLowerCase());
-                        }).toList();
-                  return Container(
-                    width: 90,
-                    height: 30,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF1A1A2E),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _branchCtrl,
-                            style: const TextStyle(color: Colors.white, fontSize: 12),
-                            onChanged: (_) => _saveRepoPrefs(),
-                            decoration: InputDecoration(
-                              hintText: 'main',
-                              hintStyle: TextStyle(color: Colors.grey[700], fontSize: 11),
-                              border: InputBorder.none,
-                              contentPadding: const EdgeInsets.only(left: 6, bottom: 2),
-                              isDense: true,
-                            ),
-                          ),
-                        ),
-                        PopupMenuButton<String>(
-                          padding: EdgeInsets.zero,
-                          iconSize: 0,
-                          offset: const Offset(0, 30),
-                          color: const Color(0xFF1A1A2E),
-                          constraints: const BoxConstraints(maxWidth: 140, maxHeight: 250),
-                          child: const SizedBox(
-                            width: 28,
-                            height: 28,
-                            child: Icon(Icons.arrow_drop_down, color: Colors.white54, size: 20),
-                          ),
-                          onSelected: (v) {
-                            _branchCtrl.text = v;
-                            _saveRepoPrefs();
-                          },
-                          itemBuilder: (_) {
-                            if (branches.isEmpty && !prov.branchesAttempted && prov.serverRepo.isNotEmpty) {
-                              return [const PopupMenuItem(value: '', enabled: false, child: Text('Loading…', style: TextStyle(color: Colors.white54, fontSize: 12)))];
-                            }
-                            final items = <PopupMenuItem<String>>[];
-                            if (filtered.isEmpty && prov.serverRepo.isNotEmpty) {
-                              items.add(const PopupMenuItem(value: '', enabled: false, child: Text('No branches found', style: TextStyle(color: Colors.white54, fontSize: 12))));
-                            }
-                            for (final b in filtered) {
-                              items.add(PopupMenuItem(value: b, child: Text(b, style: const TextStyle(color: Colors.white, fontSize: 12))));
-                            }
-                            if (typed.isNotEmpty && !filtered.contains(typed)) {
-                              items.add(PopupMenuItem(value: typed, child: Text('Use "$typed"', style: const TextStyle(color: Colors.blueAccent, fontSize: 12))));
-                            }
-                            if (items.isEmpty) {
-                              items.add(const PopupMenuItem(value: '', enabled: false, child: Text('Type a branch name', style: TextStyle(color: Colors.white54, fontSize: 12))));
-                            }
-                            return items;
-                          },
-                        ),
-                      ],
-                    ),
-                  );
-                },
+              BranchPopup(
+                controller: _branchCtrl,
+                onChanged: () => _saveRepoPrefs(),
               ),
               const SizedBox(width: 6),
               // Mode label (code-only, plan mode hidden)

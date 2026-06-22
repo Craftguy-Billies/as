@@ -7,6 +7,7 @@ import '../providers/chat_provider.dart';
 import '../services/api_service.dart';
 import '../services/preferences_service.dart';
 import '../widgets/task_tile.dart';
+import '../widgets/branch_popup.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -264,78 +265,12 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ),
                     const SizedBox(width: 6),
-                    Consumer<ChatProvider>(
-                      builder: (_, prov, __) {
-                        final branches = prov.branches;
-                        final typed = _branchCtrl.text.trim();
-                        final filtered = branches.isEmpty
-                            ? <String>[]
-                            : branches.where((b) {
-                                return typed.isEmpty || b.toLowerCase().contains(typed.toLowerCase());
-                              }).toList();
-                        final prefsService = context.read<PreferencesService>();
-                        return Container(
-                          width: 90,
-                          height: 34,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF1A1A2E),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: TextField(
-                                  controller: _branchCtrl,
-                                  style: const TextStyle(color: Colors.white, fontSize: 12),
-                                  onChanged: (_) => prefsService.saveLastPrompt(_repoCtrl.text, _branchCtrl.text, _mode),
-                                  decoration: InputDecoration(
-                                    hintText: 'main',
-                                    hintStyle: TextStyle(color: Colors.grey[700], fontSize: 11),
-                                    border: InputBorder.none,
-                                    contentPadding: const EdgeInsets.only(left: 8, bottom: 2),
-                                    isDense: true,
-                                  ),
-                                ),
-                              ),
-                              PopupMenuButton<String>(
-                                padding: EdgeInsets.zero,
-                                iconSize: 0,
-                                offset: const Offset(0, 34),
-                                color: const Color(0xFF1A1A2E),
-                                constraints: const BoxConstraints(maxWidth: 140, maxHeight: 250),
-                                child: const SizedBox(
-                                  width: 32,
-                                  height: 32,
-                                  child: Icon(Icons.arrow_drop_down, color: Colors.white54, size: 22),
-                                ),
-                                onSelected: (v) {
-                                  _branchCtrl.text = v;
-                                  prefsService.saveLastPrompt(_repoCtrl.text, v, _mode);
-                                },
-                                itemBuilder: (_) {
-                                  if (branches.isEmpty && !prov.branchesAttempted && prov.serverRepo.isNotEmpty) {
-                                    return [const PopupMenuItem(value: '', enabled: false, child: Text('Loading…', style: TextStyle(color: Colors.white54, fontSize: 12)))];
-                                  }
-                                  final items = <PopupMenuItem<String>>[];
-                                  if (filtered.isEmpty && prov.serverRepo.isNotEmpty) {
-                                    items.add(const PopupMenuItem(value: '', enabled: false, child: Text('No branches found', style: TextStyle(color: Colors.white54, fontSize: 12))));
-                                  }
-                                  for (final b in filtered) {
-                                    items.add(PopupMenuItem(value: b, child: Text(b, style: const TextStyle(color: Colors.white, fontSize: 12))));
-                                  }
-                                  if (typed.isNotEmpty && !filtered.contains(typed)) {
-                                    items.add(PopupMenuItem(value: typed, child: Text('Use "$typed"', style: const TextStyle(color: Colors.blueAccent, fontSize: 12))));
-                                  }
-                                  if (items.isEmpty) {
-                                    items.add(const PopupMenuItem(value: '', enabled: false, child: Text('Type a branch name', style: TextStyle(color: Colors.white54, fontSize: 12))));
-                                  }
-                                  return items;
-                                },
-                              ),
-                            ],
-                          ),
-                        );
-                      },
+                    BranchPopup(
+                      controller: _branchCtrl,
+                      onChanged: () => context.read<PreferencesService>().saveLastPrompt(_repoCtrl.text, _branchCtrl.text, _mode),
+                      width: 90,
+                      height: 34,
+                      borderRadius: 12,
                     ),
                     const SizedBox(width: 6),
                     // Mode label (code-only, plan mode hidden)
