@@ -106,6 +106,7 @@ def _log_append_local(repo: str, entry: dict) -> None:
         _log_entries[repo] = []
     # Insert at beginning (latest first)
     _log_entries[repo].insert(0, entry)
+    _log_entries_ts[repo] = time.time()  # refresh cache TTL so new entries are visible
     _log_dirty.add(repo)
     # Kick background sync
     _start_log_sync()
@@ -1115,11 +1116,24 @@ def get_task_log(repo: str) -> list[dict]:
         )
         if resp.status_code == 200:
             content = resp.text
-            entries = _parse_log_md(content)
-            _log_entries[repo] = entries
+            gh_entries = _parse_log_md(content)
+            # Merge: in-memory entries (newest, via _auto_append_log) come first,
+            # then unique GitHub entries (that aren't already in memory).
+            # Otherwise _log_entries[repo] = gh_entries would overwrite and lose
+            # recent entries that haven't been synced to GitHub yet.
+            existing = _log_entries.get(repo, [])
+            existing_keys = {(e.get("timestamp", ""), e.get("summary", "")) for e in existing}
+            merged = list(existing)
+            for e in gh_entries:
+                key = (e.get("timestamp", ""), e.get("summary", ""))
+                if key not in existing_keys:
+                    merged.append(e)
+                    existing_keys.add(key)
+            _log_entries[repo] = merged
             _log_entries_ts[repo] = now
-            logger.info("VIBECODER_LOG.md loaded from GitHub: %s (%d entries)", repo, len(entries))
-            return _filter_72h(entries)
+            logger.info("VIBECODER_LOG.md loaded from GitHub: %s (%d gh + %d mem = %d merged)",
+                       repo, len(gh_entries), len(existing), len(merged))
+            return _filter_72h(merged)
         elif resp.status_code == 404:
             # No log file yet — empty cache
             if repo not in _log_entries:
