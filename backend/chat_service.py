@@ -298,6 +298,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             logger.info("Created conversation %s (repo=%s mode=%s)",
                         new_conv_id, repo, mode)
         else:
+            logger.info("Reusing conversation %s (repo=%s mode=%s)", current_conv_id, repo, mode)
             success, send_err = _send_message(current_conv_id, prompt)
             if not success:
                 # If sandbox is paused/gone, auto-recover: reset + create new
@@ -339,7 +340,6 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                         _sandbox_id = None
                         _persist_to_db()
                     return {"error": send_err or "Failed to send message to conversation"}
-            logger.info("Sent to conversation %s", current_conv_id)
     except httpx.HTTPStatusError as e:
         logger.error("HTTP error: %s %s", e.response.status_code, e.response.text[:200])
         if e.response.status_code in (404, 409, 410):
