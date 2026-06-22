@@ -16,7 +16,7 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from database import get_sync_db
 
@@ -88,6 +88,109 @@ _batch_skip_prompt: bool = False  # set by per-prompt cancel, tells worker to sk
 # Current conversation status (for UI visibility)
 _conversation_status: str = "idle"
 _CHAT_TIMEOUT = int(os.getenv("VIBECODE_CHAT_TIMEOUT", "600"))  # 10 min default
+
+# -- Task log: server-side cache, GitHub is mirror --
+# Primary source of truth: in-memory cache. Writes to GitHub are async/background.
+# This eliminates 1-3s delay per task and survives GitHub API downtime.
+_log_entries: dict[str, list[dict]] = {}       # repo → parsed entries (latest first)
+_log_entries_ts: dict[str, float] = {}          # repo → last fetch from GitHub
+_log_dirty: set[str] = set()                    # repos needing GitHub sync
+_log_sync_lock = threading.Lock()
+
+
+def _log_append_local(repo: str, entry: dict) -> None:
+    """Append entry to in-memory cache (instant). Mark repo dirty for GitHub sync."""
+    if repo not in _log_entries:
+        _log_entries[repo] = []
+    # Insert at beginning (latest first)
+    _log_entries[repo].insert(0, entry)
+    _log_dirty.add(repo)
+    # Kick background sync
+    _start_log_sync()
+
+
+def _start_log_sync() -> None:
+    """Start a background thread to sync dirty repos to GitHub."""
+    t = threading.Thread(target=_log_sync_worker, daemon=True, name="log-sync")
+    t.start()
+
+
+def _log_sync_worker() -> None:
+    """Sync ONE dirty repo to GitHub, then exit. Next append starts a new thread if needed."""
+    with _log_sync_lock:
+        if not _log_dirty:
+            return
+        repo = _log_dirty.pop()
+        if repo not in _log_entries:
+            return
+        entries = list(_log_entries[repo])
+    # Sync outside lock
+    _log_sync_to_github(repo, entries)
+
+
+def _log_sync_to_github(repo: str, entries: list[dict]) -> None:
+    """Write all cached entries to VIBECODER_LOG.md on GitHub."""
+    if not repo or not entries:
+        return
+    try:
+        # Build markdown from entries
+        lines = []
+        for e in reversed(entries):  # chronological order
+            ts = e.get("timestamp", "")
+            summary = e.get("summary", "")
+            request = e.get("request", "")
+            status = e.get("status", "")
+            details = e.get("details", "")
+            files = e.get("files", "")
+            lines.append(f"\n\n## {ts} — {summary}")
+            if request:
+                lines.append(f"**Request:** {request}")
+            if status:
+                lines.append(f"**Status:** {status}")
+            if details:
+                lines.append(f"**What was done:** {details}")
+            if files:
+                lines.append(f"**Files:** {files}")
+        new_content = "## VibeCoder Task Log\n\n" + "".join(lines)
+
+        # Get existing SHA
+        sha_resp = httpx.get(
+            f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
+            headers=_gh_headers(),
+            timeout=10,
+        )
+        existing_sha = ""
+        if sha_resp.status_code == 200:
+            existing_sha = sha_resp.json().get("sha", "")
+        elif sha_resp.status_code != 404:
+            logger.warning("VIBECODER_LOG.md sync: GET failed HTTP %s", sha_resp.status_code)
+            return
+
+        body = {
+            "message": f"vibecoder: log update ({len(entries)} tasks)",
+            "content": base64.b64encode(new_content.encode()).decode(),
+        }
+        if existing_sha:
+            body["sha"] = existing_sha
+
+        put_resp = httpx.put(
+            f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
+            headers=_gh_headers(),
+            json=body,
+            timeout=15,
+        )
+        if put_resp.status_code in (200, 201):
+            logger.info("VIBECODER_LOG.md synced: %s (%d tasks)", repo, len(entries))
+        else:
+            logger.warning("VIBECODER_LOG.md sync FAILED: HTTP %s — %s",
+                         put_resp.status_code, put_resp.text[:200])
+            # Re-mark dirty so it retries next time
+            with _log_sync_lock:
+                _log_dirty.add(repo)
+    except Exception as e:
+        logger.warning("VIBECODER_LOG.md sync error: %s", e)
+        with _log_sync_lock:
+            _log_dirty.add(repo)
 
 # -- Restore state from DB on module load --
 def _restore_from_db() -> None:
@@ -267,10 +370,10 @@ def _gh_headers(extra: dict | None = None) -> dict:
 
 
 def _auto_append_log(repo: str, prompt: str, response: str, *, ok: bool) -> None:
-    """Programmatically append a task entry to VIBECODER_LOG.md via GitHub API.
-
-    Deduplicates by checking if the prompt already appears in the log.
-    Skips silently if repo is empty or GitHub API fails.
+    """Append a task entry to the in-memory log cache (instant).
+    
+    GitHub sync happens asynchronously in a background thread.
+    Deduplicates by checking if the prompt already appears.
     """
     if not repo:
         return
@@ -293,56 +396,24 @@ def _auto_append_log(repo: str, prompt: str, response: str, *, ok: bool) -> None
 
         status = "[OK] Success" if ok else "[FAIL] Failed"
 
-        entry = (
-            f"\n\n## {ts} — {one_line}\n"
-            f"**Request:** {prompt[:200].replace(chr(10), ' ')}\n"
-            f"**Status:** {status}\n"
-            f"**What was done:** {summary}\n"
-        )
-
-        # Dedup: skip if identical prompt already logged
-        existing_content = ""
-        existing_sha = ""
-        get_resp = httpx.get(
-            f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
-            headers=_gh_headers({"Accept": "application/vnd.github.raw+json"}),
-            timeout=10,
-        )
-        if get_resp.status_code == 200:
-            existing_content = get_resp.text
-            if prompt[:200] in existing_content:
+        # Dedup against in-memory cache
+        existing = _log_entries.get(repo, [])
+        for e in existing:
+            if e.get("request", "")[:200] == prompt[:200]:
                 logger.debug("VIBECODER_LOG.md: skipping duplicate for %.80s", prompt)
                 return
 
-        # Get SHA for update (need separate call without raw header)
-        sha_resp = httpx.get(
-            f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
-            headers=_gh_headers(),
-            timeout=10,
-        )
-        if sha_resp.status_code == 200:
-            existing_sha = sha_resp.json().get("sha", "")
-
-        new_content = existing_content + entry
-        body = {
-            "message": f"vibecoder: {one_line[:60]}",
-            "content": base64.b64encode(new_content.encode()).decode(),
+        entry = {
+            "timestamp": ts,
+            "summary": one_line,
+            "request": prompt[:200].replace("\n", " "),
+            "status": status,
+            "details": summary,
+            "files": "",
         }
-        if existing_sha:
-            body["sha"] = existing_sha
+        _log_append_local(repo, entry)
+        logger.info("VIBECODER_LOG.md cached: %s — %s", ts, one_line)
 
-        put_resp = httpx.put(
-            f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
-            headers=_gh_headers(),
-            json=body,
-            timeout=15,
-        )
-        if put_resp.status_code in (200, 201):
-            logger.info("VIBECODER_LOG.md appended: %s — %s", ts, one_line)
-            _task_log_cache.pop(repo, None)
-        else:
-            logger.warning("VIBECODER_LOG.md append FAILED: HTTP %s — %s",
-                         put_resp.status_code, put_resp.text[:300])
     except Exception as e:
         logger.warning("VIBECODER_LOG.md append error: %s", e)
 
@@ -870,40 +941,66 @@ def _detect_default_branch(repo: str) -> str | None:
 
 
 # Cache for task log from VIBECODER_LOG.md (repo → (entries, cached_at), 5-min TTL)
-_task_log_cache: dict[str, tuple[list[dict], float]] = {}
 
 
 def get_task_log(repo: str) -> list[dict]:
-    """Fetch VIBECODER_LOG.md from GitHub repo and parse task entries.
+    """Fetch task log entries for a repo (latest first, 72h window).
 
-    Returns list of {timestamp, summary, request, status, details, files}.
-    Cached for 5 minutes.
+    Primary: in-memory cache (instant, updated by _auto_append_log).
+    Fallback: GitHub API (populates cache on first call for a repo).
     """
     now = time.time()
-    entry = _task_log_cache.get(repo)
-    if entry:
-        entries, cached_at = entry
-        if now - cached_at < 300:
-            return entries
-        del _task_log_cache[repo]
 
+    # Check in-memory cache
+    recent_ts = _log_entries_ts.get(repo, 0)
+    if repo in _log_entries and now - recent_ts < 300:
+        return _filter_72h(_log_entries[repo])
+
+    # Fallback: fetch from GitHub and populate cache
     try:
         resp = httpx.get(
             f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
             headers=_gh_headers({"Accept": "application/vnd.github.raw+json"}),
             timeout=10,
         )
-        if resp.status_code != 200:
-            logger.warning("VIBECODER_LOG.md not found for %s: HTTP %s", repo, resp.status_code)
+        if resp.status_code == 200:
+            content = resp.text
+            entries = _parse_log_md(content)
+            _log_entries[repo] = entries
+            _log_entries_ts[repo] = now
+            logger.info("VIBECODER_LOG.md loaded from GitHub: %s (%d entries)", repo, len(entries))
+            return _filter_72h(entries)
+        elif resp.status_code == 404:
+            # No log file yet — empty cache
+            if repo not in _log_entries:
+                _log_entries[repo] = []
+            _log_entries_ts[repo] = now
             return []
-
-        content = resp.text
-        entries = _parse_log_md(content)
-        _task_log_cache[repo] = (entries, now)
-        return entries
+        else:
+            logger.warning("VIBECODER_LOG.md fetch failed for %s: HTTP %s", repo, resp.status_code)
     except Exception as e:
-        logger.debug("Failed to fetch VIBECODER_LOG.md for %s: %s", repo, e)
-        return []
+        logger.warning("VIBECODER_LOG.md fetch error for %s: %s", repo, e)
+
+    # Return from cache even if stale
+    return _filter_72h(_log_entries.get(repo, []))
+
+
+def _filter_72h(entries: list[dict]) -> list[dict]:
+    """Filter entries to last 72 hours, already expected to be latest-first."""
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=72)
+    return [e for e in entries
+            if _parse_entry_ts(e.get("timestamp", "")) >= cutoff]
+
+
+def _parse_entry_ts(ts: str) -> datetime:
+    """Parse a timestamp from VIBECODER_LOG.md format."""
+    for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(ts[:16], fmt).replace(tzinfo=timezone.utc)
+        except (ValueError, IndexError):
+            continue
+    return datetime.min.replace(tzinfo=timezone.utc)
 
 
 def _parse_log_md(content: str) -> list[dict]:
