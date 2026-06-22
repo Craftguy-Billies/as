@@ -31,6 +31,7 @@ _conversation_repo: str = ""
 _conversation_branch: str = ""
 _conversation_mode: str = "code"
 _last_event_index: int = 0
+_last_event_timestamp: str = ""  # timestamp of last seen event for min_timestamp filtering
 _sandbox_id: str | None = None
 _event_kinds: set[str] = set()  # diagnostic: all event kinds seen in current conversation
 _seen_event_ids: set[str] = set()  # dedup: event IDs already added to chat
@@ -241,7 +242,7 @@ def _log_sync_to_github(repo: str, entries: list[dict]) -> None:
 
 # -- Restore state from DB on module load --
 def _restore_from_db() -> None:
-    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _messages_by_repo, _current_repo_key
+    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _last_event_timestamp, _messages_by_repo, _current_repo_key
     global _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_running
     global _msg_counter
     try:
@@ -257,6 +258,7 @@ def _restore_from_db() -> None:
             _conversation_branch = data.get("branch", "")
             _conversation_mode = data.get("mode", "code")
             _last_event_index = data.get("last_event_index", 0)
+            _last_event_timestamp = data.get("last_event_timestamp", "")
             _messages_by_repo = data.get("messages_by_repo", {})
             # Migrate old "repo|mode" keys to flat "repo" keys
             _messages_by_repo = _migrate_keys(_messages_by_repo)
@@ -291,6 +293,7 @@ def _persist_to_db() -> None:
             "branch": _conversation_branch,
             "mode": _conversation_mode,
             "last_event_index": _last_event_index,
+            "last_event_timestamp": _last_event_timestamp,
             "messages_by_repo": _messages_by_repo,
             "current_repo_key": _current_repo_key,
             # Batch state for survival across restarts
@@ -328,7 +331,7 @@ def _headers() -> dict:
 
 def reset() -> None:
     """Clear the current chat session AND cancel any running batch."""
-    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
+    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _last_event_timestamp, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
     global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_skip_prompt
     with _lock:
         # Cancel running batch
@@ -347,6 +350,7 @@ def reset() -> None:
         _conversation_branch = ""
         _conversation_mode = "code"
         _last_event_index = 0
+        _last_event_timestamp = ""
         _event_kinds.clear()
         _seen_event_ids.clear()
         _sandbox_id = None
@@ -493,13 +497,14 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code") -> d
     Creates a new conversation when repo or mode changes.
     HTTP calls (create/send) happen OUTSIDE _lock so get_state() polling is never blocked.
     """
-    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _sandbox_id
+    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _last_event_timestamp, _sandbox_id
 
     if not CLOUD_API_KEY:
         return {"error": "OPENHANDS_CLOUD_API_KEY not configured on server"}
 
-    # Reset event cursor so each message starts fresh
+    # Reset event cursors so each message starts fresh
     _last_event_index = 0
+    _last_event_timestamp = ""  # reset timestamp filter for new message
 
     logger.info("Chat send: prompt=%.80s... repo=%s mode=%s", prompt, repo, mode)
 
@@ -1332,7 +1337,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     Also appends live events (tool calls, observations) to the chat history so the client
     can see what the agent is doing via polling get_state().
     """
-    global _last_event_index, _conversation_status, _sandbox_id
+    global _last_event_index, _last_event_timestamp, _conversation_status, _sandbox_id
 
     if timeout is None:
         timeout = _CHAT_TIMEOUT
@@ -1406,15 +1411,25 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 })
 
         # -- Get events (SAME endpoint as agent_runner) --
+        # Use min_timestamp to get only new events after the last seen one.
+        # This avoids the 100-event limit bug: in token-efficient mode,
+        # conversations accumulate events across messages, so _last_event_index
+        # eventually exceeds the API limit and all_events[100:] is empty.
         try:
+            params: dict = {"limit": 100}
+            if _last_event_timestamp:
+                params["min_timestamp"] = _last_event_timestamp
             r2 = httpx.get(
                 f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
                 headers=_headers(),
-                params={"limit": 100},  # API max is 100 per spec
+                params=params,
                 timeout=10,
             )
             r2.raise_for_status()
             events_data = r2.json()
+            if _last_event_timestamp:
+                count = len(events_data) if isinstance(events_data, list) else len(events_data.get("items", events_data.get("events", [])))
+                logger.info("Events poll with min_timestamp=%s: got %d events", _last_event_timestamp[:19], count)
         except Exception as e:
             logger.warning("Events poll error: %s", e)
             continue
@@ -1516,8 +1531,13 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                         "timestamp": int(time.time() * 1000),
                     })
 
-        # Advance the seen index
+        # Advance the seen index + capture timestamp of last event
+        # (for min_timestamp filtering on next poll — avoids 100-event limit)
         _last_event_index = len(all_events)
+        if all_events:
+            last_ts = all_events[-1].get("timestamp", "")
+            if last_ts and (not _last_event_timestamp or last_ts > _last_event_timestamp):
+                _last_event_timestamp = last_ts
 
         if status in ("completed", "finished"):
             _conversation_status = "idle"
