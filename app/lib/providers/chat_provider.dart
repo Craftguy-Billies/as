@@ -143,6 +143,7 @@ class ChatProvider extends ChangeNotifier {
 
   // -- Init: restore from cache + server, resume batch if running --
   Future<void> loadFromCache() async {
+    logViewer('ChatProvider.loadFromCache: START serverRepo=$serverRepo');
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_cacheKey);
     if (raw != null) {
@@ -156,14 +157,21 @@ class ChatProvider extends ChangeNotifier {
                 .toList();
             _resetShowIndex();
           }
-          serverRepo = (data['repo']?.toString()) ?? '';
-          serverMode = (data['mode']?.toString()) ?? 'code';
+          // Only override if cache has a non-empty value — preserves initRepoFromHome
+          final cachedRepo = (data['repo']?.toString()) ?? '';
+          final cachedMode = (data['mode']?.toString()) ?? '';
+          final cachedBranch = (data['branch']?.toString()) ?? '';
+          if (cachedRepo.isNotEmpty) serverRepo = cachedRepo;
+          if (cachedMode.isNotEmpty) serverMode = cachedMode;
+          if (cachedBranch.isNotEmpty) serverBranch = cachedBranch;
+          logViewer('ChatProvider.loadFromCache: restored from cache repo=$serverRepo branch=$serverBranch');
         } else if (data is List && data.isNotEmpty) {
           // Legacy cache format (plain list)
           _messages = data
               .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
               .toList();
           _resetShowIndex();
+          logViewer('ChatProvider.loadFromCache: legacy cache, ${_messages.length} msgs');
         }
       } catch (_) {
         await prefs.remove(_cacheKey);
@@ -441,12 +449,15 @@ class ChatProvider extends ChangeNotifier {
   /// Called from home screen init: set repo and fetch branches without
   /// clearing messages or touching poll state (no conversation yet).
   void initRepoFromHome(String repo) {
-    if (repo.isEmpty || repo == serverRepo) return;
+    if (repo.isEmpty) return;
+    logViewer('ChatProvider.initRepoFromHome: repo=$repo (current=$serverRepo)');
+    if (repo == serverRepo) return;
     serverRepo = repo;
     fetchBranches();
   }
 
   Future<void> switchRepo(String repo, String mode, {String branch = ''}) async {
+    logViewer('ChatProvider.switchRepo: repo=$repo branch=$branch (was repo=$serverRepo branch=$serverBranch)');
     if (repo == serverRepo && mode == serverMode && branch == serverBranch) {
       // Same context — but branches may be stale on cold start
       if (_branches.isEmpty && repo.isNotEmpty) {

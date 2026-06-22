@@ -83,7 +83,16 @@ async def _process_task(task_id: str) -> None:
                 return
 
             task_dict = dict(task)
-            logger.info(f"Processing task {task_id}: mode={task_dict['mode']}, repo={task_dict['repo']}")
+            task_repo = task_dict.get("repo", "") or ""
+            task_branch = task_dict.get("branch", "") or ""
+            task_mode = task_dict.get("mode", "code") or "code"
+            logger.info("[worker] task %s START: repo=%s branch=%s mode=%s prompt=%.80s",
+                       task_id, task_repo, task_branch, task_mode, task_dict.get("prompt", ""))
+
+            if not task_repo:
+                logger.error("[worker] task %s: no repo — cannot run", task_id)
+                await _update_task_status(db, task_id, "failed", error_message="No repository specified")
+                return
 
             await _update_task_status(db, task_id, "starting")
 
@@ -128,9 +137,9 @@ async def _process_task(task_id: str) -> None:
             def _run() -> dict:
                 return run_conversation_sync(
                     prompt=task_dict["prompt"],
-                    repo=task_dict["repo"],
-                    branch=task_dict.get("branch", "main"),
-                    mode=task_dict.get("mode", "code"),
+                    repo=task_repo,
+                    branch=task_branch,
+                    mode=task_mode,
                     event_callback=on_event,
                     status_callback=on_status,
                     mcp_servers=mcp_servers,

@@ -43,12 +43,25 @@ class _ChatScreenState extends State<ChatScreen> {
     // Populate provider with saved repo + fetch branches, then load messages
     final prov = context.read<ChatProvider>();
     final savedRepo = _repoCtrl.text.trim();
+    final savedBranch = _branchCtrl.text.trim();
+    debugPrint('[ChatScreen._init] savedRepo=$savedRepo savedBranch=$savedBranch');
+
     if (savedRepo.isNotEmpty) {
       prov.initRepoFromHome(savedRepo);
+      debugPrint('[ChatScreen._init] initRepoFromHome($savedRepo) done, serverRepo=${prov.serverRepo}');
     }
+
     try {
       await prov.loadFromCache();
-    } catch (_) {}
+      debugPrint('[ChatScreen._init] loadFromCache done, serverRepo=${prov.serverRepo} serverBranch=${prov.serverBranch}');
+      // Fallback: cache may have cleared serverRepo (empty cache, old format, etc.)
+      if (prov.serverRepo.isEmpty && savedRepo.isNotEmpty) {
+        debugPrint('[ChatScreen._init] FALLBACK: serverRepo empty after cache, restoring $savedRepo');
+        prov.initRepoFromHome(savedRepo);
+      }
+    } catch (e) {
+      debugPrint('[ChatScreen._init] loadFromCache error: $e');
+    }
     if (mounted) setState(() => _hasLoaded = true);
 
     // Load model from server
@@ -94,6 +107,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
     final repo = _repoCtrl.text.trim();
     if (repo.isEmpty) {
+      debugPrint('[ChatScreen._send] BLOCKED: no repo');
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Please enter a repository (owner/repo)'),
@@ -103,6 +117,7 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     if (!RegExp(r'^[\w.-]+/[\w.-]+$').hasMatch(repo)) {
+      debugPrint('[ChatScreen._send] BLOCKED: invalid repo=$repo');
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Invalid repo format. Use: owner/repo'),
@@ -118,7 +133,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final branch = _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim();
     final prov = context.read<ChatProvider>();
 
-    debugPrint('ChatScreen._send: mode=code repo=$repo');
+    debugPrint('[ChatScreen._send] repo=$repo branch=$branch mode=code');
     prov.send(text, repo: repo, branch: branch, mode: 'code');
   }
 

@@ -29,14 +29,25 @@ class _HomeScreenState extends State<HomeScreen> {
     final prefs = context.read<PreferencesService>();
     _repoCtrl.text = prefs.lastRepo;
     _branchCtrl.text = prefs.lastBranch;
-    // _mode removed (always 'code')
     WidgetsBinding.instance.addPostFrameCallback((_) => _autoConnect());
-    // Populate branch dropdown on cold start
+
+    // Populate ChatProvider with saved repo + fetch branches, then load messages
+    final savedRepo = _repoCtrl.text.trim();
+    final savedBranch = _branchCtrl.text.trim();
+    debugPrint('[HomeScreen.initState] savedRepo=$savedRepo savedBranch=$savedBranch');
+    if (savedRepo.isNotEmpty) {
+      final prov = context.read<ChatProvider>();
+      prov.initRepoFromHome(savedRepo);
+    }
     context.read<ChatProvider>().loadFromCache().then((_) {
       final prov = context.read<ChatProvider>();
-      if (prov.serverRepo.isEmpty && _repoCtrl.text.trim().isNotEmpty) {
-        prov.initRepoFromHome(_repoCtrl.text.trim());
+      debugPrint('[HomeScreen.initState] loadFromCache done, serverRepo=${prov.serverRepo}');
+      if (prov.serverRepo.isEmpty && savedRepo.isNotEmpty) {
+        debugPrint('[HomeScreen.initState] FALLBACK: serverRepo empty after cache, restoring $savedRepo');
+        prov.initRepoFromHome(savedRepo);
       }
+    }).catchError((e) {
+      debugPrint('[HomeScreen.initState] loadFromCache error: $e');
     });
   }
 
