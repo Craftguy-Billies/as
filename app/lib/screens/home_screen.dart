@@ -313,11 +313,11 @@ class _HomeScreenState extends State<HomeScreen> {
                                   prefsService.saveLastPrompt(_repoCtrl.text, v, _mode);
                                 },
                                 itemBuilder: (_) {
-                                  if (branches.isEmpty && !prov.branchesAttempted) {
+                                  if (branches.isEmpty && !prov.branchesAttempted && prov.serverRepo.isNotEmpty) {
                                     return [const PopupMenuItem(value: '', enabled: false, child: Text('Loading…', style: TextStyle(color: Colors.white54, fontSize: 12)))];
                                   }
                                   final items = <PopupMenuItem<String>>[];
-                                  if (filtered.isEmpty) {
+                                  if (filtered.isEmpty && prov.serverRepo.isNotEmpty) {
                                     items.add(const PopupMenuItem(value: '', enabled: false, child: Text('No branches found', style: TextStyle(color: Colors.white54, fontSize: 12))));
                                   }
                                   for (final b in filtered) {
@@ -325,6 +325,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                   }
                                   if (typed.isNotEmpty && !filtered.contains(typed)) {
                                     items.add(PopupMenuItem(value: typed, child: Text('Use "$typed"', style: const TextStyle(color: Colors.blueAccent, fontSize: 12))));
+                                  }
+                                  if (items.isEmpty) {
+                                    items.add(const PopupMenuItem(value: '', enabled: false, child: Text('Type a branch name', style: TextStyle(color: Colors.white54, fontSize: 12))));
                                   }
                                   return items;
                                 },

@@ -548,7 +548,10 @@ class ChatProvider extends ChangeNotifier {
   }
 
   Future<void> fetchBranches() async {
-    if (serverRepo.isEmpty) return;
+    if (serverRepo.isEmpty) {
+      _branchesAttempted = true;  // nothing to load
+      return;
+    }
     try {
       _branches = await _api.getBranches(serverRepo);
       _branchesAttempted = true;
@@ -556,6 +559,7 @@ class ChatProvider extends ChangeNotifier {
       _notify();
     } catch (e) {
       _branchesAttempted = true;
+      _branches = [];
       logViewer('ChatProvider.fetchBranches: $e');
       _notify();
     }
