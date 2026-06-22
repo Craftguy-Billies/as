@@ -73,6 +73,7 @@ class ChatProvider extends ChangeNotifier {
 
   List<Map<String, dynamic>> _taskLog = [];
   List<Map<String, dynamic>> get taskLog => _taskLog;
+  String _taskLogRepo = '';
 
   // Lazy message loading: show latest N first, "load earlier" button at top
   // Set high because each user turn spawns ~10-15 internal events ([MSG], [START],
@@ -457,6 +458,8 @@ class ChatProvider extends ChangeNotifier {
     _notify();
     // Refresh repo list (new repo might appear later after messages)
     refreshRepos();
+    // Load task log for this repo
+    fetchTaskLog();
   }
 
   Future<void> refreshRepos() async {
@@ -506,6 +509,8 @@ class ChatProvider extends ChangeNotifier {
     if (serverRepo.isEmpty) return;
     try {
       _taskLog = await _api.getTaskLog(serverRepo);
+      _taskLogRepo = serverRepo;
+      logViewer('ChatProvider.fetchTaskLog: ${_taskLog.length} entries for $serverRepo');
       _notify();
     } catch (e) {
       logViewer('ChatProvider.fetchTaskLog: $e');

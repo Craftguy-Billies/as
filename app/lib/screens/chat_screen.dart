@@ -944,15 +944,15 @@ class _TypingIndicatorState extends State<_TypingIndicator>
 class _TaskLogSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-    return Consumer<ChatProvider>(
-      builder: (_, prov, __) {
-        final entries = prov.taskLog;
-        return DraggableScrollableSheet(
-          initialChildSize: 0.75,
-          minChildSize: 0.4,
-          maxChildSize: 0.95,
-          expand: false,
-          builder: (_, scrollCtrl) {
+    return DraggableScrollableSheet(
+      initialChildSize: 0.75,
+      minChildSize: 0.4,
+      maxChildSize: 0.95,
+      expand: false,
+      builder: (_, scrollCtrl) {
+        return Consumer<ChatProvider>(
+          builder: (_, prov, __) {
+            final entries = prov.taskLog;
             if (entries.isEmpty) {
               return Center(
                 child: Column(
@@ -975,7 +975,7 @@ class _TaskLogSheet extends StatelessWidget {
                 ),
               );
             }
-            // Latest first, filter entries older than 1 day
+            // Latest first, filter entries older than 3 days
             final now = DateTime.now();
             final filtered = entries.where((e) {
               final ts = e['timestamp']?.toString() ?? '';
@@ -1001,7 +1001,7 @@ class _TaskLogSheet extends StatelessWidget {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      'Tasks from the last 24 hours appear here',
+                      'Tasks from the last 3 days appear here',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: Colors.grey[700], fontSize: 12),
                     ),
@@ -1054,52 +1054,58 @@ class _TaskLogSheet extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      // Row 1: status icon + AI report (main content)
                       Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Icon(
-                            isOK
-                                ? Icons.check_circle_outline
-                                : isFail
-                                    ? Icons.cancel_outlined
-                                    : Icons.warning_amber_outlined,
-                            size: 18,
-                            color: isOK
-                                ? Colors.green
-                                : isFail
-                                    ? Colors.redAccent
-                                    : Colors.orange,
+                          Padding(
+                            padding: const EdgeInsets.only(top: 2),
+                            child: Icon(
+                              isOK
+                                  ? Icons.check_circle_outline
+                                  : isFail
+                                      ? Icons.cancel_outlined
+                                      : Icons.warning_amber_outlined,
+                              size: 18,
+                              color: isOK
+                                  ? Colors.green
+                                  : isFail
+                                      ? Colors.redAccent
+                                      : Colors.orange,
+                            ),
                           ),
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
-                              '${e['summary'] ?? ''}',
+                              (e['details'] ?? e['summary'] ?? '').toString(),
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 14,
                                 fontWeight: FontWeight.w600,
                               ),
-                              maxLines: 2,
+                              maxLines: 4,
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
                         ],
                       ),
-                      if ((e['request'] ?? '').isNotEmpty) ...[
+                      // Row 2: user prompt (secondary)
+                      if ((e['request'] ?? '').isNotEmpty &&
+                          (e['request'] ?? '') != (e['summary'] ?? '')) ...[
                         const SizedBox(height: 6),
-                        Text(
-                          e['request']!,
-                          style: TextStyle(color: Colors.grey[400], fontSize: 12),
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                      if ((e['details'] ?? '').isNotEmpty) ...[
-                        const SizedBox(height: 4),
-                        Text(
-                          e['details']!,
-                          style: TextStyle(color: Colors.grey[500], fontSize: 11),
-                          maxLines: 3,
-                          overflow: TextOverflow.ellipsis,
+                        Row(
+                          children: [
+                            Icon(Icons.chat_bubble_outline, size: 11, color: Colors.grey[600]),
+                            const SizedBox(width: 4),
+                            Expanded(
+                              child: Text(
+                                e['request']!,
+                                style: TextStyle(color: Colors.grey[500], fontSize: 11),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                       if ((e['files'] ?? '').isNotEmpty) ...[
