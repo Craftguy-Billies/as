@@ -184,6 +184,7 @@ class ChatProvider extends ChangeNotifier {
         _messages = merged;
         await _saveToCache();
         _resetShowIndex();
+        _notify();  // always notify after merge, even if batch not running
       }
     } catch (e) {
       logViewer('ChatProvider.loadFromCache: server merge failed: $e');
