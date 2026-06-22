@@ -444,21 +444,28 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code") -> d
         effective_branch = branch.strip() if branch else _conversation_branch
         ctx_changed = (
             _conversation_id is not None
-            and (repo != _conversation_repo
-                 or mode != _conversation_mode
-                 or effective_branch != _conversation_branch)
+            and (repo != _conversation_repo or mode != _conversation_mode)
+        )
+        branch_switched = (
+            _conversation_id is not None
+            and not ctx_changed
+            and effective_branch != _conversation_branch
         )
         if ctx_changed:
-            logger.info("Context changed: repo '%s'→'%s' mode '%s'→'%s' branch '%s'→'%s' — starting new conversation",
+            logger.info("Context changed: repo '%s'→'%s' mode '%s'→'%s' — starting new conversation",
                         _conversation_repo or '(none)', repo or '(none)',
-                        _conversation_mode, mode,
-                        _conversation_branch or '(default)', effective_branch or '(default)')
+                        _conversation_mode, mode)
             _conversation_id = None
             _last_event_index = 0
             _sandbox_id = None
             _event_kinds.clear()
             _conversation_repo = repo
             _conversation_mode = mode
+            _conversation_branch = effective_branch
+            _persist_to_db()
+        elif branch_switched:
+            logger.info("Branch switch on same repo: '%s'→'%s' — reusing conversation, injecting checkout",
+                        _conversation_branch or '(default)', effective_branch or '(default)')
             _conversation_branch = effective_branch
             _persist_to_db()
         need_new_conv = _conversation_id is None
@@ -473,7 +480,13 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code") -> d
                         new_conv_id, repo, mode)
         else:
             logger.info("Reusing conversation %s (repo=%s mode=%s)", current_conv_id, repo, mode)
-            success, send_err = _send_message(current_conv_id, prompt)
+            effective_prompt = prompt
+            if branch_switched and effective_branch:
+                # Inject git checkout so the agent switches branch before acting
+                checkout_cmd = f"git fetch origin && git checkout {effective_branch} && git pull origin {effective_branch}"
+                effective_prompt = f"[Switch to branch: {effective_branch}] {checkout_cmd}\n\n{prompt}"
+                logger.info("Injected branch switch: checkout %s", effective_branch)
+            success, send_err = _send_message(current_conv_id, effective_prompt)
             if not success:
                 # If sandbox is paused/gone, auto-recover: reset + create new
                 # conversation with same prompt. The caller never sees a 409.
