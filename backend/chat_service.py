@@ -1552,8 +1552,8 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         _last_event_index = len(all_events)
         if all_events:
             last_ts = all_events[-1].get("timestamp", "")
-            if last_ts and (not _last_event_timestamp or last_ts > _last_event_timestamp):
-                _last_event_timestamp = last_ts
+            if last_ts:
+                _last_event_timestamp = str(last_ts)  # normalize to str for API param
 
         if status in ("completed", "finished"):
             _conversation_status = "idle"
