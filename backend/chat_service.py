@@ -78,7 +78,7 @@ _batch_prompt_modes: list[str] = []  # per-prompt mode (plan/code)
 _batch_position: int = 0
 _batch_total: int = 0
 _batch_repo: str = ""
-_batch_branch: str = "main"
+_batch_branch: str = ""
 _batch_mode: str = "code"
 _batch_running: bool = False
 _batch_cancelled: bool = False
@@ -254,7 +254,7 @@ def get_repos() -> list[dict]:
     return result
 
 
-def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") -> dict:
+def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code") -> dict:
     """Send a chat message and wait for the agent response (synchronous).
 
     Creates a new conversation when repo or mode changes.
@@ -434,7 +434,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
 # ---------------------------------------------------------------------------
 
 
-def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "main", mode: str = "code") -> dict:
+def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "", mode: str = "code") -> dict:
     """Queue multiple prompts for sequential processing in the same conversation.
 
     Returns immediately. Processing happens in a background thread.
@@ -741,16 +741,56 @@ def _resume_sandbox(sandbox_id: str) -> str | None:
         return str(e)
 
 
+# Cache for GitHub default branch detection (repo → branch, 1h TTL)
+_default_branch_cache: dict[str, tuple[str, float]] = {}
+
+
+def _detect_default_branch(repo: str) -> str | None:
+    """Query GitHub API for the repo's default branch. Cached for 1 hour."""
+    now = time.time()
+    entry = _default_branch_cache.get(repo)
+    if entry:
+        cached_branch, cached_at = entry
+        if now - cached_at < 3600:
+            return cached_branch
+        del _default_branch_cache[repo]
+
+    try:
+        resp = httpx.get(
+            f"https://api.github.com/repos/{repo}",
+            headers={"Accept": "application/vnd.github+json"},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            branch = data.get("default_branch")
+            if branch:
+                _default_branch_cache[repo] = (branch, now)
+                logger.info("Detected default branch for %s: %s", repo, branch)
+                return branch
+        logger.debug("Failed to detect default branch for %s: HTTP %s", repo, resp.status_code)
+    except Exception as e:
+        logger.debug("Failed to detect default branch for %s: %s", repo, e)
+    return None
+
+
 def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     """Create a conversation via POST /api/v1/app-conversations (SAME as agent_runner).
 
     Returns the conversation_id. Raises on failure.
     """
+    # Auto-detect default branch if repo given and branch is empty
+    effective_branch = branch
+    if repo and not branch:
+        detected = _detect_default_branch(repo)
+        if detected:
+            effective_branch = detected
+
     # Mode-specific prompt prefix
     if mode == "plan":
         if repo:
             full_prompt = (
-                f"Repository: {repo} (branch: {branch}).\n"
+                f"Repository: {repo} (branch: {effective_branch}).\n"
                 f"IMPORTANT — PLAN MODE:\n"
                 f"1. FIRST, analyze the task and research the codebase. Read files, search, "
                 f"understand the architecture. Create a detailed implementation plan saved "
@@ -778,7 +818,7 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
             )
     elif repo:
         full_prompt = (
-            f"Repository: {repo} (branch: {branch}).\n"
+            f"Repository: {repo} (branch: {effective_branch}).\n"
             f"IMPORTANT: First run `git pull` to get the latest code. "
             f"When implementing changes: review relevant files, make edits, "
             f"commit with a descriptive message, and push.\n\n"
@@ -801,7 +841,7 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     # Include repo if provided (general chat omits it)
     if repo:
         body["selected_repository"] = repo
-        body["selected_branch"] = branch
+        body["selected_branch"] = effective_branch
 
     # Apply custom LLM config if set (same as agent_runner)
     try:

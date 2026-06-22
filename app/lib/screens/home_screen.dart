@@ -74,7 +74,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() => _sending = true);
     try {
-      final branch = _branchCtrl.text.trim().isEmpty ? 'main' : _branchCtrl.text.trim();
+      final branch = _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim();
       final taskProv = context.read<TaskProvider>();
       final task = await taskProv
           .createPrompt(prompt: prompt, repo: repo, branch: branch, mode: _mode)

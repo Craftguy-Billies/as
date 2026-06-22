@@ -119,7 +119,7 @@ from chat_service import send as chat_send, reset as chat_reset, get_state as ch
 class ChatRequest(BaseModel):
     prompt: str
     repo: str = ""
-    branch: str = "main"
+    branch: str = ""
     mode: str = "code"  # "code" or "plan", validated in endpoint
 
 
@@ -163,7 +163,7 @@ async def chat_clear():
 class BatchRequest(BaseModel):
     prompts: list[str]
     repo: str = ""
-    branch: str = "main"
+    branch: str = ""
     mode: str = "code"
 
 
