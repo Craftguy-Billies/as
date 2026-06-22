@@ -286,7 +286,8 @@ class _HomeScreenState extends State<HomeScreen> {
                             onChanged: (val) {
                               if (val != null) {
                                 _branchCtrl.text = val;
-                                _saveRepoPrefs();
+                                context.read<PreferencesService>().saveLastPrompt(
+                                  _repoCtrl.text, val, _mode);
                               }
                             },
                           );
