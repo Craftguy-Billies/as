@@ -774,6 +774,87 @@ def _detect_default_branch(repo: str) -> str | None:
     return None
 
 
+# Cache for task log from VIBECODER_LOG.md (repo → (entries, cached_at), 5-min TTL)
+_task_log_cache: dict[str, tuple[list[dict], float]] = {}
+
+
+def get_task_log(repo: str) -> list[dict]:
+    """Fetch VIBECODER_LOG.md from GitHub repo and parse task entries.
+
+    Returns list of {timestamp, summary, request, status, details, files}.
+    Cached for 5 minutes.
+    """
+    now = time.time()
+    entry = _task_log_cache.get(repo)
+    if entry:
+        entries, cached_at = entry
+        if now - cached_at < 300:
+            return entries
+        del _task_log_cache[repo]
+
+    try:
+        resp = httpx.get(
+            f"https://api.github.com/repos/{repo}/contents/VIBECODER_LOG.md",
+            headers={
+                "Accept": "application/vnd.github.raw+json",
+            },
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            logger.debug("VIBECODER_LOG.md not found for %s: HTTP %s", repo, resp.status_code)
+            return []
+
+        content = resp.text
+        entries = _parse_log_md(content)
+        _task_log_cache[repo] = (entries, now)
+        return entries
+    except Exception as e:
+        logger.debug("Failed to fetch VIBECODER_LOG.md for %s: %s", repo, e)
+        return []
+
+
+def _parse_log_md(content: str) -> list[dict]:
+    """Parse VIBECODER_LOG.md into task entry dicts."""
+    import re
+    entries = []
+    # Match: ## 2026-06-22T10:27 — One-line summary
+    header_pat = re.compile(r'^##\s+(\S+)\s+—\s+(.+)$', re.MULTILINE)
+    field_pat = re.compile(r'^\*\*([^*]+)\*\*:\s*(.+)$', re.MULTILINE)
+
+    # Split by ## headers
+    sections = re.split(r'\n(?=## )', content)
+    for section in sections:
+        section = section.strip()
+        if not section:
+            continue
+        header = header_pat.search(section)
+        if not header:
+            continue
+        entry = {
+            "timestamp": header.group(1),
+            "summary": header.group(2),
+            "request": "",
+            "status": "unknown",
+            "details": "",
+            "files": "",
+        }
+        for m in field_pat.finditer(section):
+            key = m.group(1).strip().lower()
+            val = m.group(2).strip()
+            if "request" in key:
+                entry["request"] = val
+            elif "status" in key:
+                entry["status"] = val
+            elif "what was done" in key:
+                entry["details"] = val
+            elif "files changed" in key:
+                entry["files"] = val
+        entries.append(entry)
+
+    return entries
+
+
+
 def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     """Create a conversation via POST /api/v1/app-conversations (SAME as agent_runner).
 

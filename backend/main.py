@@ -113,7 +113,7 @@ async def stream_logs():
 # Chat (token-efficient conversation reuse)
 # ---------------------------------------------------------------------------
 
-from chat_service import send as chat_send, reset as chat_reset, get_state as chat_state, get_repos as chat_repos, enqueue_batch as chat_enqueue_batch, cancel_batch as chat_cancel_batch, cancel_batch_prompt as chat_cancel_batch_prompt
+from chat_service import send as chat_send, reset as chat_reset, get_state as chat_state, get_repos as chat_repos, get_task_log as chat_task_log, enqueue_batch as chat_enqueue_batch, cancel_batch as chat_cancel_batch, cancel_batch_prompt as chat_cancel_batch_prompt
 
 
 class ChatRequest(BaseModel):
@@ -150,6 +150,16 @@ async def chat_get(repo: str = Query(""), mode: str = Query("")):
 async def chat_list_repos():
     """Return list of all repos that have chat history."""
     return {"repos": chat_repos()}
+
+
+@app.get("/api/chat/log")
+async def chat_task_log_entries(repo: str = Query("")):
+    """Return parsed VIBECODER_LOG.md entries for a repo."""
+    if not repo:
+        return []
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, chat_task_log, repo)
+    return result
 
 
 @app.delete("/api/chat")

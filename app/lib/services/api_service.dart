@@ -362,4 +362,17 @@ class ApiService {
     } catch (_) {}
     return null;
   }
+
+  Future<List<Map<String, dynamic>>> getTaskLog(String repo) async {
+    if (repo.isEmpty) return [];
+    try {
+      final uri = Uri.parse('$_url/api/chat/log').replace(queryParameters: {'repo': repo});
+      final resp = await http.get(uri).timeout(const Duration(seconds: 10));
+      if (resp.statusCode == 200) {
+        final list = json.decode(resp.body);
+        return (list as List).cast<Map<String, dynamic>>();
+      }
+    } catch (_) {}
+    return [];
+  }
 }

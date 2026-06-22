@@ -169,6 +169,12 @@ class _ChatScreenState extends State<ChatScreen> {
               );
             },
           ),
+          // Task log (VIBECODER_LOG.md)
+          IconButton(
+            icon: const Icon(Icons.checklist, color: Colors.white70, size: 20),
+            tooltip: 'Task log',
+            onPressed: () => _showTaskLog(context),
+          ),
           // Repo/mode toggle
           IconButton(
             icon: Icon(
@@ -407,6 +413,20 @@ class _ChatScreenState extends State<ChatScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (_) => _TaskQueueSheet(),
+    );
+  }
+
+  void _showTaskLog(BuildContext context) {
+    final prov = context.read<ChatProvider>();
+    prov.fetchTaskLog();
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF121212),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => _TaskLogSheet(),
     );
   }
   Widget _buildEmpty() {
@@ -915,6 +935,150 @@ class _TypingIndicatorState extends State<_TypingIndicator>
 // ---------------------------------------------------------------------------
 // Task queue bottom sheet
 // ---------------------------------------------------------------------------
+class _TaskLogSheet extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Consumer<ChatProvider>(
+      builder: (_, prov, __) {
+        final entries = prov.taskLog;
+        return DraggableScrollableSheet(
+          initialChildSize: 0.75,
+          minChildSize: 0.4,
+          maxChildSize: 0.95,
+          expand: false,
+          builder: (_, scrollCtrl) {
+            if (entries.isEmpty) {
+              return Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.inbox_outlined, size: 48, color: Colors.grey[700]),
+                    const SizedBox(height: 12),
+                    Text(
+                      'No task log yet',
+                      style: TextStyle(color: Colors.grey[500], fontSize: 16),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Tasks will appear here as the AI writes to VIBECODER_LOG.md',
+                      style: TextStyle(color: Colors.grey[700], fontSize: 12),
+                    ),
+                  ],
+                ),
+              );
+            }
+            return ListView.builder(
+              controller: scrollCtrl,
+              padding: const EdgeInsets.all(16),
+              itemCount: entries.length + 1,
+              itemBuilder: (_, i) {
+                if (i == 0) {
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.checklist, color: Color(0xFF7C3AED), size: 20),
+                        const SizedBox(width: 8),
+                        Text(
+                          'Task Log  ·  ${entries.length} done',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+                final e = entries[i - 1];
+                final status = (e['status'] ?? '').toString();
+                final isOK = status.contains('✅') || status.toLowerCase().contains('success');
+                final isFail = status.contains('❌') || status.toLowerCase().contains('failed');
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1A1A1A),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: isOK
+                          ? Colors.green.withValues(alpha: 0.3)
+                          : isFail
+                              ? Colors.red.withValues(alpha: 0.3)
+                              : Colors.grey.withValues(alpha: 0.2),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text(
+                            status,
+                            style: const TextStyle(fontSize: 14),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              '${e['summary'] ?? ''}',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                              ),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                      if ((e['request'] ?? '').isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          e['request']!,
+                          style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                      if ((e['details'] ?? '').isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          e['details']!,
+                          style: TextStyle(color: Colors.grey[500], fontSize: 11),
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                      if ((e['files'] ?? '').isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          '📁 ${e['files']}',
+                          style: TextStyle(color: Colors.grey[600], fontSize: 10),
+                        ),
+                      ],
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          Text(
+                            e['timestamp'] ?? '',
+                            style: TextStyle(color: Colors.grey[700], fontSize: 10),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
 class _TaskQueueSheet extends StatelessWidget {
   const _TaskQueueSheet();
 
