@@ -399,6 +399,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
                 if latest and response.startswith(latest):
                     response = response[len(latest):]
                 response = response.strip()
+            logger.info("Phase 3: response after strip (%.100s...)", response)
             if not response:
                 return {
                     "error": "Agent did not produce a new response (prefix stripping removed everything)",
@@ -1081,7 +1082,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             event_files = sorted([n for n in zf.namelist() if n.startswith("event_") and n.endswith(".json")])
             if not event_files:
                 event_files = sorted([n for n in zf.namelist() if "event" in n.lower() and n.endswith(".json")])
-            logger.info("Trajectory zip: %d event files, searching for assistant MessageEvent", len(event_files))
+            logger.info("Trajectory zip: %d event files, searching for agent MessageEvent", len(event_files))
             found = False
             for fname in reversed(event_files):
                 with zf.open(fname) as f:
@@ -1093,10 +1094,13 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                         if isinstance(content, list):
                             parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip()]
                             if parts:
-                                all_new_msgs = ["\n".join(parts)]
+                                raw = "\n".join(parts)
+                                logger.info("Trajectory zip: found agent MessageEvent — raw (%.100s...)", raw)
+                                all_new_msgs = [raw]
                                 found = True
                                 break
                     elif isinstance(llm_msg, str) and llm_msg.strip():
+                        logger.info("Trajectory zip: found agent MessageEvent — raw str (%.100s...)", llm_msg.strip())
                         all_new_msgs = [llm_msg.strip()]
                         found = True
                         break
