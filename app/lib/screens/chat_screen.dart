@@ -175,6 +175,12 @@ class _ChatScreenState extends State<ChatScreen> {
             tooltip: 'Task log',
             onPressed: () => _showTaskLog(context),
           ),
+          // Refresh from server
+          IconButton(
+            icon: const Icon(Icons.refresh, color: Colors.white70, size: 20),
+            tooltip: 'Refresh messages',
+            onPressed: () => context.read<ChatProvider>().refreshMessages(),
+          ),
           // Repo/mode toggle
           IconButton(
             icon: Icon(

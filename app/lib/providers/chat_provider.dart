@@ -464,6 +464,40 @@ class ChatProvider extends ChangeNotifier {
     }
   }
 
+  Future<void> refreshMessages() async {
+    try {
+      final data = await _api.getChat(repo: serverRepo, mode: serverMode);
+      final serverMsgs = (data['messages'] as List?)
+              ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
+              .toList() ??
+          [];
+      if (serverMsgs.isNotEmpty) {
+        final merged = <ChatMessage>[];
+        final seen = <String>{};
+        final serverContentKeys = <String>{};
+        for (final m in serverMsgs) {
+          if (seen.add(m.dedupKey)) {
+            merged.add(m);
+            serverContentKeys.add('${m.role}:${m.content}');
+          }
+        }
+        for (final m in _messages) {
+          final ck = '${m.role}:${m.content}';
+          if (!serverContentKeys.contains(ck) && seen.add(m.dedupKey)) {
+            merged.add(m);
+          }
+        }
+        merged.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+        _messages = merged;
+        await _saveToCache();
+        _resetShowIndex();
+        _notify();
+      }
+    } catch (e) {
+      logViewer('ChatProvider.refreshMessages: $e');
+    }
+  }
+
   Future<void> fetchTaskLog() async {
     if (_savedRepo.isEmpty) return;
     try {
