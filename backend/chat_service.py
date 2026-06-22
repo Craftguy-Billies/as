@@ -277,8 +277,9 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             and (repo != _conversation_repo or mode != _conversation_mode)
         )
         if ctx_changed:
-            logger.info("Context changed: repo %s→%s mode %s→%s — starting new conversation",
-                        _conversation_repo, repo, _conversation_mode, mode)
+            logger.info("Context changed: repo '%s'→'%s' mode '%s'→'%s' — starting new conversation",
+                        _conversation_repo or '(none)', repo or '(none)',
+                        _conversation_mode, mode)
             _conversation_id = None
             _last_event_index = 0
             _sandbox_id = None
