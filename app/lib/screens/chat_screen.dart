@@ -968,8 +968,12 @@ class _TaskLogSheetState extends State<_TaskLogSheet> {
                 ),
               );
             }
-            // Latest first, filter entries older than 3 days
+            // Latest first, filter entries older than 3 days, skip non-OK/FAIL entries
             final now = DateTime.now();
+            final isOkOrFail = (Map<String, dynamic> e) {
+              final s = (e['status'] ?? '').toString().toLowerCase();
+              return s.contains('[ok]') || s.contains('success') || s.contains('[fail]') || s.contains('failed');
+            };
             final filtered = entries.where((e) {
               final ts = e['timestamp']?.toString() ?? '';
               if (ts.isEmpty) return true;
@@ -979,7 +983,7 @@ class _TaskLogSheetState extends State<_TaskLogSheet> {
               } catch (_) {
                 return true;
               }
-            }).toList().reversed.toList();
+            }).where(isOkOrFail).toList();
             if (filtered.isEmpty) {
               return Center(
                 child: Column(

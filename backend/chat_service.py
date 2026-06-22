@@ -1097,6 +1097,8 @@ def _parse_log_md(content: str) -> list[dict]:
                 entry["files"] = val
         entries.append(entry)
 
+    # File is written oldest-first; reverse to latest-first (consistent with in-memory cache)
+    entries.reverse()
     return entries
 
 
