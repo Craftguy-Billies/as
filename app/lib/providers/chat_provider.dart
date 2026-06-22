@@ -259,6 +259,7 @@ class ChatProvider extends ChangeNotifier {
     // If repo or branch changed, switch to new conversation history
     // Mode switch on same repo+branch → keep messages (plan then code = one chat)
     if (repo != serverRepo || branch != serverBranch) {
+      final repoChanged = repo != serverRepo;
       serverRepo = repo;
       serverBranch = branch;
       serverMode = mode;
@@ -269,6 +270,10 @@ class ChatProvider extends ChangeNotifier {
       _pollTimer?.cancel();
       await _saveToCache();
       _notify();
+      // Fetch branches if repo changed (send() is often the first place serverRepo gets set)
+      if (repoChanged && repo.isNotEmpty) {
+        fetchBranches();
+      }
     } else if (mode != serverMode) {
       serverMode = mode;
       await _saveToCache();
