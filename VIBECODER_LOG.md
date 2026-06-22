@@ -22,8 +22,15 @@
 **What was done:** Pushed. Here's a summary of both fixes: Fix 1: Repo/branch pre-fill on cold boot Bug: Text field showed placeholder instead of last used repo. Root cause: Repo stored in two places — (for text field) and cache JSON (for ).
 
 ## 2026-06-22T17:02 — and then, for the batch processing queue, there are also bugs. why i will direct…
+
+## 2026-06-22T17:02 — and then, for the batch processing queue, there are also bugs. why i will direct…
 **Request:** and then, for the batch processing queue, there are also bugs. why i will direct sent the message out even it is expected to be queueing, working one by one? and when that happens, unexpected behaviou
 **Status:** [OK] Success
 **What was done:** Pushed. Here's a summary of both fixes: Fix 1: Repo/branch pre-fill on cold boot Bug: Text field showed placeholder instead of last used repo. Root cause: Repo stored in two places — (for text field) and cache JSON (for ).
+
+## 2026-06-22T17:06 — and then one more issue, i dont know is it only happening when initiate or chat…
+**Request:** and then one more issue, i dont know is it only happening when initiate or chat switch under repo change. the ai response will copy the previous one entirely for the final message. not even change a s
+**Status:** [OK] Success
+**What was done:** Pushed. Here's the root cause analysis: Stale response bug — root cause The trajectory zip event files were sorted alphabetically instead of numerically: In token-efficient mode, a conversation accumulates events across turns. After 10+ turns, would pick (from turn 9) instead of (the latest turn).
 
 ## VibeCoder — Task Log
