@@ -434,6 +434,7 @@ class ChatProvider extends ChangeNotifier {
     serverRepo = repo;
     serverBranch = branch;
     serverMode = mode;
+    _branches = [];  // clear immediately to avoid stale flash from previous repo
     _pollTimer?.cancel();
     _queuePosition = 0;
     _queueTotal = 0;
