@@ -1358,6 +1358,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         timeout = _CHAT_TIMEOUT
 
     start = time.time()
+    _wait_started_at_ts = str(int(time.time() * 1000))  # unix ms for event filtering
     all_new_msgs: list[str] = []
     last_status = ""
     last_event_count = 0
@@ -1586,7 +1587,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     # turn's MessageEvent is unreachable. The zip has ALL events.
     if last_status in ("completed", "finished"):
         try:
-            import io, zipfile
+            import io, re, zipfile
             r3 = httpx.get(
                 f"{CLOUD_API_URL}/api/v1/app-conversations/{_conversation_id}/download",
                 headers=_headers(),
@@ -1594,9 +1595,18 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             )
             r3.raise_for_status()
             zf = zipfile.ZipFile(io.BytesIO(r3.content))
-            event_files = sorted([n for n in zf.namelist() if n.startswith("event_") and n.endswith(".json")])
+            # Natural sort: event_1 < event_2 < event_10 (NOT event_1 < event_10 < event_2)
+            def _num_key(name: str) -> list:
+                return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', name)]
+            event_files = sorted(
+                [n for n in zf.namelist() if n.startswith("event_") and n.endswith(".json")],
+                key=_num_key,
+            )
             if not event_files:
-                event_files = sorted([n for n in zf.namelist() if "event" in n.lower() and n.endswith(".json")])
+                event_files = sorted(
+                    [n for n in zf.namelist() if "event" in n.lower() and n.endswith(".json")],
+                    key=_num_key,
+                )
             logger.info("Trajectory zip: %d event files, searching for agent MessageEvent", len(event_files))
             found = False
             for fname in reversed(event_files):
@@ -1616,12 +1626,15 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                                 found = True
                                 break
                     elif isinstance(llm_msg, str) and llm_msg.strip():
-                        logger.info("Trajectory zip: found agent MessageEvent — raw str (%.100s...)", llm_msg.strip())
+                        evt_ts = evt.get("timestamp", 0)
+                        logger.info("Trajectory zip: found agent MessageEvent ts=%s — raw str (%.100s...)", evt_ts, llm_msg.strip())
                         all_new_msgs = [llm_msg.strip()]
                         found = True
                         break
             if not found:
                 logger.warning("Trajectory zip: no assistant MessageEvent in %d files", len(event_files))
+                # Log last 5 event filenames for debugging sort order
+                logger.warning("Trajectory zip last 5 fnames: %s", event_files[-5:] if event_files else [])
                 seen = set()
                 for fname in event_files[-30:]:
                     with zf.open(fname) as f:
@@ -1637,8 +1650,16 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         logger.warning("All event kinds seen: %s", sorted(_event_kinds))
         logger.warning("Total events: %d, messages: %d", len(all_events), len(_msgs()))
 
-        # Fallback: scrape last 20 events for any text content
-        fallback_text = _scrape_events_for_text(all_events[-20:])
+        # Fallback: scrape events for any text content.
+        # Filter to only events from this turn (timestamp >= turn start)
+        # to avoid scraping stale agent MessageEvent text from previous turns.
+        recent = [e for e in all_events if str(e.get("timestamp", "")) >= _wait_started_at_ts]
+        if not recent:
+            recent = all_events[-20:]  # fallback within the fallback
+        else:
+            recent = recent[-20:]
+        logger.warning("Fallback scrape: %d recent events (filtered from %d total)", len(recent), len(all_events))
+        fallback_text = _scrape_events_for_text(recent)
         if fallback_text:
             logger.info("Fallback: scraped %d chars from last 20 events", len(fallback_text))
             all_new_msgs.append(fallback_text)
