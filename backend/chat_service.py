@@ -894,7 +894,7 @@ def get_task_log(repo: str) -> list[dict]:
             timeout=10,
         )
         if resp.status_code != 200:
-            logger.debug("VIBECODER_LOG.md not found for %s: HTTP %s", repo, resp.status_code)
+            logger.warning("VIBECODER_LOG.md not found for %s: HTTP %s", repo, resp.status_code)
             return []
 
         content = resp.text
