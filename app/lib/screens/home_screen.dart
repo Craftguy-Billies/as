@@ -95,14 +95,6 @@ class _HomeScreenState extends State<HomeScreen> {
     if (mounted) setState(() => _sending = false);
   }
 
-  void _setMode(String m) {
-    setState(() => _mode = m);
-    try {
-      final prefs = context.read<PreferencesService>();
-      prefs.saveLastPrompt(_repoCtrl.text.trim(), _branchCtrl.text.trim().isEmpty ? 'main' : _branchCtrl.text.trim(), m);
-    } catch (_) {}
-  }
-
   void _showError(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -284,26 +276,20 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ),
                     const SizedBox(width: 6),
-                    // Mode toggle
+                    // Mode label (code-only, plan mode hidden)
                     Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                       decoration: BoxDecoration(
                         color: const Color(0xFF1A1A2E),
                         borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0xFF2A2A2A)),
                       ),
                       child: Row(
+                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          _ModeChip(
-                            label: 'Code',
-                            icon: Icons.bolt,
-                            selected: _mode == 'code',
-                            onTap: () => _setMode('code'),
-                          ),
-                          _ModeChip(
-                            label: 'Plan',
-                            icon: Icons.map,
-                            selected: _mode == 'plan',
-                            onTap: () => _setMode('plan'),
-                          ),
+                          Icon(Icons.bolt, size: 16, color: Colors.grey[400]),
+                          const SizedBox(width: 4),
+                          Text('Code', style: TextStyle(color: Colors.grey[400], fontSize: 13, fontWeight: FontWeight.w600)),
                         ],
                       ),
                     ),
@@ -377,49 +363,6 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _ModeChip extends StatelessWidget {
-  final String label;
-  final IconData icon;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _ModeChip({
-    required this.label,
-    required this.icon,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: selected ? const Color(0xFF7C3AED) : Colors.transparent,
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 16, color: selected ? Colors.white : Colors.grey),
-            const SizedBox(width: 4),
-            Text(
-              label,
-              style: TextStyle(
-                color: selected ? Colors.white : Colors.grey,
-                fontSize: 13,
-                fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }

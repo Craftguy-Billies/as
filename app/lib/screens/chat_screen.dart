@@ -73,11 +73,6 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (_) {}
   }
 
-  void _setMode(String m) {
-    setState(() => _mode = m);
-    _saveRepoPrefs();
-  }
-
   @override
   void dispose() {
     _inputCtrl.dispose();
@@ -352,30 +347,20 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
               const SizedBox(width: 6),
-              // Plan / Code mode toggle
-              InkWell(
-                onTap: () => _setMode(_mode == 'code' ? 'plan' : 'code'),
-                borderRadius: BorderRadius.circular(8),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: _mode == 'plan'
-                        ? const Color(0xFF7C3AED).withValues(alpha: 0.2)
-                        : const Color(0xFF1A1A2E),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: _mode == 'plan'
-                          ? const Color(0xFF7C3AED).withValues(alpha: 0.5)
-                          : const Color(0xFF2A2A2A),
-                    ),
-                  ),
-                  child: Text(
-                    _mode == 'plan' ? 'Plan' : 'Code',
-                    style: TextStyle(
-                      color: _mode == 'plan' ? const Color(0xFF7C3AED) : Colors.grey,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
+              // Mode label (code-only, plan mode hidden)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1A1A2E),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFF2A2A2A)),
+                ),
+                child: Text(
+                  'Code',
+                  style: TextStyle(
+                    color: Colors.grey[400],
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
               ),
