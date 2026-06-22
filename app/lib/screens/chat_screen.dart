@@ -999,8 +999,8 @@ class _TaskLogSheet extends StatelessWidget {
                 }
                 final e = entries[i - 1];
                 final status = (e['status'] ?? '').toString();
-                final isOK = status.contains('✅') || status.toLowerCase().contains('success');
-                final isFail = status.contains('❌') || status.toLowerCase().contains('failed');
+                final isOK = status.contains('[OK]') || status.contains('✅') || status.toLowerCase().contains('success');
+                final isFail = status.contains('[FAIL]') || status.contains('❌') || status.toLowerCase().contains('failed');
                 return Container(
                   margin: const EdgeInsets.only(bottom: 10),
                   padding: const EdgeInsets.all(12),
@@ -1059,9 +1059,19 @@ class _TaskLogSheet extends StatelessWidget {
                       ],
                       if ((e['files'] ?? '').isNotEmpty) ...[
                         const SizedBox(height: 4),
-                        Text(
-                          '📁 ${e['files']}',
-                          style: TextStyle(color: Colors.grey[600], fontSize: 10),
+                        Row(
+                          children: [
+                            Icon(Icons.insert_drive_file_outlined, size: 12, color: Colors.grey[600]),
+                            const SizedBox(width: 4),
+                            Expanded(
+                              child: Text(
+                                e['files']!,
+                                style: TextStyle(color: Colors.grey[600], fontSize: 10),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                       Row(
