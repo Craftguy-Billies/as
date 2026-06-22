@@ -31,8 +31,9 @@ class ChatMessage {
         timestamp: (json['timestamp'] ?? 0) as int,
       );
 
-  // Dedup by role:content — server + client versions of same msg merge.
-  String get dedupKey => '$role:$content';
+  // Dedup: server msgs by ID, client msgs by role:content.
+  // Server messages go first (canonical), client fills gaps.
+  String get dedupKey => id != null ? 'id:$id' : '$role:$content';
 }
 
 /// Single-mode chat: everything goes through the server-side batch queue.
@@ -175,10 +176,20 @@ class ChatProvider extends ChangeNotifier {
       if (serverMsgs.isNotEmpty) {
         final merged = <ChatMessage>[];
         final seen = <String>{};
-        for (final m in [...serverMsgs, ..._messages]) {
-          // Dedup by server ID when available, fall back to role:content
-          final key = m.dedupKey;
-          if (seen.add(key)) merged.add(m);
+        final serverContentKeys = <String>{};
+        // Phase 1: server messages first (canonical, have IDs)
+        for (final m in serverMsgs) {
+          if (seen.add(m.dedupKey)) {
+            merged.add(m);
+            serverContentKeys.add('${m.role}:${m.content}');
+          }
+        }
+        // Phase 2: client messages only if not already covered by server
+        for (final m in _messages) {
+          final ck = '${m.role}:${m.content}';
+          if (!serverContentKeys.contains(ck) && seen.add(m.dedupKey)) {
+            merged.add(m);
+          }
         }
         merged.sort((a, b) => a.timestamp.compareTo(b.timestamp));
         _messages = merged;
@@ -330,10 +341,20 @@ class ChatProvider extends ChangeNotifier {
         if (serverMsgs.isNotEmpty) {
           final merged = <ChatMessage>[];
           final seen = <String>{};
-          for (final m in [...serverMsgs, ..._messages]) {
-            // Dedup by server ID when available, fall back to role:content
-            final key = m.dedupKey;
-            if (seen.add(key)) merged.add(m);
+          final serverContentKeys = <String>{};
+          // Phase 1: server messages (canonical, have IDs)
+          for (final m in serverMsgs) {
+            if (seen.add(m.dedupKey)) {
+              merged.add(m);
+              serverContentKeys.add('${m.role}:${m.content}');
+            }
+          }
+          // Phase 2: client messages only if not covered by server
+          for (final m in _messages) {
+            final ck = '${m.role}:${m.content}';
+            if (!serverContentKeys.contains(ck) && seen.add(m.dedupKey)) {
+              merged.add(m);
+            }
           }
           // Sort by timestamp so messages appear chronologically
           merged.sort((a, b) => a.timestamp.compareTo(b.timestamp));

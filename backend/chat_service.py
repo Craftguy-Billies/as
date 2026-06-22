@@ -194,6 +194,7 @@ def reset() -> None:
         _conversation_mode = "code"
         _last_event_index = 0
         _event_kinds.clear()
+        _seen_event_ids.clear()
         _sandbox_id = None
         _messages_by_repo.pop(_current_repo_key, None)  # clear current repo's history
         _conversation_status = "idle"
@@ -359,6 +360,7 @@ def send(prompt: str, repo: str = "", branch: str = "main", mode: str = "code") 
             _conversation_mode = mode
             _current_repo_key = _repo_key(repo)
             _last_event_index = 0
+            _seen_event_ids.clear()
         _msgs().append({"id": _next_msg_id(), 
             "role": "user",
             "content": prompt,
