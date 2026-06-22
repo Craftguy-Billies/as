@@ -66,7 +66,7 @@ class TaskProvider extends ChangeNotifier {
   Future<Task?> createPrompt({
     required String prompt,
     required String repo,
-    String branch = 'main',
+    String branch = '',
     String mode = 'code',
   }) async {
     _error = null;

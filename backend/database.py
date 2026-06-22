@@ -52,7 +52,7 @@ async def init_db() -> None:
                 id TEXT PRIMARY KEY,
                 prompt TEXT NOT NULL,
                 repo TEXT NOT NULL,
-                branch TEXT DEFAULT 'main',
+                branch TEXT DEFAULT '',
                 mode TEXT DEFAULT 'code',
                 status TEXT DEFAULT 'queued',
                 conversation_id TEXT,

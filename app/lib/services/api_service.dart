@@ -57,7 +57,7 @@ class ApiService {
   Future<Task> createPrompt({
     required String prompt,
     required String repo,
-    String branch = 'main',
+    String branch = '',
     String mode = 'code',
   }) async {
     final resp = await http.post(
@@ -129,7 +129,7 @@ class ApiService {
   Future<Map<String, dynamic>> sendChatMessage(
     String prompt, {
     String repo = '',
-    String branch = 'main',
+    String branch = '',
     String mode = 'code',
   }) async {
     final resp = await http
@@ -155,7 +155,7 @@ class ApiService {
   Future<Map<String, dynamic>> sendChatBatch({
     required List<String> prompts,
     String repo = '',
-    String branch = 'main',
+    String branch = '',
     String mode = 'code',
   }) async {
     final resp = await http

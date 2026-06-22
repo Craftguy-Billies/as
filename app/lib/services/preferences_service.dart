@@ -19,7 +19,7 @@ class PreferencesService {
   String? get lastSeenTimestamp => _prefs.getString(_lastSeenKey);
 
   String get lastRepo => _prefs.getString(_lastRepoKey) ?? '';
-  String get lastBranch => _prefs.getString(_lastBranchKey) ?? 'main';
+  String get lastBranch => _prefs.getString(_lastBranchKey) ?? '';
   String get lastMode => _prefs.getString(_lastModeKey) ?? 'code';
 
   Future<void> setServerUrl(String url) async {

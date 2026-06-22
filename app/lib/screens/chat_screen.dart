@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/chat_provider.dart';
 import '../providers/task_provider.dart';
+import '../services/preferences_service.dart';
 import '../widgets/branch_popup.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -30,65 +31,60 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _init() async {
-    // Restore last repo/branch from preferences
-    try {
-      final prefs = await _loadPrefs();
-      _repoCtrl.text = prefs['repo'] ?? '';
-      _branchCtrl.text = prefs['branch'] ?? '';
-      setState(() {
-        if ((prefs['repo'] ?? '').isNotEmpty) _showRepoBar = true;
-      });
-    } catch (_) {}
+    // Step 1: Restore last repo/branch from PreferencesService (single source of truth)
+    final prefs = context.read<PreferencesService>();
+    final savedRepo = prefs.lastRepo;
+    final savedBranch = prefs.lastBranch;
+    debugPrint('[ChatScreen._init] PreferencesService: repo=$savedRepo branch=$savedBranch');
 
-    // Populate provider with saved repo + fetch branches, then load messages
+    _repoCtrl.text = savedRepo;
+    _branchCtrl.text = savedBranch;
+    if (savedRepo.isNotEmpty) {
+      setState(() => _showRepoBar = true);
+    }
+
+    // Step 2: Populate ChatProvider with saved repo + fetch branches
     final prov = context.read<ChatProvider>();
-    final savedRepo = _repoCtrl.text.trim();
-    final savedBranch = _branchCtrl.text.trim();
-    debugPrint('[ChatScreen._init] savedRepo=$savedRepo savedBranch=$savedBranch');
-
     if (savedRepo.isNotEmpty) {
       prov.initRepoFromHome(savedRepo);
       debugPrint('[ChatScreen._init] initRepoFromHome($savedRepo) done, serverRepo=${prov.serverRepo}');
+    } else {
+      debugPrint('[ChatScreen._init] no saved repo — ChatProvider not initialized');
     }
 
+    // Step 3: Load cached messages + merge with server
     try {
       await prov.loadFromCache();
       debugPrint('[ChatScreen._init] loadFromCache done, serverRepo=${prov.serverRepo} serverBranch=${prov.serverBranch}');
-      // Fallback: cache may have cleared serverRepo (empty cache, old format, etc.)
+      // Fallback: cache may not have repo (empty cache, old format, etc.)
       if (prov.serverRepo.isEmpty && savedRepo.isNotEmpty) {
         debugPrint('[ChatScreen._init] FALLBACK: serverRepo empty after cache, restoring $savedRepo');
         prov.initRepoFromHome(savedRepo);
       }
-    } catch (e) {
-      debugPrint('[ChatScreen._init] loadFromCache error: $e');
+    } catch (e, st) {
+      debugPrint('[ChatScreen._init] loadFromCache error: $e\n$st');
     }
     if (mounted) setState(() => _hasLoaded = true);
 
-    // Load model from server
+    // Step 4: Load model preference
     try {
       final sp = await SharedPreferences.getInstance();
       setState(() => _activeModel = sp.getString('last_model') ?? '');
-    } catch (_) {}
-  }
-
-  Future<Map<String, String?>> _loadPrefs() async {
-    final sp = await SharedPreferences.getInstance();
-    return {
-      'repo': sp.getString('last_repo') ?? '',
-      'branch': sp.getString('last_branch') ?? '',
-      'mode': sp.getString('last_mode') ?? 'code',
-    };
+    } catch (e) {
+      debugPrint('[ChatScreen._init] model load error: $e');
+    }
   }
 
   Future<void> _saveRepoPrefs() async {
     try {
-      final sp = await SharedPreferences.getInstance();
-      await Future.wait([
-        sp.setString('last_repo', _repoCtrl.text.trim()),
-        sp.setString('last_branch', _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim()),
-        sp.setString('last_mode', 'code'),
-      ]);
-    } catch (_) {}
+      context.read<PreferencesService>().saveLastPrompt(
+        _repoCtrl.text.trim(),
+        _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim(),
+        'code',
+      );
+    } catch (e) {
+      debugPrint('[ChatScreen._saveRepoPrefs] error: $e');
+    }
   }
 
   @override

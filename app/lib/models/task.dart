@@ -30,7 +30,7 @@ class Task {
       id: (json['id'] ?? '').toString(),
       prompt: (json['prompt'] ?? '').toString(),
       repo: (json['repo'] ?? '').toString(),
-      branch: (json['branch'] ?? 'main').toString(),
+      branch: (json['branch'] ?? '').toString(),
       mode: (json['mode'] ?? 'code').toString(),
       status: (json['status'] ?? 'queued').toString(),
       conversationId: json['conversation_id']?.toString(),
