@@ -141,6 +141,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 : _mode;
             final parts = <String>[];
             if (activeRepo.isNotEmpty) parts.add(activeRepo);
+            if (activeRepo.isNotEmpty && chatProv.serverBranch.isNotEmpty) parts.add(chatProv.serverBranch);
             if (activeRepo.isNotEmpty) parts.add(activeMode.toUpperCase());
             if (_activeModel.isNotEmpty) parts.add(_activeModel);
             return Column(
@@ -350,6 +351,10 @@ class _ChatScreenState extends State<ChatScreen> {
                         return branches.where((b) => b.toLowerCase().contains(value.text.toLowerCase()));
                       },
                       initialValue: TextEditingValue(text: current),
+                      onSelected: (v) {
+                        _branchCtrl.text = v;
+                        _saveRepoPrefs();
+                      },
                       fieldViewBuilder: (_, ctrl, focusNode, ___) {
                         // Keep _branchCtrl in sync with autocomplete controller
                         ctrl.text = _branchCtrl.text.isEmpty ? 'main' : _branchCtrl.text;

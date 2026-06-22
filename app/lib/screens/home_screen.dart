@@ -269,6 +269,11 @@ class _HomeScreenState extends State<HomeScreen> {
                               return branches.where((b) => b.toLowerCase().contains(value.text.toLowerCase()));
                             },
                             initialValue: TextEditingValue(text: current),
+                            onSelected: (v) {
+                              _branchCtrl.text = v;
+                              context.read<PreferencesService>().saveLastPrompt(
+                                _repoCtrl.text, v, _mode);
+                            },
                             fieldViewBuilder: (_, ctrl, focusNode, ___) {
                               ctrl.text = _branchCtrl.text.isEmpty ? 'main' : _branchCtrl.text;
                               return TextField(
