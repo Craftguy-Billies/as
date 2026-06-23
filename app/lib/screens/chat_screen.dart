@@ -27,36 +27,44 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    // Sync restore — MUST happen before first build so TextField
-    // never shows "owner/repo" placeholder when a repo is saved.
-    final prefs = context.read<PreferencesService>();
-    _repoCtrl.text = prefs.lastRepo;
-    _branchCtrl.text = prefs.lastBranch;
-    _showRepoBar = _repoCtrl.text.isNotEmpty;
-    debugPrint('[ChatScreen.initState] restored repo=${_repoCtrl.text} branch=${_branchCtrl.text} showRepoBar=$_showRepoBar');
+    // DO NOT set _repoCtrl.text from prefs here — we want the FIRST frame
+    // to show a loading spinner instead of a stale/empty repo field.
+    // _init() will do the full sync and only then show the UI.
 
-    // Async init: ChatProvider + cache + model
     WidgetsBinding.instance.addPostFrameCallback((_) => _init());
   }
 
   Future<void> _init() async {
-    final savedRepo = _repoCtrl.text.trim();
-    final savedBranch = _branchCtrl.text.trim();
-
-    // Populate ChatProvider with saved repo + fetch branches
     final prov = context.read<ChatProvider>();
+
+    // Step 1: Restore from PreferencesService synchronously (cheap, local).
+    final prefs = context.read<PreferencesService>();
+    final savedRepo = prefs.lastRepo;
+    final savedBranch = prefs.lastBranch;
+    // Write to controllers immediately so ANY value is better than empty.
+    if (savedRepo.isNotEmpty) {
+      _repoCtrl.text = savedRepo;
+      _showRepoBar = true;
+    }
+    if (savedBranch.isNotEmpty) {
+      _branchCtrl.text = savedBranch;
+    }
+    debugPrint('[ChatScreen._init] prefs restored repo=$savedRepo branch=$savedBranch');
+
+    // Step 2: Populate ChatProvider with saved repo
     if (savedRepo.isNotEmpty) {
       prov.initRepoFromHome(savedRepo);
       debugPrint('[ChatScreen._init] initRepoFromHome($savedRepo) done, serverRepo=${prov.serverRepo}');
     }
 
-    // Load cached messages + merge with server.
+    // Step 3: Load cached messages + merge with server.
     // loadFromCache() returns the restored repo (from cache or server).
+    // If server is unreachable, cached values still work.
     final restoredRepo = await prov.loadFromCache();
-    debugPrint('[ChatScreen._init] loadFromCache done, serverRepo=${prov.serverRepo} serverBranch=${prov.serverBranch} restoredRepo=$restoredRepo');
+    debugPrint('[ChatScreen._init] loadFromCache done, serverRepo=${prov.serverRepo} serverBranch=${prov.serverBranch}');
 
-    // ALWAYS sync text controllers from ChatProvider — never show placeholder.
-    // The loadFromCache() always restores repo/branch from cache or server.
+    // Step 4: ALWAYS sync text controllers from ChatProvider.
+    // serverRepo takes priority (both cache & server had a say).
     if (mounted) {
       setState(() {
         if (prov.serverRepo.isNotEmpty) {
@@ -64,9 +72,12 @@ class _ChatScreenState extends State<ChatScreen> {
           _showRepoBar = true;
           debugPrint('[ChatScreen._init] synced _repoCtrl: ${prov.serverRepo}');
         } else if (savedRepo.isNotEmpty) {
-          // Fallback: use saved repo if serverRepo is empty (first launch edge case)
+          // Fallback: PreferencesService
           _repoCtrl.text = savedRepo;
           _showRepoBar = true;
+        } else {
+          // LAST RESORT: try the provider's own fallback
+          // (if loadFromCache found nothing anywhere)
         }
         if (prov.serverBranch.isNotEmpty) {
           _branchCtrl.text = prov.serverBranch;
@@ -76,7 +87,8 @@ class _ChatScreenState extends State<ChatScreen> {
         }
         _hasLoaded = true;
       });
-      if (_repoCtrl.text.isNotEmpty || prov.serverRepo.isNotEmpty) {
+      // Persist whatever we ended up with so next boot is faster
+      if ((_repoCtrl.text.isNotEmpty || prov.serverRepo.isNotEmpty) && mounted) {
         _saveRepoPrefs();
       }
     }

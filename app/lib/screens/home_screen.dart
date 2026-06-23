@@ -26,62 +26,69 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    // Sync restore — must happen before first build
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => _init());
+  }
+
+  Future<void> _init() async {
+    // Step 1: Restore repo/branch from PreferencesService (fast, local)
     final prefs = context.read<PreferencesService>();
     _repoCtrl.text = prefs.lastRepo;
     _branchCtrl.text = prefs.lastBranch;
     final savedRepo = _repoCtrl.text.trim();
     final savedBranch = _branchCtrl.text.trim();
-    debugPrint('[HomeScreen.initState] restored repo=$savedRepo branch=$savedBranch');
+    debugPrint('[HomeScreen._init] prefs restored repo=$savedRepo branch=$savedBranch');
 
-    WidgetsBinding.instance.addPostFrameCallback((_) => _autoConnect());
-
-    // Populate ChatProvider with saved repo + fetch branches
+    // Step 2: Populate ChatProvider with saved repo
     if (savedRepo.isNotEmpty) {
       context.read<ChatProvider>().initRepoFromHome(savedRepo);
     }
-    context.read<ChatProvider>().loadFromCache().then((restoredRepo) {
+
+    // Step 3: Load cached + server state (async)
+    try {
+      final restoredRepo = await context.read<ChatProvider>().loadFromCache();
       final prov = context.read<ChatProvider>();
-      debugPrint('[HomeScreen.initState] loadFromCache done, serverRepo=${prov.serverRepo} restored=$restoredRepo');
-      // ALWAYS sync text controllers from ChatProvider — never show placeholder.
+      debugPrint('[HomeScreen._init] loadFromCache done, serverRepo=${prov.serverRepo} branch=${prov.serverBranch}');
+
+      // Step 4: Sync controllers — serverRepo is authoritative
       if (mounted) {
         if (prov.serverRepo.isNotEmpty && _repoCtrl.text != prov.serverRepo) {
           _repoCtrl.text = prov.serverRepo;
-          context.read<PreferencesService>().saveLastPrompt(prov.serverRepo, _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim(), 'code');
-          debugPrint('[HomeScreen.initState] synced _repoCtrl: ${prov.serverRepo}');
-        } else if (_repoCtrl.text.isEmpty && savedRepo.isNotEmpty) {
-          // Keep the saved repo as fallback
+          debugPrint('[HomeScreen._init] synced _repoCtrl: ${prov.serverRepo}');
         }
         if (prov.serverBranch.isNotEmpty && _branchCtrl.text != prov.serverBranch) {
           _branchCtrl.text = prov.serverBranch;
-          context.read<PreferencesService>().saveLastPrompt(_repoCtrl.text.trim(), prov.serverBranch, 'code');
-          debugPrint('[HomeScreen.initState] synced _branchCtrl: ${prov.serverBranch}');
+          debugPrint('[HomeScreen._init] synced _branchCtrl: ${prov.serverBranch}');
+        }
+        // Persist whatever we ended up with so next boot is instant
+        if (_repoCtrl.text.isNotEmpty) {
+          prefs.saveLastPrompt(
+            _repoCtrl.text.trim(),
+            _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim(),
+            'code',
+          );
         }
       }
-    }).catchError((e) {
-      debugPrint('[HomeScreen.initState] loadFromCache error: $e');
-    });
-  }
+    } catch (e) {
+      debugPrint('[HomeScreen._init] loadFromCache error: $e');
+    }
 
-  Future<void> _autoConnect() async {
-    final settings = context.read<SettingsProvider>();
-    if (settings.connected == null) {
-      try {
-        await settings.testConnection().timeout(const Duration(seconds: 12));
-        if (mounted && settings.connected == true) {
-          await context.read<TaskProvider>().loadTasks();
-          // Check for load errors after loading
-          if (mounted) {
-            final err = context.read<TaskProvider>().error;
-            if (err != null) _showError('Failed to load tasks: $err');
+    // Step 5: Auto-connect (original _autoConnect logic)
+    try {
+      final settings = context.read<SettingsProvider>();
+      if (settings.connected == null) {
+        try {
+          await settings.testConnection().timeout(const Duration(seconds: 12));
+          if (mounted && settings.connected == true) {
+            await context.read<TaskProvider>().loadTasks();
+          }
+        } catch (_) {
+          if (mounted && settings.connected == null) {
+            settings.markDisconnected();
           }
         }
-      } catch (_) {
-        if (mounted && settings.connected == null) {
-          settings.markDisconnected();
-        }
       }
-    }
+    } catch (_) {}
   }
 
   @override
