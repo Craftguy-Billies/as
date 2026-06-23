@@ -408,16 +408,24 @@ def reset() -> None:
 
 
 def get_state(repo: str = "", mode: str = "") -> dict:
-    """Return current chat state for API consumers.
+    """Return chat state for API consumers.
     
-    If repo/mode are provided, switch the active repo key first.
-    This lets the Flutter client request messages for a specific repo.
+    Does NOT mutate _current_repo_key — each Flutter device polls with its OWN
+    repo parameter and gets messages for that repo without overwriting the
+    global key (prevents cross-device ping-pong where phone sets key=B,
+    computer's next poll sets it back to A, phone's poll sets it back to B…).
+    
+    Messages returned: filtered by repo param (if given) or _current_repo_key.
+    The repo param also updates the caller's serverRepo/severBranch via response,
+    so the NEXT poll will use the same repo.
     """
     global _current_repo_key
     with _lock:
-        if repo or mode:
-            _current_repo_key = _repo_key(repo)
-        msgs = list(_msgs())
+        # Never mutate _current_repo_key here. Use repo param to FILTER msgs.
+        if repo:
+            msgs = list(_messages_by_repo.get(_repo_key(repo), []))
+        else:
+            msgs = list(_msgs())
         event_count = sum(1 for m in msgs if m.get("role") == "event")
         # AUDIT: log state response (limit event_count to avoid spam)
         logger.info("AUDIT get_state: repo=%s mode=%s conv=%s msgs=%d events=%d seen_ids=%d batch_running=%s",
@@ -1867,9 +1875,22 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     # events/search may return truncated event lists. Only use zip as a
     # FALLBACK — if events/search already found assistant messages, trust
     # that data (zip extraction can override multiple msgs with one).
+    #
+    # CRITICAL: zip may contain events from PREVIOUS turns (not yet updated).
+    # Skip any MessageEvent whose text matches last_assistant — that would
+    # be a stale copy from a previous turn, causing Phase 3 to reject the
+    # response as "cached" (byte-identical to last_assistant). Also skip
+    # events with IDs already in _seen_event_ids.
     if last_status in ("completed", "finished") and not all_new_msgs:
         try:
             import io, re, zipfile
+            # Snapshot last_assistant BEFORE the lock check (Phase 3 uses lock)
+            _last_assistant_text: str | None = None
+            with _lock:
+                for m in reversed(_msgs()):
+                    if m.get("role") == "assistant":
+                        _last_assistant_text = m.get("content", "")
+                        break
             r3 = httpx.get(
                 f"{CLOUD_API_URL}/api/v1/app-conversations/{_conversation_id}/download",
                 headers=_headers(),
@@ -1877,7 +1898,6 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             )
             r3.raise_for_status()
             zf = zipfile.ZipFile(io.BytesIO(r3.content))
-            # Natural sort: event_1 < event_2 < event_10 (NOT event_1 < event_10 < event_2)
             def _num_key(name: str) -> list:
                 return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', name)]
             event_files = sorted(
@@ -1895,26 +1915,34 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 with zf.open(fname) as f:
                     evt = json.loads(f.read())
                 if evt.get("kind") == "MessageEvent" and evt.get("source") == "agent":
+                    # Skip if already seen via events/search (duplicate event ID)
+                    evt_id = evt.get("id", "")
+                    if evt_id and evt_id in _seen_event_ids:
+                        logger.info("Trajectory zip: skipping MessageEvent id=%s (already seen via events/search)", evt_id[:20])
+                        continue
                     llm_msg = evt.get("llm_message") or evt.get("message") or {}
+                    raw = ""
                     if isinstance(llm_msg, dict):
                         content = llm_msg.get("content") or []
                         if isinstance(content, list):
                             parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip()]
                             if parts:
                                 raw = "\n".join(parts)
-                                evt_ts = evt.get("timestamp", 0)
-                                logger.info("Trajectory zip: found agent MessageEvent ts=%s", evt_ts)
-                                all_new_msgs = [raw]
-                                found = True
-                                break
                     elif isinstance(llm_msg, str) and llm_msg.strip():
-                        evt_ts = evt.get("timestamp", 0)
-                        logger.info("Trajectory zip: found agent MessageEvent ts=%s — str", evt_ts)
-                        all_new_msgs = [llm_msg.strip()]
-                        found = True
-                        break
+                        raw = llm_msg.strip()
+                    if not raw:
+                        continue
+                    # CRITICAL: skip if text matches last_assistant (stale from previous turn)
+                    if _last_assistant_text and raw.strip() == _last_assistant_text.strip():
+                        logger.warning("Trajectory zip: SKIPPING MessageEvent ts=%s (text matches last_assistant — stale zip data)", evt.get("timestamp", 0))
+                        continue
+                    evt_ts = evt.get("timestamp", 0)
+                    logger.info("Trajectory zip: found NEW agent MessageEvent ts=%s (len=%d)", evt_ts, len(raw))
+                    all_new_msgs = [raw]
+                    found = True
+                    break
             if not found:
-                logger.warning("Trajectory zip: no assistant MessageEvent in %d files", len(event_files))
+                logger.warning("Trajectory zip: no NEW assistant MessageEvent in %d files (zip may be stale)", len(event_files))
                 seen = set()
                 for fname in event_files[-30:]:
                     with zf.open(fname) as f:

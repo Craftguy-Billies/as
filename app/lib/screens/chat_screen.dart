@@ -24,12 +24,24 @@ class _ChatScreenState extends State<ChatScreen> {
   int _lastMsgCount = -1;  // auto-scroll to bottom when new msgs arrive
   String _activeModel = '';
 
+  String _lastRepo = '';  // track repo changes to auto-clear branch
+
   @override
   void initState() {
     super.initState();
     // DO NOT set _repoCtrl.text from prefs here — we want the FIRST frame
     // to show a loading spinner instead of a stale/empty repo field.
     // _init() will do the full sync and only then show the UI.
+
+    // Listen for repo changes: when user edits repo, clear branch field.
+    _repoCtrl.addListener(() {
+      final currentRepo = _repoCtrl.text.trim();
+      if (currentRepo != _lastRepo) {
+        _lastRepo = currentRepo;
+        // Clear branch when repo text changes (user typing a new repo)
+        _branchCtrl.text = '';
+      }
+    });
 
     WidgetsBinding.instance.addPostFrameCallback((_) => _init());
   }
@@ -153,7 +165,9 @@ class _ChatScreenState extends State<ChatScreen> {
     _inputCtrl.clear();
     _saveRepoPrefs();
 
-    final branch = _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim();
+    // Empty branch defaults to 'main' so backend injects git pull for main.
+    // The backend also auto-detects the default branch in _create_conversation.
+    final branch = _branchCtrl.text.trim().isEmpty ? 'main' : _branchCtrl.text.trim();
     final prov = context.read<ChatProvider>();
 
     debugPrint('[ChatScreen._send] repo=$repo branch=$branch mode=code');
@@ -1221,7 +1235,11 @@ class _AiWorkGroupState extends State<_AiWorkGroup> {
           const SizedBox(width: 8),
           Flexible(
             child: GestureDetector(
-              onTap: () => setState(() => _expanded = !_expanded),
+              onTap: () {
+                // Don't collapse while AI is actively working on THIS prompt
+                if (widget.response == null) return;
+                setState(() => _expanded = !_expanded);
+              },
               child: Container(
                 constraints: BoxConstraints(
                   maxWidth: MediaQuery.of(context).size.width * 0.82,
