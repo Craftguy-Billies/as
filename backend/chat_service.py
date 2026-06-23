@@ -448,6 +448,7 @@ def get_state(repo: str = "", mode: str = "") -> dict:
                 "position": _batch_position,
                 "total": _batch_total,
                 "done": _batch_position,
+                "repo": _batch_repo,
                 "prompts": list(_batch_prompts),
                 "modes": list(_batch_prompt_modes),
             },
@@ -580,9 +581,22 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
 
     # Guard: if called externally while batch is running, auto-enqueue instead.
     # Batch worker passes _from_batch=True to bypass this guard.
+    # CRITICAL: reject if repo doesn't match the running batch's repo — prevents
+    # cross-repo contamination (phone sends to repo B while computer's batch
+    # is running on repo A). The user must wait or start a new conversation.
     if not _from_batch:
         with _lock:
             if _batch_running:
+                if repo != _batch_repo:
+                    logger.warning("send: BLOCKED auto-enqueue — batch running with repo=%s but send asked for repo=%s",
+                                   _batch_repo, repo)
+                    return {
+                        "error": (
+                            f"Batch already running with repo={_batch_repo or '(none)'}. "
+                            f"Switching to repo={repo} mid-batch is not allowed. "
+                            "Wait for the current batch to finish, then try again."
+                        )
+                    }
                 _batch_prompts.append(prompt)
                 _batch_prompt_modes.append(mode)
                 _batch_total = len(_batch_prompts)

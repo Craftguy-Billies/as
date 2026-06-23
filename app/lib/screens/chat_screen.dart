@@ -23,6 +23,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _showRepoBar = false;
   int _lastMsgCount = -1;  // auto-scroll to bottom when new msgs arrive
   String _activeModel = '';
+  bool _showScrollToBottom = false;  // FAB visible when scrolled up
 
   String _lastRepo = '';  // track repo changes to auto-clear branch
 
@@ -43,7 +44,27 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     });
 
+    // Track scroll position to show/hide scroll-to-bottom button.
+    // With reverse:true, offset=0=bottom. Show button when offset > 200.
+    _scrollCtrl.addListener(() {
+      final offset = _scrollCtrl.hasClients ? _scrollCtrl.offset : 0.0;
+      final show = offset > 200;
+      if (show != _showScrollToBottom) {
+        setState(() => _showScrollToBottom = show);
+      }
+    });
+
     WidgetsBinding.instance.addPostFrameCallback((_) => _init());
+  }
+
+  void _scrollToBottom() {
+    if (_scrollCtrl.hasClients) {
+      _scrollCtrl.animateTo(
+        0, // reverse:true → 0 = bottom
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
+    }
   }
 
   Future<void> _init() async {
@@ -279,7 +300,9 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ],
       ),
-      body: Column(
+      body: Stack(
+        children: [
+          Column(
         children: [
           // Repo bar (collapsible)
           if (_showRepoBar) _buildRepoBar(prov),
@@ -361,6 +384,35 @@ class _ChatScreenState extends State<ChatScreen> {
 
           // Input bar
           _buildInput(prov),
+        ],
+      ),
+
+          // Scroll-to-bottom FAB: visible when scrolled up (offset > 200).
+          // Positioned above the input bar, right-aligned.
+          if (_showScrollToBottom)
+            Positioned(
+              right: 16,
+              bottom: 72,  // above input bar (~56px)
+              child: GestureDetector(
+                onTap: _scrollToBottom,
+                child: Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF7C3AED).withAlpha(200),
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withAlpha(80),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: const Icon(Icons.arrow_downward, color: Colors.white, size: 22),
+                ),
+              ),
+            ),
         ],
       ),
     );
