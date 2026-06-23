@@ -248,6 +248,7 @@ def _restore_from_db() -> None:
     global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _last_event_timestamp, _messages_by_repo, _current_repo_key
     global _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_running, _batch_cancelled, _batch_skip_prompt
     global _msg_counter
+    global _seen_event_ids, _seen_event_hashes
     try:
         db = get_sync_db()
     except Exception:
@@ -276,6 +277,11 @@ def _restore_from_db() -> None:
             # Auto-resume if server restarted mid-batch (remaining prompts in queue)
             _batch_running = _batch_position < _batch_total and len(_batch_prompts) > _batch_position
             _msg_counter = data.get("msg_counter", 0)
+            # Restore seen event IDs and content hashes so the first message
+            # after boot correctly deduplicates old events instead of re-adding
+            # them with new local IDs (step count inflation fix).
+            _seen_event_ids = set(data.get("seen_event_ids", []))
+            _seen_event_hashes = set(data.get("seen_event_hashes", []))
             if _batch_running and not _batch_cancelled:
                 threading.Thread(target=_process_batch_worker, daemon=True).start()
                 logger.info("Auto-resuming batch: %d/%d remaining", _batch_total - _batch_position, _batch_total)
@@ -315,6 +321,9 @@ def _persist_to_db() -> None:
             "batch_branch": _batch_branch,
             "batch_mode": _batch_mode,
             "msg_counter": _msg_counter,
+            # Persist seen event IDs so boot correctly deduplicates
+            "seen_event_ids": list(_seen_event_ids),
+            "seen_event_hashes": list(_seen_event_hashes),
         })
         db.execute(
             "INSERT OR REPLACE INTO kv_store (key, value) VALUES ('chat_session', ?)",
