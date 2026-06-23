@@ -474,8 +474,9 @@ class ChatProvider extends ChangeNotifier {
         final batch = state['batch'] as Map<String, dynamic>?;
         if (batch != null) {
           final wasLoading = _loading;
-          logViewer('ChatProvider.poll: batch running=${batch['running']} pos=${batch['position']} total=${batch['total']} done=${batch['done']} wasLoading=$wasLoading');
-          _loading = batch['running'] == true;
+          final isRunning = batch['running'] == true;
+          logViewer('ChatProvider.poll: batch running=$isRunning pos=${batch['position']} total=${batch['total']} done=${batch['done']} wasLoading=$wasLoading');
+          _loading = isRunning;
           _queuePosition = (batch['position'] as int?) ?? _queuePosition;
           _queueTotal = (batch['total'] as int?) ?? _queueTotal;
           _queueDone = (batch['done'] as int?) ?? _queuePosition;
@@ -490,12 +491,14 @@ class ChatProvider extends ChangeNotifier {
             _batchModes = modes.map((e) => e.toString()).toList();
           }
 
-          if (wasLoading && !_loading) {
+          // Stop polling when batch completes — regardless of wasLoading.
+          // Handles: cancel during poll, batch finishing between polls, etc.
+          if (!isRunning) {
             _loadingSince = null;
             _pollTimer?.cancel();
             _queuePosition = 0;
             _queueTotal = 0;  // hide progress bar
-            logViewer('ChatProvider.poll: DONE pos=$_queuePosition total=$_queueTotal');
+            logViewer('ChatProvider.poll: batch not running — stopped (wasLoading=$wasLoading)');
           }
         }
 

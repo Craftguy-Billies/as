@@ -936,10 +936,7 @@ def _process_batch_worker() -> None:
         while True:
             with _lock:
                 # Per-prompt cancel: skip current, move to next
-                try:
-                    skip_prompt = _batch_skip_prompt
-                except (NameError, UnboundLocalError):
-                    skip_prompt = False
+                skip_prompt = _batch_skip_prompt
                 if skip_prompt:
                     _batch_skip_prompt = False
                     _batch_cancelled = False
@@ -1001,12 +998,21 @@ def _process_batch_worker() -> None:
                 result = {"error": str(e)}
 
             if result and "error" in result:
-                # Don't show error for deliberately cancelled prompts
-                try:
-                    skip = _batch_skip_prompt
-                except (NameError, UnboundLocalError):
-                    skip = False
-                if not skip:
+                # Check if this was a deliberate cancellation — show STOPPED, not ERROR
+                with _lock:
+                    was_cancelled = _batch_cancelled
+                    was_skipped = _batch_skip_prompt
+                if was_cancelled:
+                    with _lock:
+                        _msgs().append({"id": _next_msg_id(), 
+                            "role": "event",
+                            "content": f"[STOPPED] [{pos}/{total}] Cancelled",
+                            "kind": "SystemEvent",
+                            "timestamp": int(time.time() * 1000),
+                        })
+                elif was_skipped:
+                    pass  # per-prompt cancel, silently skip
+                else:
                     with _lock:
                         _msgs().append({"id": _next_msg_id(), 
                             "role": "error",
@@ -1015,12 +1021,11 @@ def _process_batch_worker() -> None:
                         })
 
             with _lock:
-                try:
-                    skip = _batch_skip_prompt
-                except (NameError, UnboundLocalError):
-                    skip = False
-                if not skip:
+                skip_prompt = _batch_skip_prompt
+                if not skip_prompt:
                     _batch_position += 1
+                else:
+                    _batch_skip_prompt = False  # reset after consumption
                 _persist_to_db()
 
             time.sleep(1)  # brief pause between prompts
@@ -1054,6 +1059,9 @@ def cancel_batch() -> dict:
         if not _batch_running and not _batch_cancelled:
             logger.info("cancel_batch: no batch running — no-op")
             return {"status": "idle", "message": "No batch running"}
+        if _batch_cancelled:
+            logger.info("cancel_batch: already cancelled — no-op")
+            return {"status": "already_cancelled"}
         _batch_cancelled = True  # non-blocking flag, worker checks each iteration
         _conversation_status = "idle"
         was_running = _batch_running
@@ -1061,10 +1069,10 @@ def cancel_batch() -> dict:
         remaining = _batch_total - _batch_position
         _batch_prompts = []
         _batch_prompt_modes = []
-        _batch_position = 0
-        _batch_total = 0
+        # Don't reset position/total here — let worker detect cancel and
+        # append a [STOPPED] message. Worker's finally block resets fully.
     if was_running:
-        logger.info("Batch cancelled (%d prompts remaining)", remaining)
+        logger.info("cancel_batch: cancelled (%d remaining, worker will finalize)", remaining)
     return {"status": "cancelled", "remaining": remaining}
 
 
