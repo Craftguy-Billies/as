@@ -1818,10 +1818,11 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 })
             return None
 
-    # When finished, download trajectory zip to get the ACTUAL last response.
-    # events/search only returns first 100 events (oldest), so the current
-    # turn's MessageEvent is unreachable. The zip has ALL events.
-    if last_status in ("completed", "finished"):
+    # When finished, try trajectory zip to get the COMPLETE last response.
+    # events/search may return truncated event lists. Only use zip as a
+    # FALLBACK — if events/search already found assistant messages, trust
+    # that data (zip extraction can override multiple msgs with one).
+    if last_status in ("completed", "finished") and not all_new_msgs:
         try:
             import io, re, zipfile
             r3 = httpx.get(
@@ -1843,7 +1844,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                     [n for n in zf.namelist() if "event" in n.lower() and n.endswith(".json")],
                     key=_num_key,
                 )
-            logger.info("Trajectory zip: %d event files, searching for agent MessageEvent", len(event_files))
+            logger.info("Trajectory zip fallback: %d event files, searching for agent MessageEvent", len(event_files))
             found = False
             for fname in reversed(event_files):
                 with zf.open(fname) as f:
@@ -1857,20 +1858,18 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                             if parts:
                                 raw = "\n".join(parts)
                                 evt_ts = evt.get("timestamp", 0)
-                                logger.info("Trajectory zip: found agent MessageEvent ts=%s — raw (%.100s...)", evt_ts, raw)
+                                logger.info("Trajectory zip: found agent MessageEvent ts=%s", evt_ts)
                                 all_new_msgs = [raw]
                                 found = True
                                 break
                     elif isinstance(llm_msg, str) and llm_msg.strip():
                         evt_ts = evt.get("timestamp", 0)
-                        logger.info("Trajectory zip: found agent MessageEvent ts=%s — raw str (%.100s...)", evt_ts, llm_msg.strip())
+                        logger.info("Trajectory zip: found agent MessageEvent ts=%s — str", evt_ts)
                         all_new_msgs = [llm_msg.strip()]
                         found = True
                         break
             if not found:
                 logger.warning("Trajectory zip: no assistant MessageEvent in %d files", len(event_files))
-                # Log last 5 event filenames for debugging sort order
-                logger.warning("Trajectory zip last 5 fnames: %s", event_files[-5:] if event_files else [])
                 seen = set()
                 for fname in event_files[-30:]:
                     with zf.open(fname) as f:
