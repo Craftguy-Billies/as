@@ -19,6 +19,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final _repoCtrl = TextEditingController();
   final _branchCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
+  final _inputFocusNode = FocusNode();
   bool _hasLoaded = false;
   bool _showRepoBar = false;
   int _lastMsgCount = -1;  // auto-scroll to bottom when new msgs arrive
@@ -154,6 +155,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _repoCtrl.dispose();
     _branchCtrl.dispose();
     _scrollCtrl.dispose();
+    _inputFocusNode.dispose();
     super.dispose();
   }
 
@@ -818,19 +820,15 @@ class _ChatScreenState extends State<ChatScreen> {
           Row(
             children: [
               Expanded(
-                child: TextField(
-                  controller: _inputCtrl,
-                  style: const TextStyle(color: Colors.white, fontSize: 15),
-                  minLines: 1,
-                  maxLines: 4,
-                  textInputAction: TextInputAction.send,
-                  onSubmitted: (_) => _send(),
-                  // Desktop: Enter → send, Shift+Enter → newline
-                  // Phone:  Send button → send (no physical Enter key)
-                  onKeyDown: (event) {
-                    if (event.logicalKey == LogicalKeyboardKey.enter &&
+                child: Focus(
+                  focusNode: _inputFocusNode,
+                  // Desktop: Enter → send (onSubmitted), Shift+Enter → newline
+                  // Phone:  Send button → send, no physical Enter key
+                  onKeyEvent: (node, event) {
+                    if (event is KeyDownEvent &&
+                        event.logicalKey == LogicalKeyboardKey.enter &&
                         HardwareKeyboard.instance.isShiftPressed) {
-                      // Insert newline at cursor, prevent onSubmitted from firing
+                      // Insert newline at cursor, prevent onSubmitted
                       final text = _inputCtrl.text;
                       final sel = _inputCtrl.selection;
                       final pos = sel.isValid ? sel.start : text.length;
@@ -840,16 +838,25 @@ class _ChatScreenState extends State<ChatScreen> {
                     }
                     return KeyEventResult.ignored;
                   },
-                  decoration: InputDecoration(
-                    hintText: 'Send a message…',
-                    hintStyle: TextStyle(color: Colors.grey[700]),
-                    filled: true,
-                    fillColor: const Color(0xFF1A1A2E),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(24),
-                      borderSide: BorderSide.none,
+                  child: TextField(
+                    controller: _inputCtrl,
+                    focusNode: _inputFocusNode,
+                    style: const TextStyle(color: Colors.white, fontSize: 15),
+                    minLines: 1,
+                    maxLines: 4,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => _send(),
+                    decoration: InputDecoration(
+                      hintText: 'Send a message…',
+                      hintStyle: TextStyle(color: Colors.grey[700]),
+                      filled: true,
+                      fillColor: const Color(0xFF1A1A2E),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(24),
+                        borderSide: BorderSide.none,
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                     ),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                   ),
                 ),
               ),
