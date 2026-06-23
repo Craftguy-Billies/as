@@ -142,8 +142,11 @@ class ChatProvider extends ChangeNotifier {
 
   // -- Init: restore from cache + server, resume batch if running --
   /// Returns the restored repo so callers can sync text controllers.
+  /// Returns the restored repo so callers can sync text controllers.
   Future<String> loadFromCache() async {
     logViewer('ChatProvider.loadFromCache: START serverRepo=$serverRepo');
+
+    // --- Phase A: Restore from local SharedPreferences cache ---
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_cacheKey);
     if (raw != null) {
@@ -157,9 +160,6 @@ class ChatProvider extends ChangeNotifier {
                 .toList();
             _resetShowIndex();
           }
-          // ALWAYS restore repo/branch/mode from cache.
-          // This ensures the app always opens to the last used repo,
-          // never showing "owner/repo" placeholder.
           final cachedRepo = (data['repo']?.toString()) ?? '';
           final cachedMode = (data['mode']?.toString()) ?? '';
           final cachedBranch = (data['branch']?.toString()) ?? '';
@@ -173,7 +173,6 @@ class ChatProvider extends ChangeNotifier {
             logViewer('ChatProvider.loadFromCache: branch= $cachedBranch (from cache)');
           }
         } else if (data is List && data.isNotEmpty) {
-          // Legacy cache format (plain list)
           _messages = data
               .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
               .toList();
@@ -185,18 +184,39 @@ class ChatProvider extends ChangeNotifier {
       }
     }
 
-    // Merge server messages (server is authoritative for repo/branch).
-    // This handles the case where the user has been using the app on
-    // another device — server state takes precedence.
+    // --- Phase B: Fetch saved repos from server (BEFORE server merge) ---
+    // This way, if local cache is empty but server has repos, we can use
+    // the most recent one as the key for the server merge that follows.
+    try {
+      _savedRepos = await _api.getChatRepos();
+      logViewer('ChatProvider.loadFromCache: loaded ${_savedRepos.length} repos from server');
+    } catch (e) {
+      logViewer('ChatProvider.loadFromCache: repo fetch failed: $e');
+    }
+
+    // Phase B fallback: if serverRepo is still empty, use most recent
+    // saved repo from server (sorted by last_timestamp desc).
+    if (serverRepo.isEmpty && _savedRepos.isNotEmpty) {
+      for (final r in _savedRepos) {
+        final rp = r['repo']?.toString();
+        if (rp != null && rp.isNotEmpty && rp != '(none)') {
+          serverRepo = rp;
+          serverBranch = r['branch']?.toString() ?? serverBranch;
+          logViewer('ChatProvider.loadFromCache: repo= $serverRepo (from savedRepos fallback)');
+          break;
+        }
+      }
+    }
+
+    // --- Phase C: Merge server messages ---
+    // Now serverRepo is set from cache, savedRepos, or empty (truly first use).
     try {
       final data = await _api.getChat(repo: serverRepo, mode: serverMode);
-      // Restore repo from server (authoritative cross-device source)
       final serverRp = data['repo']?.toString();
       if (serverRp != null && serverRp.isNotEmpty) {
         serverRepo = serverRp;
         logViewer('ChatProvider.loadFromCache: repo= $serverRp (from server)');
       }
-      // Fallback: try current_repo_key
       if (serverRepo.isEmpty) {
         final key = data['current_repo_key']?.toString();
         if (key != null && key.isNotEmpty && key != '(none)') {
@@ -204,13 +224,12 @@ class ChatProvider extends ChangeNotifier {
           logViewer('ChatProvider.loadFromCache: repo= $key (from current_repo_key)');
         }
       }
-      // Restore branch from server state
       final serverBr = data['branch']?.toString();
       if (serverBr != null && serverBr.isNotEmpty) {
         serverBranch = serverBr;
         logViewer('ChatProvider.loadFromCache: branch= $serverBr (from server)');
       }
-      await _saveToCache();  // persist restored repo/branch immediately
+      await _saveToCache();
 
       final serverMsgs = (data['messages'] as List?)
               ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
@@ -220,14 +239,12 @@ class ChatProvider extends ChangeNotifier {
         final merged = <ChatMessage>[];
         final seen = <String>{};
         final serverContentKeys = <String>{};
-        // Phase 1: server messages first (canonical, have IDs)
         for (final m in serverMsgs) {
           if (seen.add(m.dedupKey)) {
             merged.add(m);
             serverContentKeys.add('${m.role}:${m.content}');
           }
         }
-        // Phase 2: client messages only if not already covered by server
         for (final m in _messages) {
           final ck = '${m.role}:${m.content}';
           if (!serverContentKeys.contains(ck) && seen.add(m.dedupKey)) {
@@ -242,10 +259,9 @@ class ChatProvider extends ChangeNotifier {
       }
     } catch (e) {
       logViewer('ChatProvider.loadFromCache: server merge failed (using cache): $e');
-      // If server is unreachable, cached repo/branch still work
     }
 
-    // Resume polling if a batch is running on the server
+    // --- Phase D: Resume polling if batch running ---
     try {
       final state = await _api.getChat(repo: serverRepo, mode: serverMode);
       final batch = state?['batch'] as Map<String, dynamic>?;
@@ -266,32 +282,7 @@ class ChatProvider extends ChangeNotifier {
       logViewer('ChatProvider.loadFromCache: batch resume failed: $e');
     }
 
-    // Fetch saved repos
-    try {
-      _savedRepos = await _api.getChatRepos();
-      logViewer('ChatProvider.loadFromCache: loaded ${_savedRepos.length} repos');
-    } catch (e) {
-      logViewer('ChatProvider.loadFromCache: repo fetch failed: $e');
-    }
-
-    // LAST RESORT: if serverRepo is still empty but the server has saved repos,
-    // use the most recent one (sorted by last_timestamp, desc).
-    if (serverRepo.isEmpty && _savedRepos.isNotEmpty) {
-      for (final r in _savedRepos) {
-        final rp = r['repo']?.toString();
-        if (rp != null && rp.isNotEmpty && rp != '(none)') {
-          serverRepo = rp;
-          serverBranch = r['branch']?.toString() ?? serverBranch;
-          logViewer('ChatProvider.loadFromCache: fallback to saved repo=$serverRepo');
-          break;
-        }
-      }
-      if (serverRepo.isNotEmpty) {
-        await _saveToCache();
-      }
-    }
-
-    // Auto-fetch branches (cold start: _branches is empty)
+    // Auto-fetch branches
     fetchBranches();
     return serverRepo;
   }
