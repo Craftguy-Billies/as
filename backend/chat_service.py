@@ -1759,14 +1759,14 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                     elif isinstance(content, str):
                         text = content.strip()
                 if text:
-                    all_new_msgs.append(text)
-                    with _lock:
-                        _msgs().append({"id": _next_msg_id(), 
-                            "role": "event",
-                            "content": f"[MSG] {text}",
-                            "kind": kind,
-                            "timestamp": int(time.time() * 1000),
-                        })
+                    # ONLY keep the LAST assistant message (replace, not append).
+                    # Multiple MessageEvents per turn (intermediate + final) must
+                    # not all be joined — the final one IS the response.
+                    # Intermediate tool events (ActionEvent/ObservationEvent) are
+                    # already streamed via _format_event_preview. Phase 3 appends
+                    # the final response as "assistant" role. Do NOT also add as
+                    # [MSG] event here — that would duplicate the final response.
+                    all_new_msgs = [text]
                 else:
                     logger.warning("MessageEvent found but NO text extracted: source=%s llm_msg_keys=%s",
                                    source, sorted(llm_msg.keys()) if isinstance(llm_msg, dict) else type(llm_msg).__name__)
@@ -2084,7 +2084,10 @@ def _format_event_preview(evt: dict) -> str | None:
             if text:
                 return f"[BROWSER] Page: ({len(str(text))} chars)"
         else:
-            # skip unknown observations
+            # Log unknown observation tools (browser_*, read, write, think, etc.)
+            # so we can add proper formatting later. The ActionEvent for these
+            # IS already shown via the [TOOL] catch-all above.
+            logger.debug("_format_event_preview: obs tool=%s (skipped, action shown as [TOOL])", tool)
             return None
 
     elif kind == "ErrorEvent":
@@ -2092,5 +2095,18 @@ def _format_event_preview(evt: dict) -> str | None:
         error_type = evt.get("error_type", "") or evt.get("type", "")
         text = msg or error_type or "Unknown error"
         return f"[ERROR] {text[:300]}"
-    # Catch-all: skip unknown event types
+    elif kind == "ConversationStateUpdateEvent":
+        key = evt.get("key", "")
+        val = evt.get("value", "")
+        if key and val:
+            return f"[STATE] {key}={val}"
+        return None
+    elif kind == "SystemPromptEvent":
+        return None  # internal prompt, not user-facing
+    elif kind in ("MessageEvent",):
+        return None  # handled in _wait_for_response
+    # Catch-all: log unknown event kinds at DEBUG level so we can learn what
+    # new kinds the Cloud API produces without dropping them silently.
+    logger.debug("_format_event_preview: unknown kind=%s source=%s tool=%s keys=%s",
+                 kind, source, tool, sorted(evt.keys()))
     return None
