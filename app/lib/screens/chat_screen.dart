@@ -882,30 +882,31 @@ class _ChatBubbleState extends State<_ChatBubble> {
   }
 
   Widget _buildEvent(BuildContext context) {
+    final m = widget.msg;
     // Compact inline event display — tool calls, observations, etc.
     // Backend sends text tags like [READ], [EDIT], [ERROR] instead of emoji
     Color accent;
     IconData icon;
-    if (msg.content.startsWith('[TERMINAL]')) { accent = const Color(0xFF00FF88); icon = Icons.terminal; }
-    else if (msg.content.startsWith('[READ]')) { accent = const Color(0xFF10B981); icon = Icons.menu_book; }
-    else if (msg.content.startsWith('[EDIT]')) { accent = const Color(0xFFF59E0B); icon = Icons.edit; }
-    else if (msg.content.startsWith('[UNDO]')) { accent = Colors.orangeAccent; icon = Icons.undo; }
-    else if (msg.content.startsWith('[SEARCH]')) { accent = const Color(0xFF3B82F6); icon = Icons.search; }
-    else if (msg.content.startsWith('[BROWSER]')) { accent = const Color(0xFF06B6D4); icon = Icons.public; }
-    else if (msg.content.startsWith('[OUT]')) { accent = Colors.grey; icon = Icons.output; }
-    else if (msg.content.startsWith('[WARN]')) { accent = Colors.orangeAccent; icon = Icons.warning_amber; }
-    else if (msg.content.startsWith('[FILE]')) { accent = const Color(0xFF10B981); icon = Icons.description; }
-    else if (msg.content.startsWith('[RESULTS]')) { accent = const Color(0xFF8B5CF6); icon = Icons.bar_chart; }
-    else if (msg.content.startsWith('[ERROR]')) { accent = Colors.redAccent; icon = Icons.error; }
-    else if (msg.content.startsWith('[STOP]')) { accent = Colors.grey; icon = Icons.stop_circle; }
-    else if (msg.content.startsWith('[MSG]')) { accent = Colors.white70; icon = Icons.chat_bubble_outline; }
-    else if (msg.content.startsWith('[STATUS]')) { accent = const Color(0xFF3B82F6); icon = Icons.info_outline; }
-    else if (msg.content.startsWith('[WORKING]')) { accent = const Color(0xFF22C55E); icon = Icons.hourglass_top; }
-    else if (msg.content.startsWith('[DONE]')) { accent = const Color(0xFF22C55E); icon = Icons.check_circle; }
+    if (m.content.startsWith('[TERMINAL]')) { accent = const Color(0xFF00FF88); icon = Icons.terminal; }
+    else if (m.content.startsWith('[READ]')) { accent = const Color(0xFF10B981); icon = Icons.menu_book; }
+    else if (m.content.startsWith('[EDIT]')) { accent = const Color(0xFFF59E0B); icon = Icons.edit; }
+    else if (m.content.startsWith('[UNDO]')) { accent = Colors.orangeAccent; icon = Icons.undo; }
+    else if (m.content.startsWith('[SEARCH]')) { accent = const Color(0xFF3B82F6); icon = Icons.search; }
+    else if (m.content.startsWith('[BROWSER]')) { accent = const Color(0xFF06B6D4); icon = Icons.public; }
+    else if (m.content.startsWith('[OUT]')) { accent = Colors.grey; icon = Icons.output; }
+    else if (m.content.startsWith('[WARN]')) { accent = Colors.orangeAccent; icon = Icons.warning_amber; }
+    else if (m.content.startsWith('[FILE]')) { accent = const Color(0xFF10B981); icon = Icons.description; }
+    else if (m.content.startsWith('[RESULTS]')) { accent = const Color(0xFF8B5CF6); icon = Icons.bar_chart; }
+    else if (m.content.startsWith('[ERROR]')) { accent = Colors.redAccent; icon = Icons.error; }
+    else if (m.content.startsWith('[STOP]')) { accent = Colors.grey; icon = Icons.stop_circle; }
+    else if (m.content.startsWith('[MSG]')) { accent = Colors.white70; icon = Icons.chat_bubble_outline; }
+    else if (m.content.startsWith('[STATUS]')) { accent = const Color(0xFF3B82F6); icon = Icons.info_outline; }
+    else if (m.content.startsWith('[WORKING]')) { accent = const Color(0xFF22C55E); icon = Icons.hourglass_top; }
+    else if (m.content.startsWith('[DONE]')) { accent = const Color(0xFF22C55E); icon = Icons.check_circle; }
     else { accent = Colors.grey; icon = Icons.settings; }
 
     // Strip text tag prefix like "[READ] " for display (icon already conveys meaning)
-    final displayText = _stripTagPrefix(msg.content);
+    final displayText = _stripTagPrefix(m.content);
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 16),
