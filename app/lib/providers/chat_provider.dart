@@ -274,6 +274,23 @@ class ChatProvider extends ChangeNotifier {
       logViewer('ChatProvider.loadFromCache: repo fetch failed: $e');
     }
 
+    // LAST RESORT: if serverRepo is still empty but the server has saved repos,
+    // use the most recent one (sorted by last_timestamp, desc).
+    if (serverRepo.isEmpty && _savedRepos.isNotEmpty) {
+      for (final r in _savedRepos) {
+        final rp = r['repo']?.toString();
+        if (rp != null && rp.isNotEmpty && rp != '(none)') {
+          serverRepo = rp;
+          serverBranch = r['branch']?.toString() ?? serverBranch;
+          logViewer('ChatProvider.loadFromCache: fallback to saved repo=$serverRepo');
+          break;
+        }
+      }
+      if (serverRepo.isNotEmpty) {
+        await _saveToCache();
+      }
+    }
+
     // Auto-fetch branches (cold start: _branches is empty)
     fetchBranches();
     return serverRepo;
