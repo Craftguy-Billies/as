@@ -33,6 +33,22 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    // Desktop: Enter → send (via onSubmitted), Shift+Enter → newline
+    // Phone:  Send button → send, no physical Enter key
+    _inputFocusNode.onKeyEvent = (node, event) {
+      if (event is KeyDownEvent &&
+          event.logicalKey == LogicalKeyboardKey.enter &&
+          HardwareKeyboard.instance.isShiftPressed) {
+        // Insert newline at cursor, prevent onSubmitted from firing
+        final text = _inputCtrl.text;
+        final sel = _inputCtrl.selection;
+        final pos = sel.isValid ? sel.start : text.length;
+        _inputCtrl.text = '${text.substring(0, pos)}\n${text.substring(pos)}';
+        _inputCtrl.selection = TextSelection.collapsed(offset: pos + 1);
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    };
     // DO NOT set _repoCtrl.text from prefs here — we want the FIRST frame
     // to show a loading spinner instead of a stale/empty repo field.
     // _init() will do the full sync and only then show the UI.
@@ -821,43 +837,24 @@ class _ChatScreenState extends State<ChatScreen> {
           Row(
             children: [
               Expanded(
-                child: Focus(
+                child: TextField(
+                  controller: _inputCtrl,
                   focusNode: _inputFocusNode,
-                  // Desktop: Enter → send (onSubmitted), Shift+Enter → newline
-                  // Phone:  Send button → send, no physical Enter key
-                  onKeyEvent: (node, event) {
-                    if (event is KeyDownEvent &&
-                        event.logicalKey == LogicalKeyboardKey.enter &&
-                        HardwareKeyboard.instance.isShiftPressed) {
-                      // Insert newline at cursor, prevent onSubmitted
-                      final text = _inputCtrl.text;
-                      final sel = _inputCtrl.selection;
-                      final pos = sel.isValid ? sel.start : text.length;
-                      _inputCtrl.text = '${text.substring(0, pos)}\n${text.substring(pos)}';
-                      _inputCtrl.selection = TextSelection.collapsed(offset: pos + 1);
-                      return KeyEventResult.handled;
-                    }
-                    return KeyEventResult.ignored;
-                  },
-                  child: TextField(
-                    controller: _inputCtrl,
-                    focusNode: _inputFocusNode,
-                    style: const TextStyle(color: Colors.white, fontSize: 15),
-                    minLines: 1,
-                    maxLines: 4,
-                    textInputAction: TextInputAction.send,
-                    onSubmitted: (_) => _send(),
-                    decoration: InputDecoration(
-                      hintText: 'Send a message…',
-                      hintStyle: TextStyle(color: Colors.grey[700]),
-                      filled: true,
-                      fillColor: const Color(0xFF1A1A2E),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(24),
-                        borderSide: BorderSide.none,
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  style: const TextStyle(color: Colors.white, fontSize: 15),
+                  minLines: 1,
+                  maxLines: 4,
+                  textInputAction: TextInputAction.send,
+                  onSubmitted: (_) => _send(),
+                  decoration: InputDecoration(
+                    hintText: 'Send a message…',
+                    hintStyle: TextStyle(color: Colors.grey[700]),
+                    filled: true,
+                    fillColor: const Color(0xFF1A1A2E),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(24),
+                      borderSide: BorderSide.none,
                     ),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                   ),
                 ),
               ),
