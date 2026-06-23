@@ -514,7 +514,19 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _last_event_timestamp, _sandbox_id
 
     if not CLOUD_API_KEY:
+        logger.error("send: CLOUD_API_KEY not configured")
         return {"error": "OPENHANDS_CLOUD_API_KEY not configured on server"}
+
+    # Validate repo — empty or invalid format is a hard error
+    repo = repo.strip()
+    branch = branch.strip()
+    if not repo:
+        logger.error("send: repo is empty — blocking send")
+        return {"error": "Repository (owner/repo) is required"}
+    import re as _send_re
+    if not _send_re.match(r'^[\w.-]+/[\w.-]+$', repo):
+        logger.error("send: invalid repo format: '%s'", repo)
+        return {"error": f"Invalid repo format: '{repo}'. Use owner/repo"}
 
     # Guard: if called externally while batch is running, auto-enqueue instead.
     # Batch worker passes _from_batch=True to bypass this guard.
@@ -531,12 +543,13 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     # Reset event cursors so each message starts fresh
     _last_event_index = 0
     _last_event_timestamp = ""  # reset timestamp filter for new message
+    _seen_event_ids.clear()  # prevent memory leak across messages
 
-    logger.info("Chat send: prompt=%.80s... repo=%s mode=%s", prompt, repo, mode)
+    logger.info("Chat send: prompt=%.80s... repo=%s branch=%s mode=%s", prompt, repo, branch or '(default)', mode)
 
     # Phase 1a: Quick check under lock — do we need a new conversation?
     with _lock:
-        effective_branch = branch.strip() if branch else _conversation_branch
+        effective_branch = branch if branch else _conversation_branch
         ctx_changed = (
             _conversation_id is not None
             and (repo != _conversation_repo or mode != _conversation_mode)
@@ -566,21 +579,29 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
         need_new_conv = _conversation_id is None
         if not need_new_conv:
             current_conv_id = _conversation_id  # snapshot to use outside lock
+        logger.debug("Phase 1a: need_new_conv=%s ctx_changed=%s branch_switched=%s effective_branch=%s",
+                     need_new_conv, ctx_changed, branch_switched, effective_branch or '(none)')
 
     # Phase 1b: HTTP calls OUTSIDE lock (create may poll start-tasks for up to 150s)
     try:
         if need_new_conv:
+            logger.info("Phase 1b: creating new conversation for repo=%s branch=%s mode=%s",
+                        repo, branch or '(default)', mode)
             new_conv_id = _create_conversation(prompt, repo, branch, mode)
-            logger.info("Created conversation %s (repo=%s mode=%s)",
-                        new_conv_id, repo, mode)
+            logger.info("Created conversation %s (repo=%s mode=%s)", new_conv_id, repo, mode)
         else:
             logger.info("Reusing conversation %s (repo=%s mode=%s)", current_conv_id, repo, mode)
             effective_prompt = prompt
+            # ALWAYS inject git pull before any action, even on same branch.
+            # This ensures the agent always works on latest code, regardless
+            # of when the app was last opened or what branch was selected.
+            git_prefix = f"cd /workspace && git pull origin {effective_branch or 'main'} 2>&1 || echo 'git pull failed'\n\n"
             if branch_switched and effective_branch:
                 # Inject git checkout so the agent switches branch before acting
-                checkout_cmd = f"git fetch origin && git checkout {effective_branch} && git pull origin {effective_branch}"
-                effective_prompt = f"[Switch to branch: {effective_branch}] {checkout_cmd}\n\n{prompt}"
+                checkout_cmd = f"cd /workspace && git fetch origin && git checkout {effective_branch} && git pull origin {effective_branch}"
+                git_prefix = f"{checkout_cmd}\n\n"
                 logger.info("Injected branch switch: checkout %s", effective_branch)
+            effective_prompt = f"{git_prefix}{prompt}"
             success, send_err = _send_message(current_conv_id, effective_prompt)
             if not success:
                 # If sandbox is paused/gone, auto-recover: reset + create new
@@ -616,6 +637,7 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                                 new_conv_id, len(recent_msgs))
                     need_new_conv = True  # Phase 1c will store it
                 else:
+                    logger.warning("send_message failed (non-409): send_err=%s", send_err)
                     with _lock:
                         _conversation_id = None
                         _last_event_index = 0
@@ -623,14 +645,16 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                         _persist_to_db()
                     return {"error": send_err or "Failed to send message to conversation"}
     except httpx.HTTPStatusError as e:
-        logger.error("HTTP error: %s %s", e.response.status_code, e.response.text[:200])
-        if e.response.status_code in (404, 409, 410):
+        status_code = e.response.status_code
+        logger.error("HTTP error: %s %s", status_code, e.response.text[:200])
+        if status_code in (404, 409, 410):
+            logger.warning("HTTP %s — resetting conversation_id", status_code)
             with _lock:
                 _conversation_id = None
                 _last_event_index = 0
                 _sandbox_id = None
                 _persist_to_db()
-        return {"error": f"Cloud API error: {e.response.status_code}"}
+        return {"error": f"Cloud API error: {status_code}"}
     except Exception as e:
         logger.error("Chat error (keeping conversation): %s", e, exc_info=True)
         return {"error": str(e)}
@@ -640,27 +664,32 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
         if need_new_conv:
             _conversation_id = new_conv_id
             _conversation_repo = repo
-            _conversation_branch = branch.strip() if branch else _conversation_branch
+            _conversation_branch = branch if branch else _conversation_branch
             _conversation_mode = mode
             _current_repo_key = _repo_key(repo)
             _last_event_index = 0
             _seen_event_ids.clear()
+            logger.info("Phase 1c: stored new conv_id=%s repo=%s branch=%s mode=%s",
+                        new_conv_id, repo, _conversation_branch, mode)
         _msgs().append({"id": _next_msg_id(), 
             "role": "user",
             "content": prompt,
             "timestamp": int(time.time() * 1000),
         })
         _persist_to_db()
+        logger.debug("Phase 1c: user message appended (total %d msgs)", len(_msgs()))
 
     # Phase 2: Long wait — NO LOCK, get_state() can read events live
     # Track message count before wait so we can replace live [MSG] events
     # with the clean assistant response afterwards.
     with _lock:
         _msg_count_before = len(_msgs())
+    logger.info("Phase 2: waiting for response (msg_count_before=%d)", _msg_count_before)
     try:
         response = _wait_for_response()
+        logger.info("Phase 2: done, response=%s", "non-empty (%d chars)" % len(response) if response else "None/empty")
     except Exception as e:
-        logger.error("Wait for response crashed: %s", e, exc_info=True)
+        logger.error("Phase 2 crashed: %s", e, exc_info=True)
         response = None
 
     # Phase 3: Save result under lock — strip cumulative prefixes and save
@@ -689,8 +718,10 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             # If still nothing, use original — duplicate is better than silence
             if not response and original.strip():
                 response = original.strip()
-            logger.info("Phase 3: response after strip (%.100s...)", response)
+            logger.info("Phase 3: response=%s", "non-empty (%d chars) after strip" % len(response) if response else "EMPTY after strip")
             if not response:
+                logger.warning("Phase 3: all stripping removed everything, original was '%s'",
+                              original.strip()[:100] if original.strip() else "EMPTY")
                 return {
                     "error": "Agent did not produce a new response (prefix stripping removed everything)",
                     "conversation_id": _conversation_id,
@@ -702,12 +733,14 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             })
             _persist_to_db()
             conv_id = _conversation_id
+            logger.info("Phase 3: saved assistant response (%d chars)", len(response))
 
     if response:
         _auto_append_log(repo, prompt, response, ok=True)
         return {"response": response, "conversation_id": conv_id}
     else:
         _auto_append_log(repo, prompt, str(response), ok=False)
+        logger.warning("send: returning error (no response)")
         return {
             "error": "Agent did not produce a response (timeout or conversation error)",
             "conversation_id": _conversation_id,
@@ -890,13 +923,23 @@ def _process_batch_worker() -> None:
 
 
 def cancel_batch() -> dict:
-    """Cancel the running batch queue. Non-blocking — sets flag for worker."""
+    """Cancel the running batch queue. Non-blocking — sets flag for worker.
+    
+    Edge cases handled:
+    - Worker blocked in send() → _batch_cancelled flag will be checked on next cycle
+    - Worker idle → immediate stop
+    - Already cancelled → no-op
+    - No batch running → no-op
+    """
     global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _conversation_status
     with _lock:
+        if not _batch_running and not _batch_cancelled:
+            logger.info("cancel_batch: no batch running — no-op")
+            return {"status": "idle", "message": "No batch running"}
         _batch_cancelled = True  # non-blocking flag, worker checks each iteration
         _conversation_status = "idle"
         was_running = _batch_running
-        _batch_running = False
+        _batch_running = False  # signal weakly — worker_finally block resets fully
         remaining = _batch_total - _batch_position
         _batch_prompts = []
         _batch_prompt_modes = []
@@ -908,7 +951,15 @@ def cancel_batch() -> dict:
 
 
 def cancel_batch_prompt(index: int) -> dict:
-    """Cancel a single prompt in the batch queue by index."""
+    """Cancel a single prompt in the batch queue by index.
+    
+    Edge cases handled:
+    - Prompt currently running (index == position) → sets skip flag,
+      does NOT set _batch_cancelled (which would cancel the entire batch)
+    - Prompt queued ahead (index > position) → removed from list
+    - Already cancelled prompt → error
+    - Empty batch / no batch running → error
+    """
     global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_skip_prompt
 
     with _lock:
@@ -927,8 +978,9 @@ def cancel_batch_prompt(index: int) -> dict:
 
         if index == _batch_position:
             # Cancelling the currently-running prompt
-            _batch_cancelled = True   # interrupt _wait_for_response
-            _batch_skip_prompt = True # tell worker to skip, not clear queue
+            # Use _batch_skip_prompt ONLY (NOT _batch_cancelled), so
+            # the worker loop continues processing remaining prompts
+            _batch_skip_prompt = True
             logger.info("Batch: skipping current prompt [%d/%d]: %.60s...",
                         index + 1, _batch_total + 1, removed)
         else:

@@ -40,24 +40,23 @@ class _HomeScreenState extends State<HomeScreen> {
     if (savedRepo.isNotEmpty) {
       context.read<ChatProvider>().initRepoFromHome(savedRepo);
     }
-    context.read<ChatProvider>().loadFromCache().then((_) {
+    context.read<ChatProvider>().loadFromCache().then((restoredRepo) {
       final prov = context.read<ChatProvider>();
-      debugPrint('[HomeScreen.initState] loadFromCache done, serverRepo=${prov.serverRepo}');
-      if (prov.serverRepo.isEmpty && savedRepo.isNotEmpty) {
-        debugPrint('[HomeScreen.initState] FALLBACK: serverRepo empty after cache, restoring $savedRepo');
-        prov.initRepoFromHome(savedRepo);
-      }
-      // Sync text controllers from ChatProvider — covers the case where the
-      // cache JSON has repo/branch but PreferencesService.lastRepo is empty.
-      if (mounted && _repoCtrl.text.isEmpty && prov.serverRepo.isNotEmpty) {
-        _repoCtrl.text = prov.serverRepo;
-        context.read<PreferencesService>().saveLastPrompt(prov.serverRepo, _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim(), 'code');
-        debugPrint('[HomeScreen.initState] synced _repoCtrl from serverRepo: ${prov.serverRepo}');
-      }
-      if (mounted && _branchCtrl.text.isEmpty && prov.serverBranch.isNotEmpty) {
-        _branchCtrl.text = prov.serverBranch;
-        context.read<PreferencesService>().saveLastPrompt(_repoCtrl.text.trim(), prov.serverBranch, 'code');
-        debugPrint('[HomeScreen.initState] synced _branchCtrl from serverBranch: ${prov.serverBranch}');
+      debugPrint('[HomeScreen.initState] loadFromCache done, serverRepo=${prov.serverRepo} restored=$restoredRepo');
+      // ALWAYS sync text controllers from ChatProvider — never show placeholder.
+      if (mounted) {
+        if (prov.serverRepo.isNotEmpty && _repoCtrl.text != prov.serverRepo) {
+          _repoCtrl.text = prov.serverRepo;
+          context.read<PreferencesService>().saveLastPrompt(prov.serverRepo, _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim(), 'code');
+          debugPrint('[HomeScreen.initState] synced _repoCtrl: ${prov.serverRepo}');
+        } else if (_repoCtrl.text.isEmpty && savedRepo.isNotEmpty) {
+          // Keep the saved repo as fallback
+        }
+        if (prov.serverBranch.isNotEmpty && _branchCtrl.text != prov.serverBranch) {
+          _branchCtrl.text = prov.serverBranch;
+          context.read<PreferencesService>().saveLastPrompt(_repoCtrl.text.trim(), prov.serverBranch, 'code');
+          debugPrint('[HomeScreen.initState] synced _branchCtrl: ${prov.serverBranch}');
+        }
       }
     }).catchError((e) {
       debugPrint('[HomeScreen.initState] loadFromCache error: $e');

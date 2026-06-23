@@ -78,10 +78,6 @@ class ChatProvider extends ChangeNotifier {
   bool get branchesAttempted => _branchesAttempted;
   bool _branchesAttempted = false;  // differentiate "loading" from "empty"
 
-  List<Map<String, dynamic>> _taskLog = [];
-  List<Map<String, dynamic>> get taskLog => _taskLog;
-  String _taskLogRepo = '';
-
   // Lazy message loading: show latest N first, "load earlier" button at top
   // Set high because each user turn spawns ~10-15 internal events ([MSG], [START],
   // [TOOL], etc.) which all count as separate items in _messages.
@@ -145,7 +141,8 @@ class ChatProvider extends ChangeNotifier {
   }
 
   // -- Init: restore from cache + server, resume batch if running --
-  Future<void> loadFromCache() async {
+  /// Returns the restored repo so callers can sync text controllers.
+  Future<String> loadFromCache() async {
     logViewer('ChatProvider.loadFromCache: START serverRepo=$serverRepo');
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_cacheKey);
@@ -160,14 +157,21 @@ class ChatProvider extends ChangeNotifier {
                 .toList();
             _resetShowIndex();
           }
-          // Only override if cache has a non-empty value — preserves initRepoFromHome
+          // ALWAYS restore repo/branch/mode from cache.
+          // This ensures the app always opens to the last used repo,
+          // never showing "owner/repo" placeholder.
           final cachedRepo = (data['repo']?.toString()) ?? '';
           final cachedMode = (data['mode']?.toString()) ?? '';
           final cachedBranch = (data['branch']?.toString()) ?? '';
-          if (cachedRepo.isNotEmpty) serverRepo = cachedRepo;
+          if (cachedRepo.isNotEmpty) {
+            serverRepo = cachedRepo;
+            logViewer('ChatProvider.loadFromCache: repo= $cachedRepo (from cache)');
+          }
           if (cachedMode.isNotEmpty) serverMode = cachedMode;
-          if (cachedBranch.isNotEmpty) serverBranch = cachedBranch;
-          logViewer('ChatProvider.loadFromCache: restored from cache repo=$serverRepo branch=$serverBranch');
+          if (cachedBranch.isNotEmpty) {
+            serverBranch = cachedBranch;
+            logViewer('ChatProvider.loadFromCache: branch= $cachedBranch (from cache)');
+          }
         } else if (data is List && data.isNotEmpty) {
           // Legacy cache format (plain list)
           _messages = data
@@ -181,14 +185,33 @@ class ChatProvider extends ChangeNotifier {
       }
     }
 
-    // Merge server messages (survives server restart)
+    // Merge server messages (server is authoritative for repo/branch).
+    // This handles the case where the user has been using the app on
+    // another device — server state takes precedence.
     try {
       final data = await _api.getChat(repo: serverRepo, mode: serverMode);
+      // Restore repo from server (authoritative cross-device source)
+      final serverRp = data['repo']?.toString();
+      if (serverRp != null && serverRp.isNotEmpty) {
+        serverRepo = serverRp;
+        logViewer('ChatProvider.loadFromCache: repo= $serverRp (from server)');
+      }
+      // Fallback: try current_repo_key
+      if (serverRepo.isEmpty) {
+        final key = data['current_repo_key']?.toString();
+        if (key != null && key.isNotEmpty && key != '(none)') {
+          serverRepo = key;
+          logViewer('ChatProvider.loadFromCache: repo= $key (from current_repo_key)');
+        }
+      }
       // Restore branch from server state
       final serverBr = data['branch']?.toString();
       if (serverBr != null && serverBr.isNotEmpty) {
         serverBranch = serverBr;
+        logViewer('ChatProvider.loadFromCache: branch= $serverBr (from server)');
       }
+      await _saveToCache();  // persist restored repo/branch immediately
+
       final serverMsgs = (data['messages'] as List?)
               ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
               .toList() ??
@@ -215,10 +238,11 @@ class ChatProvider extends ChangeNotifier {
         _messages = merged;
         await _saveToCache();
         _resetShowIndex();
-        _notify();  // always notify after merge, even if batch not running
+        _notify();
       }
     } catch (e) {
-      logViewer('ChatProvider.loadFromCache: server merge failed: $e');
+      logViewer('ChatProvider.loadFromCache: server merge failed (using cache): $e');
+      // If server is unreachable, cached repo/branch still work
     }
 
     // Resume polling if a batch is running on the server
@@ -250,10 +274,9 @@ class ChatProvider extends ChangeNotifier {
       logViewer('ChatProvider.loadFromCache: repo fetch failed: $e');
     }
 
-    // Auto-fetch task log
-    fetchTaskLog();
     // Auto-fetch branches (cold start: _branches is empty)
     fetchBranches();
+    return serverRepo;
   }
 
   // -- Send: queue prompt(s) on server, then poll for progress --
@@ -266,15 +289,33 @@ class ChatProvider extends ChangeNotifier {
     final trimmed = prompt.trim();
     if (trimmed.isEmpty) return;
 
+    // VALIDATE: No messages without a valid repo
+    final effectiveRepo = repo.isNotEmpty ? repo : serverRepo;
+    if (effectiveRepo.isEmpty) {
+      logViewer('ChatProvider.send: BLOCKED — no repo selected');
+      _error = 'Select a repository (owner/repo) before sending messages';
+      _notify();
+      return;
+    }
+    final repoRegex = RegExp(r'^[\w.-]+/[\w.-]+$');
+    if (!repoRegex.hasMatch(effectiveRepo)) {
+      logViewer('ChatProvider.send: BLOCKED — invalid repo format: $effectiveRepo');
+      _error = 'Invalid repo format: $effectiveRepo. Use: owner/repo';
+      _notify();
+      return;
+    }
+
     logViewer('ChatProvider.send: START repo=$repo branch=$branch mode=$mode');
     _error = null;
 
     // If repo or branch changed, switch to new conversation history
-    // Mode switch on same repo+branch → keep messages (plan then code = one chat)
-    if (repo != serverRepo || branch != serverBranch) {
-      final repoChanged = repo != serverRepo;
-      serverRepo = repo;
-      serverBranch = branch;
+    // ONE CHAT PER REPO: branch changes keep same chat, only repo changes create new chat.
+    if ((repo.isNotEmpty && repo != serverRepo) || 
+        (repo.isEmpty && effectiveRepo != serverRepo)) {
+      final newRepo = repo.isNotEmpty ? repo : serverRepo;
+      logViewer('ChatProvider.send: repo changed to $newRepo — switching chat');
+      serverRepo = newRepo;
+      serverBranch = branch.isNotEmpty ? branch : serverBranch;
       serverMode = mode;
       _messages.clear();
       _showFromIndex = 0;
@@ -284,10 +325,27 @@ class ChatProvider extends ChangeNotifier {
       _pollTimer?.cancel();
       await _saveToCache();
       _notify();
-      // Fetch branches if repo changed (send() is often the first place serverRepo gets set)
-      if (repoChanged && repo.isNotEmpty) {
+      if (newRepo.isNotEmpty) {
         fetchBranches();
       }
+      // Fetch messages for the new repo from server
+      try {
+        final state = await _api.getChat(repo: newRepo, mode: serverMode);
+        final serverMsgs = (state['messages'] as List?)
+                ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
+                .toList() ??
+            [];
+        _messages = serverMsgs;
+        _resetShowIndex();
+        await _saveToCache();
+      } catch (e) {
+        logViewer('ChatProvider.send: failed to fetch new repo msgs: $e');
+      }
+    } else if (branch.isNotEmpty && branch != serverBranch) {
+      // Branch switch on same repo — do NOT clear messages (one chat per repo)
+      logViewer('ChatProvider.send: branch switch on same repo: $branch');
+      serverBranch = branch;
+      await _saveToCache();
     } else if (mode != serverMode) {
       serverMode = mode;
       await _saveToCache();
@@ -437,7 +495,6 @@ class ChatProvider extends ChangeNotifier {
             _queuePosition = 0;
             _queueTotal = 0;  // hide progress bar
             logViewer('ChatProvider.poll: DONE pos=$_queuePosition total=$_queueTotal');
-            fetchTaskLog();  // refresh task log after batch completes
           }
         }
 
@@ -510,8 +567,6 @@ class ChatProvider extends ChangeNotifier {
     _notify();
     // Refresh repo list (new repo might appear later after messages)
     refreshRepos();
-    // Load task log for this repo
-    fetchTaskLog();
     // Load branch list for this repo
     fetchBranches();
   }
@@ -559,18 +614,6 @@ class ChatProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> fetchTaskLog() async {
-    if (serverRepo.isEmpty) return;
-    try {
-      _taskLog = await _api.getTaskLog(serverRepo);
-      _taskLogRepo = serverRepo;
-      logViewer('ChatProvider.fetchTaskLog: ${_taskLog.length} entries for $serverRepo');
-      _notify();
-    } catch (e) {
-      logViewer('ChatProvider.fetchTaskLog: $e');
-    }
-  }
-
   Future<void> fetchBranches() async {
     if (serverRepo.isEmpty) {
       _branchesAttempted = true;  // nothing to load
@@ -588,6 +631,109 @@ class ChatProvider extends ChangeNotifier {
       _notify();
     }
   }
+
+  // -- Full refresh: same as closing and reopening the app --
+  /// Re-fetches everything from server: messages, batch state, branches, repos.
+  /// Does NOT clear local messages (merges with server).
+  Future<void> refreshFull() async {
+    logViewer('ChatProvider.refreshFull: START repo=$serverRepo');
+    final previousRepo = serverRepo;
+    final previousBranch = serverBranch;
+
+    try {
+      // Step 1: Re-fetch server state for this repo
+      final data = await _api.getChat(repo: serverRepo, mode: serverMode);
+      logViewer('ChatProvider.refreshFull: got server state');
+
+      // Step 2: Update repo/branch from server
+      final serverRp = data['repo']?.toString();
+      if (serverRp != null && serverRp.isNotEmpty) {
+        serverRepo = serverRp;
+      }
+      final serverBr = data['branch']?.toString();
+      if (serverBr != null && serverBr.isNotEmpty) {
+        serverBranch = serverBr;
+      }
+
+      // Step 3: Merge messages
+      final serverMsgs = (data['messages'] as List?)
+              ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
+              .toList() ??
+          [];
+      if (serverMsgs.isNotEmpty) {
+        final merged = <ChatMessage>[];
+        final seen = <String>{};
+        final serverContentKeys = <String>{};
+        for (final m in serverMsgs) {
+          if (seen.add(m.dedupKey)) {
+            merged.add(m);
+            serverContentKeys.add('${m.role}:${m.content}');
+          }
+        }
+        for (final m in _messages) {
+          final ck = '${m.role}:${m.content}';
+          if (!serverContentKeys.contains(ck) && seen.add(m.dedupKey)) {
+            merged.add(m);
+          }
+        }
+        merged.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+        _messages = merged;
+        _resetShowIndex();
+      }
+
+      // Step 4: Update batch state
+      final batch = data['batch'] as Map<String, dynamic>?;
+      if (batch != null) {
+        _queuePosition = (batch['position'] as int?) ?? 0;
+        _queueTotal = (batch['total'] as int?) ?? 0;
+        _queueDone = (batch['done'] as int?) ?? _queuePosition;
+        _loading = _queueTotal > 0;
+        if (_loading) {
+          _loadingSince ??= DateTime.now();
+          _startPolling(repo: serverRepo, branch: serverBranch, mode: serverMode);
+        } else {
+          _pollTimer?.cancel();
+          _loadingSince = null;
+        }
+        // Parse prompts for cancel UI
+        final prompts = batch['prompts'] as List?;
+        if (prompts != null) {
+          _batchPrompts = prompts.map((e) => e.toString()).toList();
+        }
+        final modes = batch['modes'] as List?;
+        if (modes != null) {
+          _batchModes = modes.map((e) => e.toString()).toList();
+        }
+      } else {
+        _queuePosition = 0;
+        _queueTotal = 0;
+        _queueDone = 0;
+        _loading = false;
+        _loadingSince = null;
+        _batchPrompts = [];
+        _batchModes = [];
+        _pollTimer?.cancel();
+      }
+
+      // Step 5: Refresh branches and repos
+      fetchBranches();
+      try {
+        _savedRepos = await _api.getChatRepos();
+      } catch (_) {}
+
+      await _saveToCache();
+      _error = null;
+      _notify();
+      logViewer('ChatProvider.refreshFull: DONE repo=$serverRepo msgs=${_messages.length} batch=$_queueTotal');
+    } catch (e) {
+      logViewer('ChatProvider.refreshFull ERROR: $e');
+      _error = 'Refresh failed: ${ApiService.friendlyError(e)}';
+      _notify();
+    }
+  }
+
+  /// Alias for external callers (e.g. chat screen refresh button)
+  Future<void> refresh() => refreshFull();
 
   // -- Cancel / Clear --
   Future<void> cancel() async {

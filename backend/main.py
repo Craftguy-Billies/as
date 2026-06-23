@@ -128,12 +128,19 @@ async def chat_send_message(req: ChatRequest):
     """Send a chat message. Reuses conversation across requests for token savings."""
     if req.mode not in ("code", "plan"):
         raise HTTPException(status_code=400, detail="mode must be 'code' or 'plan'")
+    if not req.repo.strip():
+        raise HTTPException(status_code=400, detail="repo is required")
+    import re as _re
+    if not _re.match(r'^[\w.-]+/[\w.-]+$', req.repo.strip()):
+        raise HTTPException(status_code=400, detail=f"Invalid repo format: '{req.repo}'. Use owner/repo")
     loop = asyncio.get_running_loop()
     try:
-        result = await loop.run_in_executor(None, chat_send, req.prompt, req.repo, req.branch, req.mode)
+        result = await loop.run_in_executor(None, chat_send, req.prompt, req.repo.strip(), req.branch.strip(), req.mode)
     except Exception as e:
+        logger.error("chat_send_message EXCEPTION: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
     if "error" in result:
+        logger.warning("chat_send_message error: %s", result["error"])
         raise HTTPException(status_code=502, detail=result["error"])
     return result
 
@@ -143,13 +150,25 @@ async def chat_get(repo: str = Query(""), mode: str = Query("")):
     """Return current chat session state (messages + conversation_id).
     Pass ?repo=owner/repo&mode=code to switch active repo.
     """
-    return chat_state(repo=repo, mode=mode)
+    try:
+        result = chat_state(repo=repo.strip(), mode=mode)
+        logger.debug("chat_get: repo=%s mode=%s msgs=%d", repo or '(none)', mode or '(none)', len(result.get("messages", [])))
+        return result
+    except Exception as e:
+        logger.error("chat_get EXCEPTION: repo=%s mode=%s error=%s", repo, mode, e, exc_info=True)
+        return {"messages": [], "conversation_id": None, "sandbox_id": None, "repo": "", "branch": "", "mode": "code", "current_repo_key": "", "conversation_status": "idle", "batch": {"running": False, "cancelled": False, "position": 0, "total": 0, "done": 0, "prompts": [], "modes": []}}
 
 
 @app.get("/api/chat/repos")
 async def chat_list_repos():
     """Return list of all repos that have chat history."""
-    return {"repos": chat_repos()}
+    try:
+        repos = chat_repos()
+        logger.debug("chat_list_repos: %d repos", len(repos))
+        return {"repos": repos}
+    except Exception as e:
+        logger.error("chat_list_repos EXCEPTION: %s", e, exc_info=True)
+        return {"repos": []}
 
 
 @app.get("/api/chat/log")
@@ -157,9 +176,13 @@ async def chat_task_log_entries(repo: str = Query("")):
     """Return parsed VIBECODER_LOG.md entries for a repo."""
     if not repo:
         return []
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, chat_task_log, repo)
-    return result
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, chat_task_log, repo.strip())
+        return result
+    except Exception as e:
+        logger.error("chat_task_log_entries EXCEPTION: repo=%s error=%s", repo, e, exc_info=True)
+        return []
 
 
 @app.get("/api/chat/branches")
@@ -167,17 +190,27 @@ async def chat_branches_list(repo: str = Query("")):
     """Return branch list for a GitHub repo."""
     if not repo:
         return []
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, chat_branches, repo)
-    return result
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, chat_branches, repo.strip())
+        logger.debug("chat_branches_list: repo=%s branches=%d", repo, len(result))
+        return result
+    except Exception as e:
+        logger.error("chat_branches_list EXCEPTION: repo=%s error=%s", repo, e, exc_info=True)
+        return []
 
 
 @app.delete("/api/chat")
 async def chat_clear():
     """Reset the chat session (start fresh conversation next time)."""
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, chat_reset)
-    return {"ok": True}
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, chat_reset)
+        logger.info("chat_clear: session reset by user")
+        return {"ok": True}
+    except Exception as e:
+        logger.error("chat_clear EXCEPTION: %s", e, exc_info=True)
+        return {"ok": False, "error": str(e)}
 
 
 class BatchRequest(BaseModel):
@@ -196,29 +229,55 @@ async def chat_batch(req: BatchRequest):
     """
     if req.mode not in ('code', 'plan'):
         raise HTTPException(status_code=400, detail="mode must be 'code' or 'plan'")
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(
-        None, chat_enqueue_batch, req.prompts, req.repo, req.branch, req.mode
-    )
-    if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
-    return result
+    if not req.prompts:
+        raise HTTPException(status_code=400, detail="prompts list is empty")
+    if not req.repo.strip():
+        raise HTTPException(status_code=400, detail="repo is required")
+    import re as _re
+    if not _re.match(r'^[\w.-]+/[\w.-]+$', req.repo.strip()):
+        raise HTTPException(status_code=400, detail=f"Invalid repo format: '{req.repo}'. Use owner/repo")
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None, chat_enqueue_batch, req.prompts, req.repo.strip(), req.branch.strip(), req.mode
+        )
+        if "error" in result:
+            logger.warning("chat_batch error: %s", result["error"])
+            raise HTTPException(status_code=400, detail=result["error"])
+        logger.info("chat_batch: %d prompts enqueued for repo=%s branch=%s mode=%s",
+                    len(req.prompts), req.repo, req.branch, req.mode)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("chat_batch EXCEPTION: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/chat/batch/cancel")
 async def chat_batch_cancel():
     """Cancel the running batch queue."""
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, chat_cancel_batch)
-    return result
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, chat_cancel_batch)
+        logger.info("chat_batch_cancel: batch cancelled")
+        return result
+    except Exception as e:
+        logger.error("chat_batch_cancel EXCEPTION: %s", e, exc_info=True)
+        return {"status": "error", "error": str(e)}
 
 
 @app.post("/api/chat/batch/cancel/{index}")
 async def chat_batch_cancel_prompt(index: int):
     """Cancel a single prompt by index in the batch queue."""
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, chat_cancel_batch_prompt, index)
-    return result
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, chat_cancel_batch_prompt, index)
+        logger.info("chat_batch_cancel_prompt: index=%d result=%s", index, result)
+        return result
+    except Exception as e:
+        logger.error("chat_batch_cancel_prompt EXCEPTION: index=%d error=%s", index, e, exc_info=True)
+        return {"status": "error", "error": str(e)}
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +570,27 @@ async def get_current_git_config():
     """Get current git configuration."""
     cfg = get_git_config()
     return {"name": cfg["name"], "email": cfg["email"]}
+
+
+# ---------------------------------------------------------------------------
+# Clear queue (backend-side cleanup for testing)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/chat/clear-queue")
+async def chat_clear_queue():
+    """Clear ALL chat state: messages, batch queue, conversation.
+    
+    Use this to fully reset the backend for fresh testing.
+    Safe to call anytime — never raises.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, lambda: chat_reset())
+        logger.warning("chat_clear_queue: FULL RESET executed")
+        return {"ok": True, "message": "All chat state cleared. Start fresh."}
+    except Exception as e:
+        logger.error("chat_clear_queue EXCEPTION: %s", e, exc_info=True)
+        return {"ok": False, "error": str(e)}
 
 
 # ---------------------------------------------------------------------------

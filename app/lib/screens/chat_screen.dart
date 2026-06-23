@@ -48,35 +48,38 @@ class _ChatScreenState extends State<ChatScreen> {
     if (savedRepo.isNotEmpty) {
       prov.initRepoFromHome(savedRepo);
       debugPrint('[ChatScreen._init] initRepoFromHome($savedRepo) done, serverRepo=${prov.serverRepo}');
-    } else {
-      debugPrint('[ChatScreen._init] no saved repo — ChatProvider not initialized');
     }
 
-    // Load cached messages + merge with server
-    try {
-      await prov.loadFromCache();
-      debugPrint('[ChatScreen._init] loadFromCache done, serverRepo=${prov.serverRepo} serverBranch=${prov.serverBranch}');
-      if (prov.serverRepo.isEmpty && savedRepo.isNotEmpty) {
-        debugPrint('[ChatScreen._init] FALLBACK: serverRepo empty after cache, restoring $savedRepo');
-        prov.initRepoFromHome(savedRepo);
-      }
-      // Sync text controllers from ChatProvider — covers the case where the
-      // cache JSON has repo/branch but PreferencesService.lastRepo is empty.
-      if (mounted && _repoCtrl.text.isEmpty && prov.serverRepo.isNotEmpty) {
-        _repoCtrl.text = prov.serverRepo;
+    // Load cached messages + merge with server.
+    // loadFromCache() returns the restored repo (from cache or server).
+    final restoredRepo = await prov.loadFromCache();
+    debugPrint('[ChatScreen._init] loadFromCache done, serverRepo=${prov.serverRepo} serverBranch=${prov.serverBranch} restoredRepo=$restoredRepo');
+
+    // ALWAYS sync text controllers from ChatProvider — never show placeholder.
+    // The loadFromCache() always restores repo/branch from cache or server.
+    if (mounted) {
+      setState(() {
+        if (prov.serverRepo.isNotEmpty) {
+          _repoCtrl.text = prov.serverRepo;
+          _showRepoBar = true;
+          debugPrint('[ChatScreen._init] synced _repoCtrl: ${prov.serverRepo}');
+        } else if (savedRepo.isNotEmpty) {
+          // Fallback: use saved repo if serverRepo is empty (first launch edge case)
+          _repoCtrl.text = savedRepo;
+          _showRepoBar = true;
+        }
+        if (prov.serverBranch.isNotEmpty) {
+          _branchCtrl.text = prov.serverBranch;
+          debugPrint('[ChatScreen._init] synced _branchCtrl: ${prov.serverBranch}');
+        } else if (savedBranch.isNotEmpty) {
+          _branchCtrl.text = savedBranch;
+        }
+        _hasLoaded = true;
+      });
+      if (_repoCtrl.text.isNotEmpty || prov.serverRepo.isNotEmpty) {
         _saveRepoPrefs();
-        setState(() => _showRepoBar = true);
-        debugPrint('[ChatScreen._init] synced _repoCtrl from serverRepo: ${prov.serverRepo}');
       }
-      if (mounted && _branchCtrl.text.isEmpty && prov.serverBranch.isNotEmpty) {
-        _branchCtrl.text = prov.serverBranch;
-        _saveRepoPrefs();
-        debugPrint('[ChatScreen._init] synced _branchCtrl from serverBranch: ${prov.serverBranch}');
-      }
-    } catch (e, st) {
-      debugPrint('[ChatScreen._init] loadFromCache error: $e\n$st');
     }
-    if (mounted) setState(() => _hasLoaded = true);
 
     // Load model preference
     try {
@@ -205,17 +208,33 @@ class _ChatScreenState extends State<ChatScreen> {
               );
             },
           ),
-          // Task log (VIBECODER_LOG.md)
-          IconButton(
-            icon: const Icon(Icons.checklist, color: Colors.white70, size: 20),
-            tooltip: 'Task log',
-            onPressed: () => _showTaskLog(context),
-          ),
-          // Refresh from server
+          // Refresh: full re-fetch like closing and reopening the app
           IconButton(
             icon: const Icon(Icons.refresh, color: Colors.white70, size: 20),
-            tooltip: 'Refresh messages',
-            onPressed: () => context.read<ChatProvider>().refreshMessages(),
+            tooltip: 'Refresh (re-fetch all state from server)',
+            onPressed: () async {
+              final prov = context.read<ChatProvider>();
+              prov.logViewer('ChatScreen: manual refresh triggered');
+              await prov.refreshFull();
+              if (mounted) {
+                setState(() {
+                  if (_repoCtrl.text.isEmpty && prov.serverRepo.isNotEmpty) {
+                    _repoCtrl.text = prov.serverRepo;
+                    _showRepoBar = true;
+                  }
+                  if (_branchCtrl.text.isEmpty && prov.serverBranch.isNotEmpty) {
+                    _branchCtrl.text = prov.serverBranch;
+                  }
+                });
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Refreshed — state synced from server'),
+                    duration: Duration(seconds: 2),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              }
+            },
           ),
           // Repo/mode toggle
           IconButton(
@@ -440,19 +459,6 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _showTaskLog(BuildContext context) {
-    final prov = context.read<ChatProvider>();
-    prov.fetchTaskLog();
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xFF121212),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (_) => _TaskLogSheet(),
-    );
-  }
   Widget _buildEmpty() {
     return Center(
       child: Column(
@@ -716,15 +722,24 @@ class _ChatScreenState extends State<ChatScreen> {
 // ---------------------------------------------------------------------------
 // Chat bubble
 // ---------------------------------------------------------------------------
-class _ChatBubble extends StatelessWidget {
+class _ChatBubble extends StatefulWidget {
   final ChatMessage msg;
   const _ChatBubble({required this.msg});
 
   @override
+  State<_ChatBubble> createState() => _ChatBubbleState();
+}
+
+class _ChatBubbleState extends State<_ChatBubble> {
+  bool _expanded = false;
+
+  @override
   Widget build(BuildContext context) {
+    final msg = widget.msg;
     final isUser = msg.role == 'user';
     final isEvent = msg.role == 'event';
     final isError = msg.role == 'error';
+    final isAssistant = msg.role == 'assistant';
 
     if (isEvent) return _buildEvent(context);
 
@@ -746,6 +761,14 @@ class _ChatBubble extends StatelessWidget {
       );
     }
 
+    // For assistant messages: collapsible — show preview, tap to expand full
+    final showPreview = isAssistant && !_expanded && msg.content.length > 150;
+    final previewText = showPreview
+        ? (msg.content.length > 300
+            ? '${msg.content.substring(0, 300)}…'
+            : msg.content)
+        : msg.content;
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
@@ -754,68 +777,101 @@ class _ChatBubble extends StatelessWidget {
         children: [
           if (!isUser) const SizedBox(width: 8),
           Flexible(
-            child: Container(
-              constraints: BoxConstraints(
-                maxWidth: MediaQuery.of(context).size.width * 0.82,
-              ),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: isUser ? const Color(0xFF7C3AED) : const Color(0xFF1E1E2E),
-                borderRadius: BorderRadius.only(
-                  topLeft: const Radius.circular(16),
-                  topRight: const Radius.circular(16),
-                  bottomLeft: isUser ? const Radius.circular(16) : const Radius.circular(4),
-                  bottomRight: isUser ? const Radius.circular(4) : const Radius.circular(16),
+            child: GestureDetector(
+              onTap: isAssistant && !_expanded
+                  ? () => setState(() => _expanded = true)
+                  : isAssistant && _expanded
+                      ? () => setState(() => _expanded = false)
+                      : null,
+              child: Container(
+                constraints: BoxConstraints(
+                  maxWidth: MediaQuery.of(context).size.width * 0.82,
                 ),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  isUser
-                      ? SelectableText(
-                          msg.content,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 14.5,
-                            height: 1.45,
-                          ),
-                        )
-                      : SelectionArea(
-                          child: MarkdownBody(
-                          data: msg.content,
-                          styleSheet: MarkdownStyleSheet(
-                            p: const TextStyle(color: Colors.white, fontSize: 14.5, height: 1.45),
-                            code: TextStyle(
-                              color: const Color(0xFFA78BFA),
-                              backgroundColor: Colors.white.withAlpha(20),
-                              fontSize: 13,
-                              fontFamily: 'monospace',
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: isUser ? const Color(0xFF7C3AED) : const Color(0xFF1E1E2E),
+                  borderRadius: BorderRadius.only(
+                    topLeft: const Radius.circular(16),
+                    topRight: const Radius.circular(16),
+                    bottomLeft: isUser ? const Radius.circular(16) : const Radius.circular(4),
+                    bottomRight: isUser ? const Radius.circular(4) : const Radius.circular(16),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    isUser
+                        ? SelectableText(
+                            msg.content,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14.5,
+                              height: 1.45,
                             ),
-                            codeblockDecoration: BoxDecoration(
-                              color: const Color(0xFF0D0D1A),
-                              borderRadius: BorderRadius.circular(8),
+                          )
+                        : SelectionArea(
+                            child: MarkdownBody(
+                            data: previewText,
+                            styleSheet: MarkdownStyleSheet(
+                              p: const TextStyle(color: Colors.white, fontSize: 14.5, height: 1.45),
+                              code: TextStyle(
+                                color: const Color(0xFFA78BFA),
+                                backgroundColor: Colors.white.withAlpha(20),
+                                fontSize: 13,
+                                fontFamily: 'monospace',
+                              ),
+                              codeblockDecoration: BoxDecoration(
+                                color: const Color(0xFF0D0D1A),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              blockquoteDecoration: BoxDecoration(
+                                border: const Border(left: BorderSide(color: Color(0xFF7C3AED), width: 3)),
+                                color: const Color(0xFF7C3AED).withAlpha(20),
+                              ),
+                              a: const TextStyle(color: Color(0xFFA78BFA)),
+                              h1: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+                              h2: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold),
+                              h3: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
+                              listBullet: const TextStyle(color: Color(0xFF7C3AED)),
                             ),
-                            blockquoteDecoration: BoxDecoration(
-                              border: const Border(left: BorderSide(color: Color(0xFF7C3AED), width: 3)),
-                              color: const Color(0xFF7C3AED).withAlpha(20),
-                            ),
-                            a: const TextStyle(color: Color(0xFFA78BFA)),
-                            h1: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
-                            h2: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold),
-                            h3: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
-                            listBullet: const TextStyle(color: Color(0xFF7C3AED)),
                           ),
                         ),
-                      ),
-                  const SizedBox(height: 4),
-                  Text(
-                    _fmtTime(msg.timestamp),
-                    style: TextStyle(
-                      color: Colors.white.withAlpha(80),
-                      fontSize: 10,
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Text(
+                          _fmtTime(msg.timestamp),
+                          style: TextStyle(
+                            color: Colors.white.withAlpha(80),
+                            fontSize: 10,
+                          ),
+                        ),
+                        if (showPreview)
+                          Padding(
+                            padding: const EdgeInsets.only(left: 8),
+                            child: Text(
+                              'Tap to expand',
+                              style: TextStyle(
+                                color: Colors.white.withAlpha(60),
+                                fontSize: 9,
+                              ),
+                            ),
+                          ),
+                        if (isAssistant && _expanded)
+                          Padding(
+                            padding: const EdgeInsets.only(left: 8),
+                            child: Text(
+                              'Tap to collapse',
+                              style: TextStyle(
+                                color: Colors.white.withAlpha(60),
+                                fontSize: 9,
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -968,278 +1024,6 @@ class _TypingIndicatorState extends State<_TypingIndicator>
 // ---------------------------------------------------------------------------
 // Task queue bottom sheet
 // ---------------------------------------------------------------------------
-class _TaskLogSheet extends StatefulWidget {
-  @override
-  State<_TaskLogSheet> createState() => _TaskLogSheetState();
-}
-
-class _TaskLogSheetState extends State<_TaskLogSheet> {
-  int? _expandedIndex;
-
-  @override
-  Widget build(BuildContext context) {
-    return DraggableScrollableSheet(
-      initialChildSize: 0.75,
-      minChildSize: 0.4,
-      maxChildSize: 0.95,
-      expand: false,
-      builder: (_, scrollCtrl) {
-        return Consumer<ChatProvider>(
-          builder: (_, prov, __) {
-            final entries = prov.taskLog;
-            if (entries.isEmpty) {
-              return Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.inbox_outlined, size: 48, color: Colors.grey[700]),
-                    const SizedBox(height: 12),
-                    Text(
-                      'No task log yet',
-                      style: TextStyle(color: Colors.grey[500], fontSize: 16),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Completed tasks appear here automatically',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.grey[700], fontSize: 12),
-                    ),
-                  ],
-                ),
-              );
-            }
-            // Latest first, filter entries older than 3 days, skip non-OK/FAIL entries
-            final now = DateTime.now();
-            final isOkOrFail = (Map<String, dynamic> e) {
-              final s = (e['status'] ?? '').toString().toLowerCase();
-              return s.contains('[ok]') || s.contains('success') || s.contains('[fail]') || s.contains('failed');
-            };
-            final filtered = entries.where((e) {
-              final ts = e['timestamp']?.toString() ?? '';
-              if (ts.isEmpty) return true;
-              try {
-                final t = DateTime.parse(ts);
-                return now.difference(t).inHours < 72;
-              } catch (_) {
-                return true;
-              }
-            }).where(isOkOrFail).toList();
-            if (filtered.isEmpty) {
-              return Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.inbox_outlined, size: 48, color: Colors.grey[700]),
-                    const SizedBox(height: 12),
-                    Text(
-                      'No recent tasks',
-                      style: TextStyle(color: Colors.grey[500], fontSize: 16),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Tasks from the last 3 days appear here',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.grey[700], fontSize: 12),
-                    ),
-                  ],
-                ),
-              );
-            }
-            return ListView.builder(
-              controller: scrollCtrl,
-              padding: const EdgeInsets.all(16),
-              itemCount: filtered.length + 1,
-              itemBuilder: (_, i) {
-                if (i == 0) {
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.checklist, color: Color(0xFF7C3AED), size: 20),
-                        const SizedBox(width: 8),
-                        Text(
-                          'Task Log  ·  ${filtered.length} done',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                }
-                final e = filtered[i - 1];
-                final status = (e['status'] ?? '').toString();
-                final isOK = status.contains('[OK]') || status.toLowerCase().contains('success');
-                final isFail = status.contains('[FAIL]') || status.toLowerCase().contains('failed');
-                final isExpanded = _expandedIndex == (i - 1);
-                return GestureDetector(
-                  onTap: () => setState(() {
-                    _expandedIndex = isExpanded ? null : (i - 1);
-                  }),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
-                    margin: const EdgeInsets.only(bottom: 10),
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF1A1A1A),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(
-                        color: isOK
-                            ? Colors.green.withValues(alpha: 0.3)
-                            : isFail
-                                ? Colors.red.withValues(alpha: 0.3)
-                                : Colors.grey.withValues(alpha: 0.2),
-                      ),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        // Row 1: status icon + AI report
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Padding(
-                              padding: const EdgeInsets.only(top: 2),
-                              child: Icon(
-                                isOK
-                                    ? Icons.check_circle_outline
-                                    : isFail
-                                        ? Icons.cancel_outlined
-                                        : Icons.warning_amber_outlined,
-                                size: 18,
-                                color: isOK
-                                    ? Colors.green
-                                    : isFail
-                                        ? Colors.redAccent
-                                        : Colors.orange,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                (e['details'] ?? e['summary'] ?? '').toString(),
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                                maxLines: isExpanded ? null : 4,
-                                overflow: isExpanded ? null : TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
-                        ),
-                        // Expanded section: full request + status
-                        AnimatedCrossFade(
-                          firstChild: const SizedBox(width: double.infinity),
-                          secondChild: Padding(
-                            padding: const EdgeInsets.only(top: 10),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                // Status line
-                                Row(
-                                  children: [
-                                    Icon(
-                                      isOK
-                                          ? Icons.check_circle
-                                          : isFail
-                                              ? Icons.cancel
-                                              : Icons.warning_amber,
-                                      size: 14,
-                                      color: isOK
-                                          ? Colors.green
-                                          : isFail
-                                              ? Colors.redAccent
-                                              : Colors.orange,
-                                    ),
-                                    const SizedBox(width: 6),
-                                    Text(
-                                      status,
-                                      style: TextStyle(
-                                        color: isOK
-                                            ? Colors.green
-                                            : isFail
-                                                ? Colors.redAccent
-                                                : Colors.orange,
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                // Full request
-                                if ((e['request'] ?? '').isNotEmpty) ...[
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    'Your request:',
-                                    style: TextStyle(color: Colors.grey[600], fontSize: 10),
-                                  ),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    e['request']!,
-                                    style: TextStyle(color: Colors.grey[400], fontSize: 12),
-                                  ),
-                                ],
-                                if ((e['files'] ?? '').isNotEmpty) ...[
-                                  const SizedBox(height: 6),
-                                  Row(
-                                    children: [
-                                      Icon(Icons.insert_drive_file_outlined, size: 12, color: Colors.grey[600]),
-                                      const SizedBox(width: 4),
-                                      Expanded(
-                                        child: Text(
-                                          e['files']!,
-                                          style: TextStyle(color: Colors.grey[500], fontSize: 11),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ],
-                            ),
-                          ),
-                          crossFadeState: isExpanded
-                              ? CrossFadeState.showSecond
-                              : CrossFadeState.showFirst,
-                          duration: const Duration(milliseconds: 200),
-                        ),
-                        // Timestamp + tap hint
-                        const SizedBox(height: 6),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
-                          children: [
-                            if (!isExpanded)
-                              Padding(
-                                padding: const EdgeInsets.only(right: 8),
-                                child: Text(
-                                  'Tap to expand',
-                                  style: TextStyle(color: Colors.grey[800], fontSize: 9),
-                                ),
-                              ),
-                            Text(
-                              e['timestamp'] ?? '',
-                              style: TextStyle(color: Colors.grey[700], fontSize: 10),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            );
-          },
-        );
-      },
-    );
-  }
-}
-
 class _TaskQueueSheet extends StatelessWidget {
   const _TaskQueueSheet();
 
