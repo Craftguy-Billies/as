@@ -540,11 +540,10 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                 logger.info("Batch running — auto-enqueued prompt (now %d total)", _batch_total)
                 return {"status": "appended", "position": _batch_position, "total": _batch_total}
 
-    # Reset event cursors so each message starts fresh
-    _last_event_index = 0
-    _last_event_timestamp = ""  # reset timestamp filter for new message
-    _seen_event_ids.clear()  # prevent memory leak across messages
-
+    # DO NOT reset event cursors here — _last_event_index, _last_event_timestamp,
+    # and _seen_event_ids persist across send() calls so the SECOND message in a
+    # batch correctly fetches ONLY new events (not re-processing the first message's).
+    # Reset happens inside Phase 1a when ctx_changed triggers a new conversation.
     logger.info("Chat send: prompt=%.80s... repo=%s branch=%s mode=%s", prompt, repo, branch or '(empty)', mode)
 
     # Branch validation: if user explicitly provided a branch, verify it exists.
@@ -709,40 +708,27 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
         logger.error("Phase 2 crashed: %s", e, exc_info=True)
         response = None
 
-    # Phase 3: Save result under lock — strip cumulative prefixes and save
-    # clean assistant message. Keep live [MSG] events so users see tool output.
+    # Phase 3: Save result under lock.
+    # Since event cursors persist across send() calls, _wait_for_response returns
+    # ONLY genuinely new content (not cumulative). No prefix-stripping needed.
     with _lock:
-        if response:
-            # Strip previous assistant message prefixes from the cumulative
-            # API response. Try ALL first, fall back to just the LATEST one.
-            original = response
-            msgs = _msgs()
-            # Collect all previous assistant contents
-            prev_contents = [m["content"] for m in msgs
-                           if m.get("role") == "assistant" and m.get("content")]
-            # Strip oldest-to-newest (ALL prior)
-            for prev in prev_contents:
-                if prev and response.startswith(prev):
-                    response = response[len(prev):]
+        if response and response.strip():
             response = response.strip()
-            # If ALL stripping removed everything, try just the LATEST one
-            if not response and prev_contents:
-                response = original
-                latest = prev_contents[-1]
-                if latest and response.startswith(latest):
-                    response = response[len(latest):]
-                response = response.strip()
-            # If still nothing, use original — duplicate is better than silence
-            if not response and original.strip():
-                response = original.strip()
-            logger.info("Phase 3: response=%s", "non-empty (%d chars) after strip" % len(response) if response else "EMPTY after strip")
-            if not response:
-                logger.warning("Phase 3: all stripping removed everything, original was '%s'",
-                              original.strip()[:100] if original.strip() else "EMPTY")
+            # Dedup: skip if content is identical to the last assistant message
+            # (can happen with identical AI outputs — probabilistic, not cumulative)
+            msgs = _msgs()
+            last_assistant = next(
+                (m["content"] for m in reversed(msgs) if m.get("role") == "assistant"),
+                None,
+            )
+            if last_assistant and response == last_assistant:
+                logger.warning("Phase 3: response IDENTICAL to last assistant — "
+                              "skipping duplicate (len=%d)", len(response))
                 return {
-                    "error": "Agent did not produce a new response (prefix stripping removed everything)",
+                    "error": "Agent returned identical response — possible API issue",
                     "conversation_id": _conversation_id,
                 }
+            logger.info("Phase 3: saving response (%d chars)", len(response))
             _msgs().append({"id": _next_msg_id(), 
                 "role": "assistant",
                 "content": response,
@@ -750,7 +736,6 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             })
             _persist_to_db()
             conv_id = _conversation_id
-            logger.info("Phase 3: saved assistant response (%d chars)", len(response))
 
     if response:
         _auto_append_log(repo, prompt, response, ok=True)

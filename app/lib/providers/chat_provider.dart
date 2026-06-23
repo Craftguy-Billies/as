@@ -359,16 +359,6 @@ class ChatProvider extends ChangeNotifier {
       await _saveToCache();
     }
 
-    // Add user message to chat immediately
-    final userMsg = ChatMessage(
-      role: 'user',
-      content: trimmed,
-      timestamp: DateTime.now().millisecondsSinceEpoch,
-    );
-    _messages.add(userMsg);
-    await _saveToCache();
-    _resetShowIndex();
-
     try {
       final result = await _api.sendChatBatch(
         prompts: [trimmed],
@@ -378,7 +368,10 @@ class ChatProvider extends ChangeNotifier {
       );
       logViewer('ChatProvider.send: result=$result');
 
-      if (result['status'] == 'queued') {
+      final status = result['status']?.toString() ?? '';
+      if (status == 'queued') {
+        // DO NOT add user message to chat — it's in the queue.
+        // The poll picks it up once the server processes it.
         _queuePosition = (result['position'] as int?) ?? 0;
         _queueTotal = (result['total'] as int?) ?? 1;
         _pollFailures = 0;
@@ -387,14 +380,14 @@ class ChatProvider extends ChangeNotifier {
         logViewer('ChatProvider.send: queued pos=$_queuePosition total=$_queueTotal — polling');
         _notify();
         _startPolling(repo: repo, branch: branch, mode: mode);
-      } else if (result['status'] == 'appended') {
-        // Appended to running batch — poll active, just update total
+      } else if (status == 'appended') {
+        // Appended to running batch — poll will pick it up
         _queueTotal = (result['total'] as int?) ?? _queueTotal;
         _loading = true;
         logViewer('ChatProvider.send: appended to batch (total=$_queueTotal)');
         _notify();
       } else {
-        logViewer('ChatProvider.send: unexpected status=${result['status']}');
+        logViewer('ChatProvider.send: unexpected status=$status');
         _error = (result['error']?.toString()) ?? 'Server did not accept the request';
         _queuePosition = 0;
         _queueTotal = 0;
