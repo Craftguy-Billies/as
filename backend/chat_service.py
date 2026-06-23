@@ -1448,6 +1448,9 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     all_new_msgs: list[str] = []
     last_status = ""
     last_event_count = 0
+    # Track content hashes for events without Cloud API IDs so they're not
+    # re-added on subsequent send() calls (fix for step count inflation).
+    _seen_event_hashes: set[int] = set()
 
     while time.time() - start < timeout:
         time.sleep(3)
@@ -1581,11 +1584,23 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             tool = evt.get("tool_name", "")
 
             # Skip already-seen events (dedup across send() calls)
-            if evt_id and evt_id in _seen_event_ids:
+            dedup_by_id = bool(evt_id) and evt_id in _seen_event_ids
+            # For events without Cloud API IDs, use content hash as fallback
+            # so they're not re-added on every send() (inflating step count).
+            if not evt_id:
+                content_str = f"{kind}:{source}:{tool}:{json.dumps(evt.get('llm_message', evt.get('message', '')), sort_keys=True, default=str)}"
+                content_hash = hash(content_str)
+                dedup_by_content = content_hash in _seen_event_hashes
+            else:
+                content_hash = 0
+                dedup_by_content = False
+            if dedup_by_id or dedup_by_content:
                 processed_count += 1
                 continue
             if evt_id:
                 _seen_event_ids.add(evt_id)
+            else:
+                _seen_event_hashes.add(content_hash)
 
             # Track event kinds for diagnostics
             _event_kinds.add(kind)

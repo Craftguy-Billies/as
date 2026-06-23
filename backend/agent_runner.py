@@ -445,9 +445,31 @@ def run_conversation_sync(
             # Check if done
             if execution_status in ("completed", "finished"):
                 result["status"] = "completed"
+                # Extract final assistant response text from events
+                for evt in reversed(all_events):
+                    if evt.get("kind") == "MessageEvent" and evt.get("source") != "user":
+                        msg_obj = evt.get("llm_message") or evt.get("message") or {}
+                        if isinstance(msg_obj, str) and msg_obj.strip():
+                            result["response"] = msg_obj.strip()
+                        elif isinstance(msg_obj, dict):
+                            content = msg_obj.get("content") or []
+                            if isinstance(content, list):
+                                parts = []
+                                for block in content:
+                                    if isinstance(block, dict) and block.get("type") == "text":
+                                        t = block.get("text", "")
+                                        if t.strip():
+                                            parts.append(t.strip())
+                                if parts:
+                                    result["response"] = "\n".join(parts)
+                            elif isinstance(content, str) and content.strip():
+                                result["response"] = content.strip()
+                        if result.get("response"):
+                            break
                 logger.info(
-                    "run_conversation_sync: conv=%s completed with %d events (seen=%d)",
+                    "run_conversation_sync: conv=%s completed with %d events (seen=%d) response=%d chars",
                     conversation_id, len(result["events"]), len(seen_event_ids),
+                    len(result.get("response", "")),
                 )
                 break
             elif execution_status in ("failed", "error", "stopped"):

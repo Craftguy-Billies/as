@@ -1372,7 +1372,7 @@ class _WorkingDotState extends State<_WorkingDot> with SingleTickerProviderState
     super.initState();
     _ctrl = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1000),
+      duration: const Duration(milliseconds: 800),
     )..repeat(reverse: true);
   }
 
@@ -1386,17 +1386,26 @@ class _WorkingDotState extends State<_WorkingDot> with SingleTickerProviderState
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: _ctrl,
-      builder: (_, child) => Opacity(
-        opacity: 0.3 + (_ctrl.value * 0.7),
-        child: child,
-      ),
-      child: Container(
-        width: 8,
-        height: 8,
-        margin: const EdgeInsets.only(right: 4),
-        decoration: const BoxDecoration(
-          color: Color(0xFF7C3AED),
-          shape: BoxShape.circle,
+      builder: (_, child) => Transform.scale(
+        scale: 1.0 + (_ctrl.value * 0.4),  // pulse from 1.0× to 1.4×
+        child: Opacity(
+          opacity: 0.6 + (_ctrl.value * 0.4),  // fade 60% → 100%
+          child: Container(
+            width: 10,
+            height: 10,
+            margin: const EdgeInsets.only(right: 4),
+            decoration: BoxDecoration(
+              color: const Color(0xFFA78BFA),  // brighter purple
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF7C3AED).withAlpha(100),
+                  blurRadius: 4,
+                  spreadRadius: 1,
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
