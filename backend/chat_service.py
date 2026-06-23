@@ -1637,11 +1637,11 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         # -- Get events (SAME endpoint as agent_runner) --
         # Use min_timestamp to get only new events after the last seen one.
         # IMPORTANT: Cloud API's events/search does NOT support `offset`
-        # (returns 422). Max limit tested: 200 (from agent_runner.py).
-        # 200 events is sufficient for a single turn's tool calls.
+        # (returns 422). Max limit=100 (confirmed by OpenHands API docs).
+        # 100 events per poll is sufficient for real-time streaming.
         all_events: list = []
         try:
-            params: dict = {"limit": 200}
+            params: dict = {"limit": 100}
             if _last_event_timestamp:
                 params["min_timestamp"] = _last_event_timestamp
             r2 = httpx.get(
