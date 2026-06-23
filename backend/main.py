@@ -532,7 +532,12 @@ async def register_fcm_token(req: FCMTokenRequest):
 
 @app.put("/api/config/llm")
 async def update_llm_config(req: LLMConfigRequest):
-    """Update the LLM configuration at runtime."""
+    """Update the LLM configuration at runtime.
+    
+    The next send() call detects the model change and creates a new
+    Cloud conversation with the new model (preserving message history).
+    """
+    logger.info("LLM config update: model=%s base_url=%s", req.model, req.base_url)
     set_llm_config(AgentConfig(
         model=req.model,
         api_key=req.api_key,

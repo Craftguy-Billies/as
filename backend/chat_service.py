@@ -19,6 +19,7 @@ import time
 from datetime import datetime, timezone, timedelta
 
 from database import get_sync_db
+from agent_runner import get_llm_config, AgentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ _conversation_id: str | None = None
 _conversation_repo: str = ""
 _conversation_branch: str = ""
 _conversation_mode: str = "code"
+_conversation_llm_model: str = ""  # model used when current Cloud conversation was created
 _last_event_index: int = 0
 _last_event_timestamp: str = ""  # timestamp of last seen event for min_timestamp filtering
 _sandbox_id: str | None = None
@@ -245,7 +247,7 @@ def _log_sync_to_github(repo: str, entries: list[dict]) -> None:
 
 # -- Restore state from DB on module load --
 def _restore_from_db() -> None:
-    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _last_event_timestamp, _messages_by_repo, _current_repo_key
+    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _messages_by_repo, _current_repo_key
     global _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_running, _batch_cancelled, _batch_skip_prompt
     global _msg_counter
     global _seen_event_ids, _seen_event_hashes
@@ -261,6 +263,7 @@ def _restore_from_db() -> None:
             _conversation_repo = data.get("repo", "")
             _conversation_branch = data.get("branch", "")
             _conversation_mode = data.get("mode", "code")
+            _conversation_llm_model = data.get("llm_model", "")
             _last_event_index = data.get("last_event_index", 0)
             _last_event_timestamp = data.get("last_event_timestamp", "")
             _messages_by_repo = data.get("messages_by_repo", {})
@@ -305,6 +308,7 @@ def _persist_to_db() -> None:
             "repo": _conversation_repo,
             "branch": _conversation_branch,
             "mode": _conversation_mode,
+            "llm_model": _conversation_llm_model,
             "last_event_index": _last_event_index,
             "last_event_timestamp": _last_event_timestamp,
             "messages_by_repo": _messages_by_repo,
@@ -352,7 +356,7 @@ def _headers() -> dict:
 
 def reset() -> None:
     """Clear the current chat session AND cancel any running batch."""
-    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _last_event_timestamp, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
+    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
     global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_skip_prompt
     with _lock:
         # Cancel running batch
@@ -370,6 +374,7 @@ def reset() -> None:
         _conversation_repo = ""
         _conversation_branch = ""
         _conversation_mode = "code"
+        _conversation_llm_model = ""
         _last_event_index = 0
         _last_event_timestamp = ""
         _event_kinds.clear()
@@ -523,7 +528,7 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     Creates a new conversation when repo or mode changes.
     HTTP calls (create/send) happen OUTSIDE _lock so get_state() polling is never blocked.
     """
-    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _last_event_index, _last_event_timestamp, _sandbox_id
+    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _sandbox_id
 
     if not CLOUD_API_KEY:
         logger.error("send: CLOUD_API_KEY not configured")
@@ -575,9 +580,27 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     # Phase 1a: Quick check under lock — do we need a new conversation?
     with _lock:
         effective_branch = branch if branch else _conversation_branch
+        # Detect LLM model change — the current Cloud conversation was
+        # created with _conversation_llm_model; if get_llm_config() now
+        # returns a different model, force a new conversation (same as
+        # mode/repo change). This preserves message history in _messages_by_repo.
+        # Skip model check for batch messages so a single batch doesn't create
+        # multiple conversations if the model changes mid-batch.
+        cfg = get_llm_config()
+        current_model = cfg.model if cfg else ""
+        model_changed = (
+            not _from_batch
+            and _conversation_id is not None
+            and _conversation_llm_model
+            and current_model
+            and current_model != _conversation_llm_model
+        )
+        if model_changed:
+            logger.info("Model changed '%s'→'%s' — will create new conversation",
+                        _conversation_llm_model, current_model)
         ctx_changed = (
             _conversation_id is not None
-            and (repo != _conversation_repo or mode != _conversation_mode)
+            and (repo != _conversation_repo or mode != _conversation_mode or model_changed)
         )
         branch_switched = (
             _conversation_id is not None
@@ -585,9 +608,10 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             and effective_branch != _conversation_branch
         )
         if ctx_changed:
-            logger.info("Context changed: repo '%s'→'%s' mode '%s'→'%s' — starting new conversation",
+            logger.info("Context changed: repo '%s'→'%s' mode '%s'→'%s' model '%s'→'%s' — starting new conversation",
                         _conversation_repo or '(none)', repo or '(none)',
-                        _conversation_mode, mode)
+                        _conversation_mode, mode,
+                        _conversation_llm_model or '(none)', current_model or '(none)')
             _conversation_id = None
             _last_event_index = 0
             _sandbox_id = None
@@ -610,10 +634,11 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     # Phase 1b: HTTP calls OUTSIDE lock (create may poll start-tasks for up to 150s)
     try:
         if need_new_conv:
-            logger.info("Phase 1b: creating new conversation for repo=%s branch=%s mode=%s",
-                        repo, branch or '(empty)', mode)
+            logger.info("Phase 1b: creating new conversation for repo=%s branch=%s mode=%s model=%s",
+                        repo, branch or '(empty)', mode, current_model)
             new_conv_id = _create_conversation(prompt, repo, branch, mode)
-            logger.info("Created conversation %s (repo=%s mode=%s)", new_conv_id, repo, mode)
+            logger.info("Created conversation %s (repo=%s mode=%s model=%s)",
+                        new_conv_id, repo, mode, current_model)
         else:
             logger.info("Reusing conversation %s (repo=%s mode=%s)", current_conv_id, repo, mode)
             effective_prompt = prompt
@@ -694,12 +719,13 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             _conversation_repo = repo
             _conversation_branch = branch if branch else _conversation_branch
             _conversation_mode = mode
+            _conversation_llm_model = current_model
             _current_repo_key = _repo_key(repo)
             _last_event_index = 0
             _seen_event_ids.clear()
             _seen_event_hashes.clear()
-            logger.info("Phase 1c: stored new conv_id=%s repo=%s branch=%s mode=%s",
-                        new_conv_id, repo, _conversation_branch, mode)
+            logger.info("Phase 1c: stored new conv_id=%s repo=%s branch=%s mode=%s model=%s",
+                        new_conv_id, repo, _conversation_branch, mode, current_model)
         _msgs().append({"id": _next_msg_id(), 
             "role": "user",
             "content": prompt,
@@ -1379,7 +1405,6 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
 
     # Apply custom LLM config if set (same as agent_runner)
     try:
-        from agent_runner import get_llm_config
         cfg = get_llm_config()
         if cfg.api_key:
             body["llm_config"] = {
