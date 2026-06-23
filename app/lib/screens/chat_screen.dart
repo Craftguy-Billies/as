@@ -24,6 +24,7 @@ class _ChatScreenState extends State<ChatScreen> {
   int _lastMsgCount = -1;  // auto-scroll to bottom when new msgs arrive
   String _activeModel = '';
   bool _showScrollToBottom = false;  // FAB visible when scrolled up
+  bool _implementChecked = false;  // "Implement" checkbox — appends audit guard paragraph
 
   String _lastRepo = '';  // track repo changes to auto-clear branch
 
@@ -158,8 +159,24 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _send() {
     if (!mounted) return;
-    final text = _inputCtrl.text.trim();
+    var text = _inputCtrl.text.trim();
     if (text.isEmpty) return;
+
+    // Append "Implement" audit paragraph when checkbox is checked
+    if (_implementChecked) {
+      text += (
+        "\n\n===============================================================\n"
+        "for the implementation, double check again and again in the manner of:\n"
+        "\n"
+        "\n"
+        "a full codebase audit, comprehensive enough\n"
+        "robust catch all debug logging without any missing cases no matter how edge it was\n"
+        "100 posibilities of sub use cases like: how about if the user pressed cancel before xxx? how about xxx? make sure all the sub use cases are also considered, whole flow zero issues\n"
+        "\n"
+        "\n"
+        "full codebase view and search all potential possibilities is main requirement"
+      );
+    }
 
     final repo = _repoCtrl.text.trim();
     if (repo.isEmpty) {
@@ -184,6 +201,8 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     _inputCtrl.clear();
+    // Keep checkbox state — user may want it on for the next send too
+    // (they uncheck it manually when they don't need it).
     _saveRepoPrefs();
 
     // Empty branch defaults to 'main' so backend injects git pull for main.
@@ -191,7 +210,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final branch = _branchCtrl.text.trim().isEmpty ? 'main' : _branchCtrl.text.trim();
     final prov = context.read<ChatProvider>();
 
-    debugPrint('[ChatScreen._send] repo=$repo branch=$branch mode=code');
+    debugPrint('[ChatScreen._send] repo=$repo branch=$branch mode=code implement=$_implementChecked');
     prov.send(text, repo: repo, branch: branch, mode: 'code');
   }
 
@@ -763,6 +782,38 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
             ),
+          // "Implement" checkbox — appends full-audit paragraph to prompt
+          Padding(
+            padding: const EdgeInsets.only(left: 4, bottom: 2),
+            child: Row(
+              children: [
+                SizedBox(
+                  height: 20,
+                  width: 20,
+                  child: Checkbox(
+                    value: _implementChecked,
+                    onChanged: (v) => setState(() => _implementChecked = v ?? false),
+                    activeColor: const Color(0xFF7C3AED),
+                    checkColor: Colors.white,
+                    side: const BorderSide(color: Color(0xFF4A4A5E), width: 1.5),
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                GestureDetector(
+                  onTap: () => setState(() => _implementChecked = !_implementChecked),
+                  child: Text(
+                    'Implement',
+                    style: TextStyle(
+                      color: _implementChecked ? const Color(0xFFA78BFA) : Colors.grey[500],
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
           // Input row
           Row(
             children: [
