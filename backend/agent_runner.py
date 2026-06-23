@@ -101,7 +101,7 @@ def get_llm_config() -> AgentConfig:
         if _llm_config:
             return _llm_config
     return AgentConfig(
-        model=os.getenv("LLM_MODEL", "deepseek-chat"),
+        model=os.getenv("LLM_MODEL", "deepseek/deepseek-v4-flash"),
         api_key=os.getenv("LLM_API_KEY", ""),
         base_url=os.getenv("LLM_BASE_URL"),
     )
