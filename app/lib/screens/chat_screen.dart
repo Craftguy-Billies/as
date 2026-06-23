@@ -1173,6 +1173,27 @@ class _AiWorkGroupState extends State<_AiWorkGroup> {
   bool _expanded = false;
 
   @override
+  void initState() {
+    super.initState();
+    // Start expanded if AI is actively working (no response yet).
+    _expanded = widget.response == null;
+  }
+
+  @override
+  void didUpdateWidget(covariant _AiWorkGroup oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final hadResponse = oldWidget.response != null;
+    final hasResponse = widget.response != null;
+    if (!hadResponse && hasResponse) {
+      // Just finished — auto-collapse
+      if (mounted) setState(() => _expanded = false);
+    } else if (widget.response == null) {
+      // Still working — keep expanded
+      if (!_expanded && mounted) setState(() => _expanded = true);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     final events = widget.events;
     final response = widget.response;
