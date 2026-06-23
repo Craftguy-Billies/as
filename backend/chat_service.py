@@ -1542,28 +1542,31 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         else:
             all_events = []
 
-        new_count = len(all_events) - _last_event_index
-        if new_count > 0 and len(all_events) != last_event_count:
+        # _last_event_index might be stale (from a previous send() call), so
+        # use the raw diff for logging only. Negative means events were trimmed
+        # or min_timestamp advanced beyond the previous index.
+        if len(all_events) != last_event_count:
             last_event_count = len(all_events)
-            logger.info("Conversation %s: %d total events, %d new (index=%d)",
-                        _conversation_id, len(all_events), new_count, _last_event_index)
-            # Log first event kind+source to verify format matches
+            logger.info("Conversation %s: %d events this poll (index=%d seen_ids=%d)",
+                        _conversation_id, len(all_events), _last_event_index,
+                        len(_seen_event_ids))
             if all_events:
                 first = all_events[0]
                 logger.info("First event: kind=%s source=%s tool=%s keys=%s",
                             first.get("kind"), first.get("source"),
                             first.get("tool_name"),
                             sorted(first.keys())[:8])
-        elif new_count == 0 and len(all_events) > 0:
-            pass  # no new events yet, agent still working
-        else:
+        elif len(all_events) == 0:
             # No events at all — log every 30s so we know polling works
             if int(time.time() - start) % 30 < 3:
                 logger.info("Conversation %s: 0 events so far (elapsed %ds)",
                             _conversation_id, int(time.time() - start))
 
-        # Stream EVERYTHING the agent does as live events (text, tools, observations)
-        for evt in all_events[_last_event_index:]:
+        # Stream ALL events, using _seen_event_ids for dedup (NOT index-based
+        # slicing — _last_event_index and min_timestamp track different things
+        # and get out of sync when _last_event_index is not reset each call).
+        processed_count = 0
+        for evt in all_events:
             evt_id = evt.get("id", "")
             kind = evt.get("kind", "")
             source = evt.get("source", "")
@@ -1571,6 +1574,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
             # Skip already-seen events (dedup across send() calls)
             if evt_id and evt_id in _seen_event_ids:
+                processed_count += 1
                 continue
             if evt_id:
                 _seen_event_ids.add(evt_id)
@@ -1625,13 +1629,16 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                         "timestamp": int(time.time() * 1000),
                     })
 
-        # Advance the seen index + capture timestamp of last event
-        # (for min_timestamp filtering on next poll — avoids 100-event limit)
+        # Advance the min_timestamp to the last event's timestamp for API-level
+        # filtering on the next poll. _last_event_index is tracked for logging
+        # only (dedup uses _seen_event_ids, not index-based slicing).
         _last_event_index = len(all_events)
         if all_events:
             last_ts = all_events[-1].get("timestamp", "")
             if last_ts:
                 _last_event_timestamp = str(last_ts)  # normalize to str for API param
+            logger.debug("Events processed: %d new, %d total in this batch, %d seen_ids",
+                         processed_count, _last_event_index, len(_seen_event_ids))
 
         if status in ("completed", "finished"):
             _conversation_status = "idle"
