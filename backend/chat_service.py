@@ -789,23 +789,29 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     # Phase 3: Save result under lock.
     # _wait_for_response collects only new MessageEvent texts via event ID
     # dedup. In rare cases the API may return cumulative content (old + new),
-    # so handle prefix-stripping gracefully. Never return "identical response"
-    # error — it's a false-positive-prone heuristic that breaks the UX.
+    # so handle prefix-stripping gracefully. Reject byte-identical responses
+    # — they indicate the trajectory-zip fallback returned a previous turn's
+    # cached response instead of the current turn's output.
+    duplicate_rejected = False
     with _lock:
         if response and response.strip():
             response = response.strip()
             msgs = _msgs()
             # Strip cumulative prefix: if response starts with the last
             # assistant message, remove it (handles API returning cumulative
-            # content in rare cases). If they're identical, log but keep.
+            # content in rare cases). If they're identical, reject — this
+            # indicates a stale cached response from a previous turn.
             last_assistant = next(
                 (m["content"] for m in reversed(msgs) if m.get("role") == "assistant"),
                 None,
             )
             if last_assistant:
                 if response == last_assistant:
-                    logger.info("Phase 3: response identical to last assistant — "
-                                "saving anyway (len=%d)", len(response))
+                    logger.warning("Phase 3: response byte-identical to last assistant — "
+                                   "rejecting (len=%d). This indicates the agent returned "
+                                   "a cached/stale response from a previous turn.", len(response))
+                    duplicate_rejected = True
+                    response = None
                 elif response.startswith(last_assistant):
                     stripped = response[len(last_assistant):].strip()
                     if stripped:
@@ -815,27 +821,35 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                     else:
                         logger.info("Phase 3: only cumulative prefix remains after strip — "
                                     "saving original (len=%d)", len(response))
-            resp_msg_id = _next_msg_id()
-            event_count_before = sum(1 for m in msgs if m.get("role") == "event")
-            _msgs().append({"id": resp_msg_id, 
-                "role": "assistant",
-                "content": response,
-                "timestamp": int(time.time() * 1000),
-            })
-            _persist_to_db()
-            # AUDIT: log Phase 3 state
-            event_count_after = sum(1 for m in _msgs() if m.get("role") == "event")
-            logger.info("AUDIT 3: conv=%s resp_id=%d msgs=%d events_before=%d events_after=%d "
-                        "seen_ids=%d msg_counter=%d ts=%s",
-                        _conversation_id, resp_msg_id, len(_msgs()),
-                        event_count_before, event_count_after,
-                        len(_seen_event_ids), _msg_counter,
-                        _last_event_timestamp or "(none)")
+            if response:  # may have been set to None by duplicate rejection above
+                resp_msg_id = _next_msg_id()
+                event_count_before = sum(1 for m in msgs if m.get("role") == "event")
+                _msgs().append({"id": resp_msg_id, 
+                    "role": "assistant",
+                    "content": response,
+                    "timestamp": int(time.time() * 1000),
+                })
+                _persist_to_db()
+                # AUDIT: log Phase 3 state
+                event_count_after = sum(1 for m in _msgs() if m.get("role") == "event")
+                logger.info("AUDIT 3: conv=%s resp_id=%d msgs=%d events_before=%d events_after=%d "
+                            "seen_ids=%d msg_counter=%d ts=%s",
+                            _conversation_id, resp_msg_id, len(_msgs()),
+                            event_count_before, event_count_after,
+                            len(_seen_event_ids), _msg_counter,
+                            _last_event_timestamp or "(none)")
             conv_id = _conversation_id
 
     if response:
         _auto_append_log(repo, prompt, response, ok=True)
         return {"response": response, "conversation_id": conv_id}
+    elif duplicate_rejected:
+        logger.warning("send: returning error (duplicate response rejected)")
+        return {
+            "error": "Agent returned a cached response identical to the previous reply. "
+                     "The conversation may need to be reset — try New Conversation.",
+            "conversation_id": _conversation_id,
+        }
     else:
         _auto_append_log(repo, prompt, str(response), ok=False)
         logger.warning("send: returning error (no response)")
@@ -1600,41 +1614,50 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
         # -- Get events (SAME endpoint as agent_runner) --
         # Use min_timestamp to get only new events after the last seen one.
-        # This avoids the 100-event limit bug: in token-efficient mode,
-        # conversations accumulate events across messages, so _last_event_index
-        # eventually exceeds the API limit and all_events[100:] is empty.
+        # This avoids the limit bug: in token-efficient mode, conversations
+        # accumulate events across messages. We paginate to ensure we never
+        # miss events beyond any single-page limit.
+        all_events: list = []
         try:
-            params: dict = {"limit": 100}
-            if _last_event_timestamp:
-                params["min_timestamp"] = _last_event_timestamp
-            r2 = httpx.get(
-                f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
-                headers=_headers(),
-                params=params,
-                timeout=10,
-            )
-            r2.raise_for_status()
-            events_data = r2.json()
-            if _last_event_timestamp:
-                count = len(events_data) if isinstance(events_data, list) else len(events_data.get("items", events_data.get("events", [])))
-                logger.info("Events poll with min_timestamp=%s: got %d events", _last_event_timestamp[:19], count)
+            offset = 0
+            page_limit = 500
+            while True:
+                params: dict = {"limit": page_limit, "offset": offset}
+                if _last_event_timestamp:
+                    params["min_timestamp"] = _last_event_timestamp
+                r2 = httpx.get(
+                    f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
+                    headers=_headers(),
+                    params=params,
+                    timeout=10,
+                )
+                r2.raise_for_status()
+                events_data = r2.json()
+
+                # Robust extraction: try "items", "events", "data", "results", or bare list
+                page_events: list = []
+                if isinstance(events_data, list):
+                    page_events = events_data
+                elif isinstance(events_data, dict):
+                    page_events = (
+                        events_data.get("items")
+                        or events_data.get("events")
+                        or events_data.get("data")
+                        or events_data.get("results")
+                        or []
+                    )
+                all_events.extend(page_events)
+                if _last_event_timestamp:
+                    logger.info("Events poll page offset=%d min_ts=%s: got %d events (total=%d)",
+                                offset, _last_event_timestamp[:19], len(page_events), len(all_events))
+                # Stop when a page returns fewer than the limit
+                if len(page_events) < page_limit:
+                    break
+                offset += page_limit
         except Exception as e:
             logger.warning("Events poll error: %s", e)
-            continue
-
-        # Robust extraction: try "items", "events", "data", "results", or bare list
-        if isinstance(events_data, list):
-            all_events = events_data
-        elif isinstance(events_data, dict):
-            all_events = (
-                events_data.get("items")
-                or events_data.get("events")
-                or events_data.get("data")
-                or events_data.get("results")
-                or []
-            )
-        else:
-            all_events = []
+            if not all_events:
+                continue
 
         # _last_event_index might be stale (from a previous send() call), so
         # use the raw diff for logging only. Negative means events were trimmed
