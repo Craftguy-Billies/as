@@ -35,6 +35,8 @@ _last_event_timestamp: str = ""  # timestamp of last seen event for min_timestam
 _sandbox_id: str | None = None
 _event_kinds: set[str] = set()  # diagnostic: all event kinds seen in current conversation
 _seen_event_ids: set[str] = set()  # dedup: event IDs already added to chat
+# Content hashes for events without Cloud API IDs (persistent across send() calls)
+_seen_event_hashes: set[int] = set()
 _current_repo_key: str = ""  # current repo — determines which chat history to show
 _messages_by_repo: dict[str, list[dict]] = {}  # per-repo chat history
 _msg_counter: int = 0  # monotonically increasing message ID
@@ -363,6 +365,7 @@ def reset() -> None:
         _last_event_timestamp = ""
         _event_kinds.clear()
         _seen_event_ids.clear()
+        _seen_event_hashes.clear()
         _sandbox_id = None
         _messages_by_repo.pop(_current_repo_key, None)  # clear current repo's history
         _current_repo_key = ""
@@ -685,6 +688,7 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             _current_repo_key = _repo_key(repo)
             _last_event_index = 0
             _seen_event_ids.clear()
+            _seen_event_hashes.clear()
             logger.info("Phase 1c: stored new conv_id=%s repo=%s branch=%s mode=%s",
                         new_conv_id, repo, _conversation_branch, mode)
         _msgs().append({"id": _next_msg_id(), 
@@ -1448,9 +1452,6 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     all_new_msgs: list[str] = []
     last_status = ""
     last_event_count = 0
-    # Track content hashes for events without Cloud API IDs so they're not
-    # re-added on subsequent send() calls (fix for step count inflation).
-    _seen_event_hashes: set[int] = set()
 
     while time.time() - start < timeout:
         time.sleep(3)
@@ -1577,6 +1578,10 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         # slicing — _last_event_index and min_timestamp track different things
         # and get out of sync when _last_event_index is not reset each call).
         processed_count = 0
+        with_id = 0
+        no_id = 0
+        skipped = 0
+        added = 0
         for evt in all_events:
             evt_id = evt.get("id", "")
             kind = evt.get("kind", "")
@@ -1588,19 +1593,27 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             # For events without Cloud API IDs, use content hash as fallback
             # so they're not re-added on every send() (inflating step count).
             if not evt_id:
+                no_id += 1
                 content_str = f"{kind}:{source}:{tool}:{json.dumps(evt.get('llm_message', evt.get('message', '')), sort_keys=True, default=str)}"
                 content_hash = hash(content_str)
                 dedup_by_content = content_hash in _seen_event_hashes
             else:
+                with_id += 1
                 content_hash = 0
                 dedup_by_content = False
             if dedup_by_id or dedup_by_content:
                 processed_count += 1
+                skipped += 1
                 continue
+            added += 1
             if evt_id:
                 _seen_event_ids.add(evt_id)
             else:
                 _seen_event_hashes.add(content_hash)
+            if skipped == 0 and added < 5:
+                # First new events — log a few to aid debugging
+                logger.info("_wait_for_response: FIRST_NEW_EVENTS id=%s kind=%s source=%s tool=%s",
+                            evt_id[:20] if evt_id else "(no_id)", kind, source, tool)
 
             # Track event kinds for diagnostics
             _event_kinds.add(kind)
@@ -1665,11 +1678,14 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
         if status in ("completed", "finished"):
             _conversation_status = "idle"
-            logger.info("Conversation %s: finished. Kinds=%s new_msgs=%d total_msgs=%d",
+            logger.info("Conversation %s: finished. Kinds=%s new_msgs=%d total_msgs=%d "
+                        "with_id=%d no_id=%d skipped=%d added=%d seen_ids=%d seen_hashes=%d",
                         _conversation_id,
                         sorted(_event_kinds),
                         len(all_new_msgs),
-                        len(_msgs()))
+                        len(_msgs()),
+                        with_id, no_id, skipped, added,
+                        len(_seen_event_ids), len(_seen_event_hashes))
             break
         elif status in ("failed", "error", "stopped"):
             _conversation_status = "idle"
