@@ -1628,46 +1628,37 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
         # -- Get events (SAME endpoint as agent_runner) --
         # Use min_timestamp to get only new events after the last seen one.
-        # This avoids the limit bug: in token-efficient mode, conversations
-        # accumulate events across messages. We paginate to ensure we never
-        # miss events beyond any single-page limit.
+        # IMPORTANT: Cloud API's events/search does NOT support `offset`
+        # (returns 422). Use a single request with a large enough limit.
+        # 1000 events is sufficient for a single turn's tool calls.
         all_events: list = []
         try:
-            offset = 0
-            page_limit = 500
-            while True:
-                params: dict = {"limit": page_limit, "offset": offset}
-                if _last_event_timestamp:
-                    params["min_timestamp"] = _last_event_timestamp
-                r2 = httpx.get(
-                    f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
-                    headers=_headers(),
-                    params=params,
-                    timeout=10,
-                )
-                r2.raise_for_status()
-                events_data = r2.json()
+            params: dict = {"limit": 1000}
+            if _last_event_timestamp:
+                params["min_timestamp"] = _last_event_timestamp
+            r2 = httpx.get(
+                f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
+                headers=_headers(),
+                params=params,
+                timeout=10,
+            )
+            r2.raise_for_status()
+            events_data = r2.json()
 
-                # Robust extraction: try "items", "events", "data", "results", or bare list
-                page_events: list = []
-                if isinstance(events_data, list):
-                    page_events = events_data
-                elif isinstance(events_data, dict):
-                    page_events = (
-                        events_data.get("items")
-                        or events_data.get("events")
-                        or events_data.get("data")
-                        or events_data.get("results")
-                        or []
-                    )
-                all_events.extend(page_events)
-                if _last_event_timestamp:
-                    logger.info("Events poll page offset=%d min_ts=%s: got %d events (total=%d)",
-                                offset, _last_event_timestamp[:19], len(page_events), len(all_events))
-                # Stop when a page returns fewer than the limit
-                if len(page_events) < page_limit:
-                    break
-                offset += page_limit
+            # Robust extraction: try "items", "events", "data", "results", or bare list
+            if isinstance(events_data, list):
+                all_events = events_data
+            elif isinstance(events_data, dict):
+                all_events = (
+                    events_data.get("items")
+                    or events_data.get("events")
+                    or events_data.get("data")
+                    or events_data.get("results")
+                    or []
+                )
+            if _last_event_timestamp and all_events:
+                logger.info("Events poll min_ts=%s: got %d events",
+                            _last_event_timestamp[:19], len(all_events))
         except Exception as e:
             logger.warning("Events poll error: %s", e)
             if not all_events:
