@@ -1556,6 +1556,13 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     last_status = ""
     last_event_count = 0
 
+    # AUDIT: log entry state
+    logger.info("AUDIT wait_entry: conv=%s ts=%s seen_ids=%d seen_hashes=%d last_idx=%d timeout=%d msgs_before=%d",
+                _conversation_id, _last_event_timestamp or "(none)",
+                len(_seen_event_ids), len(_seen_event_hashes), _last_event_index,
+                timeout, len(_msgs()))
+
+    poll_count = 0
     while time.time() - start < timeout:
         time.sleep(3)
 
@@ -1788,6 +1795,20 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             logger.debug("Events processed: %d new, %d total in this batch, %d seen_ids",
                          processed_count, _last_event_index, len(_seen_event_ids))
 
+        # AUDIT: log per-poll stats for event streaming diagnostics
+        poll_count += 1
+        tool_count = sum(1 for m in _msgs() if m.get("role") == "event" and m.get("kind") not in ("SystemEvent",))
+        status_count = sum(1 for m in _msgs() if m.get("role") == "event" and m.get("kind") == "SystemEvent")
+        logger.info("AUDIT wait_poll_%d: conv=%s status=%s elapsed=%ds "
+                    "events_this_poll=%d tool_evts=%d status_evts=%d "
+                    "all_new_msgs=%d total_msgs=%d seen=%d ts=%s",
+                    poll_count, _conversation_id, status, int(time.time()-start),
+                    len(all_events) if all_events else 0,
+                    tool_count, status_count,
+                    len(all_new_msgs), len(_msgs()),
+                    len(_seen_event_ids),
+                    _last_event_timestamp or "(none)")
+
         if status in ("completed", "finished"):
             _conversation_status = "idle"
             logger.info("Conversation %s: finished. Kinds=%s new_msgs=%d total_msgs=%d "
@@ -1909,6 +1930,15 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 })
 
     _conversation_status = "idle"
+    # AUDIT: log final state before returning
+    tool_count = sum(1 for m in _msgs() if m.get("role") == "event" and m.get("kind") not in ("SystemEvent",))
+    status_count = sum(1 for m in _msgs() if m.get("role") == "event" and m.get("kind") == "SystemEvent")
+    logger.info("AUDIT wait_exit: conv=%s elapsed=%ds msgs=%d tool_evts=%d status_evts=%d "
+                "all_new_msgs=%d seen=%d ts=%s has_response=%s",
+                _conversation_id, int(time.time()-start), len(_msgs()),
+                tool_count, status_count, len(all_new_msgs), len(_seen_event_ids),
+                _last_event_timestamp or "(none)",
+                bool(all_new_msgs))
     return "\n\n".join(all_new_msgs) if all_new_msgs else None
 
 
