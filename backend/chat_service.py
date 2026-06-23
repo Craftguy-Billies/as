@@ -709,25 +709,34 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
         response = None
 
     # Phase 3: Save result under lock.
-    # Since event cursors persist across send() calls, _wait_for_response returns
-    # ONLY genuinely new content (not cumulative). No prefix-stripping needed.
+    # _wait_for_response collects only new MessageEvent texts via event ID
+    # dedup. In rare cases the API may return cumulative content (old + new),
+    # so handle prefix-stripping gracefully. Never return "identical response"
+    # error — it's a false-positive-prone heuristic that breaks the UX.
     with _lock:
         if response and response.strip():
             response = response.strip()
-            # Dedup: skip if content is identical to the last assistant message
-            # (can happen with identical AI outputs — probabilistic, not cumulative)
             msgs = _msgs()
+            # Strip cumulative prefix: if response starts with the last
+            # assistant message, remove it (handles API returning cumulative
+            # content in rare cases). If they're identical, log but keep.
             last_assistant = next(
                 (m["content"] for m in reversed(msgs) if m.get("role") == "assistant"),
                 None,
             )
-            if last_assistant and response == last_assistant:
-                logger.warning("Phase 3: response IDENTICAL to last assistant — "
-                              "skipping duplicate (len=%d)", len(response))
-                return {
-                    "error": "Agent returned identical response — possible API issue",
-                    "conversation_id": _conversation_id,
-                }
+            if last_assistant:
+                if response == last_assistant:
+                    logger.info("Phase 3: response identical to last assistant — "
+                                "saving anyway (len=%d)", len(response))
+                elif response.startswith(last_assistant):
+                    stripped = response[len(last_assistant):].strip()
+                    if stripped:
+                        logger.info("Phase 3: stripped cumulative prefix (was %d, now %d chars)",
+                                    len(response), len(stripped))
+                        response = stripped
+                    else:
+                        logger.info("Phase 3: only cumulative prefix remains after strip — "
+                                    "saving original (len=%d)", len(response))
             logger.info("Phase 3: saving response (%d chars)", len(response))
             _msgs().append({"id": _next_msg_id(), 
                 "role": "assistant",
@@ -892,7 +901,7 @@ def _process_batch_worker() -> None:
                 if not skip:
                     with _lock:
                         _msgs().append({"id": _next_msg_id(), 
-                            "role": "assistant",
+                            "role": "error",
                             "content": f"[ERROR] [{pos}/{total}] Failed: {result['error']}",
                             "timestamp": int(time.time() * 1000),
                         })
@@ -911,9 +920,8 @@ def _process_batch_worker() -> None:
         logger.error("Batch worker FATAL crash: %s", e, exc_info=True)
         with _lock:
             _msgs().append({"id": _next_msg_id(), 
-                "role": "event",
-                "content": f"[ERROR] Worker crashed\nType: {type(e).__name__}\nMessage: {e}",
-                "kind": "ErrorEvent",
+                "role": "error",
+                "content": f"Worker crashed: {type(e).__name__}: {e}",
                 "timestamp": int(time.time() * 1000),
             })
     finally:

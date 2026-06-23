@@ -1229,7 +1229,7 @@ class _AiWorkGroupState extends State<_AiWorkGroup> {
                         ),
                         const SizedBox(width: 2),
                         // Pulsing working dot when AI is active (no response yet)
-                        if (response == null && hasResponse == false)
+                        if (response == null)
                           _WorkingDot(),
                         Text(
                           'AI Work · $evtCount step${evtCount > 1 ? 's' : ''}',
