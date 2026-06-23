@@ -825,6 +825,21 @@ class _ChatScreenState extends State<ChatScreen> {
                   maxLines: 4,
                   textInputAction: TextInputAction.send,
                   onSubmitted: (_) => _send(),
+                  // Desktop: Enter → send, Shift+Enter → newline
+                  // Phone:  Send button → send (no physical Enter key)
+                  onKeyDown: (event) {
+                    if (event.logicalKey == LogicalKeyboardKey.enter &&
+                        HardwareKeyboard.instance.isShiftPressed) {
+                      // Insert newline at cursor, prevent onSubmitted from firing
+                      final text = _inputCtrl.text;
+                      final sel = _inputCtrl.selection;
+                      final pos = sel.isValid ? sel.start : text.length;
+                      _inputCtrl.text = '${text.substring(0, pos)}\n${text.substring(pos)}';
+                      _inputCtrl.selection = TextSelection.collapsed(offset: pos + 1);
+                      return KeyEventResult.handled;
+                    }
+                    return KeyEventResult.ignored;
+                  },
                   decoration: InputDecoration(
                     hintText: 'Send a message…',
                     hintStyle: TextStyle(color: Colors.grey[700]),
