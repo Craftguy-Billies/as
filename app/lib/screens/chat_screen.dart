@@ -281,7 +281,9 @@ class _ChatScreenState extends State<ChatScreen> {
                         final visible = msgs.sublist(prov.showFromIndex);
                         final hasMore = prov.hasMoreMessages;
                         final showTyping = prov.loading;
-                        final items = <Widget>[];
+                        // Build items oldest-first, then reverse for newest-at-bottom.
+                        // Can't use 'final' since we reassign after grouping.
+                        var items = <Widget>[];
                         if (showTyping) items.add(_buildTyping());
                         // Group consecutive events + following assistant into
                         // ONE collapsed bubble so 50 queued prompts don't flood.
@@ -304,7 +306,6 @@ class _ChatScreenState extends State<ChatScreen> {
                             ii++;
                           }
                         }
-                        // items are oldest-first → reverse for newset-at-bottom ListView
                         items = items.reversed.toList();
                         if (hasMore) {
                           items.add(Padding(
