@@ -682,14 +682,26 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             effective_prompt = prompt
             # Only inject git pull when user explicitly provided a branch.
             # No branch = no git pull = no detection = work on whatever the sandbox has.
+            # IMPORTANT: sandbox repo may be at /workspace, /workspace/project/<name>,
+            # or another subpath. Don't hardcode — find the .git directory first.
             if branch_provided:
-                git_prefix = f"cd /workspace && git pull origin {branch} 2>&1 || echo 'git pull failed'\n\n"
+                pull_cmd = (
+                    f"for d in /workspace /workspace/project/* /workspace/*; do "
+                    f"[ -d \"$d/.git\" ] && cd \"$d\" && git pull origin {branch} 2>&1 && break; done "
+                    f"|| echo 'git pull failed'"
+                )
                 if branch_switched:
-                    checkout_cmd = f"cd /workspace && git fetch origin && git checkout {branch} && git pull origin {branch}"
+                    checkout_cmd = (
+                        f"for d in /workspace /workspace/project/* /workspace/*; do "
+                        f"[ -d \"$d/.git\" ] && cd \"$d\" && "
+                        f"git fetch origin && git checkout {branch} && git pull origin {branch} 2>&1 && break; done "
+                        f"|| echo 'git checkout failed'"
+                    )
                     git_prefix = f"{checkout_cmd}\n\n"
-                    logger.info("Injected branch switch: checkout %s", branch)
+                    logger.info("Injected branch switch: checkout %s (auto-detect git root)", branch)
                 else:
-                    logger.info("Injected git pull: branch %s", branch)
+                    git_prefix = f"{pull_cmd}\n\n"
+                    logger.info("Injected git pull: branch %s (auto-detect git root)", branch)
                 effective_prompt = f"{git_prefix}{prompt}"
             else:
                 logger.info("No branch — sending prompt as-is, no git pull")
@@ -1466,6 +1478,10 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
         full_prompt = (
             f"Repository: {repo} (branch: {effective_branch}).\n"
             f"IMPORTANT: First run `git pull` to get the latest code. "
+            f"The repo's .git directory is NOT at /workspace directly — it's in "
+            f"a subdirectory like /workspace/project/<name>/. "
+            f"Run `cd /workspace && ls` to find it, then cd into the right dir "
+            f"and run `git pull origin {effective_branch}`.\n"
             f"When implementing changes: review relevant files, make edits, "
             f"commit with a descriptive message, and push.\n\n"
             f"[SANDBOX] REPO RESTRICTION: You are confined to repository `{repo}`. "
