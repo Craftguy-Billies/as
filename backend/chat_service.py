@@ -586,6 +586,11 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     # and _seen_event_ids persist across send() calls so the SECOND message in a
     # batch correctly fetches ONLY new events (not re-processing the first message's).
     # Reset happens inside Phase 1a when ctx_changed triggers a new conversation.
+    # Reset cancel flag so a stale _batch_cancelled from a previous send doesn't
+    # immediately abort this one. _wait_for_response sets it to True only if
+    # cancel_batch() is called during this send() call.
+    with _lock:
+        _batch_cancelled = False
     logger.info("Chat send: prompt=%.80s... repo=%s branch=%s mode=%s", prompt, repo, branch or '(empty)', mode)
 
     # Branch validation: if user explicitly provided a branch, verify it exists.
@@ -1046,33 +1051,37 @@ def _process_batch_worker() -> None:
 
 
 def cancel_batch() -> dict:
-    """Cancel the running batch queue. Non-blocking — sets flag for worker.
+    """Cancel the running batch queue OR any in-progress send. Non-blocking.
+    
+    Sets _batch_cancelled flag unconditionally — _wait_for_response() checks
+    this flag on every poll, regardless of batch or direct send.
     
     Edge cases handled:
-    - Worker blocked in send() → _batch_cancelled flag will be checked on next cycle
-    - Worker idle → immediate stop
+    - Worker blocked in send() → _batch_cancelled detected on next poll cycle
+    - Direct send (no batch) → _batch_cancelled flag still checked by _wait_for_response
+    - Worker idle / no send in progress → flag set but no-op (reset by next send)
     - Already cancelled → no-op
-    - No batch running → no-op
+    - No batch running but direct send running → cancel flag set, send detects it
     """
     global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _conversation_status
     with _lock:
-        if not _batch_running and not _batch_cancelled:
-            logger.info("cancel_batch: no batch running — no-op")
-            return {"status": "idle", "message": "No batch running"}
         if _batch_cancelled:
             logger.info("cancel_batch: already cancelled — no-op")
             return {"status": "already_cancelled"}
-        _batch_cancelled = True  # non-blocking flag, worker checks each iteration
+        _batch_cancelled = True  # checked by _wait_for_response (both batch and direct)
         _conversation_status = "idle"
         was_running = _batch_running
-        _batch_running = False  # signal weakly — worker_finally block resets fully
-        remaining = _batch_total - _batch_position
-        _batch_prompts = []
-        _batch_prompt_modes = []
-        # Don't reset position/total here — let worker detect cancel and
-        # append a [STOPPED] message. Worker's finally block resets fully.
-    if was_running:
-        logger.info("cancel_batch: cancelled (%d remaining, worker will finalize)", remaining)
+        if was_running:
+            _batch_running = False
+            remaining = _batch_total - _batch_position
+            _batch_prompts = []
+            _batch_prompt_modes = []
+            # Don't reset position/total here — let worker detect cancel and
+            # append a [STOPPED] message. Worker's finally block resets fully.
+            logger.info("cancel_batch: cancelled batch (%d remaining, worker will finalize)", remaining)
+        else:
+            remaining = 0
+            logger.info("cancel_batch: no batch running, set cancel flag for in-progress send")
     return {"status": "cancelled", "remaining": remaining}
 
 
@@ -1946,6 +1955,7 @@ def _scrape_events_for_text(events: list[dict]) -> str | None:
     """Fallback: extract any text from events when no MessageEvent found.
 
     Tries: llm_message.content, observation.content, action.thought, error fields.
+    Also includes ConversationStateUpdateEvent value text as a tip off.
     """
     parts: list[str] = []
     for evt in events:
@@ -1962,6 +1972,8 @@ def _scrape_events_for_text(events: list[dict]) -> str | None:
                         parts.append(str(block["text"]))
             elif isinstance(content, str) and content.strip():
                 parts.append(content.strip())
+        elif isinstance(llm_msg, str) and llm_msg.strip():
+            parts.append(llm_msg.strip())
         # Observation content (tool results with text)
         obs = evt.get("observation")
         if isinstance(obs, dict):
@@ -1984,6 +1996,11 @@ def _scrape_events_for_text(events: list[dict]) -> str | None:
         err = evt.get("error")
         if isinstance(err, str) and err.strip():
             parts.append(err)
+        # Conversation state value text (e.g. execution_status messages)
+        if kind == "ConversationStateUpdateEvent":
+            val = evt.get("value", "")
+            if isinstance(val, str) and len(val) > 10 and val.strip():
+                parts.append(val.strip())
     text = "\n\n".join(parts).strip()
     return text if text else None
 
