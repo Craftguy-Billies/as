@@ -694,33 +694,40 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                 # conversation with same prompt. The caller never sees a 409.
                 if send_err and "409" in str(send_err):
                     logger.warning("Sandbox paused/gone for conversation %s — recovering", current_conv_id)
-                    recent_msgs: list = []
+                    recent_user_msgs: list = []
                     with _lock:
-                        # Capture recent context before resetting so the new
+                        # Capture ONLY user messages from recent context so the new
                         # conversation knows what was discussed (not just UI history).
+                        # EXCLUDE assistant responses — injecting them causes the AI
+                        # to get confused between its own prior output and the new task,
+                        # leading to repeated responses, code-file output, and skipped
+                        # tool execution steps.
                         for m in _msgs()[-6:]:
                             role = m.get("role", "")
-                            if role in ("user", "assistant") and m.get("content"):
-                                recent_msgs.append(m)
+                            if role == "user" and m.get("content"):
+                                recent_user_msgs.append(m["content"])
                         _conversation_id = None
                         _last_event_index = 0
                         _sandbox_id = None
                         _persist_to_db()
-                    if recent_msgs:
-                        context = "\n".join(
-                            f"{m['role'].capitalize()}: {m['content']}" for m in recent_msgs
+                    if recent_user_msgs:
+                        # Use a clean factual summary so the AI never confuses
+                        # injected history with its own pending response.
+                        summarized = "; ".join(
+                            m[:200].replace("\n", " ") for m in recent_user_msgs
                         )
                         enhanced = (
-                            f"[Previous conversation context — session was recreated due to server restart]\n"
-                            f"{context}\n"
-                            f"---\n"
-                            f"Current task: {prompt}"
+                            f"Previous user messages (from before server restart): {summarized}\n\n"
+                            f"---\n\n"
+                            f"{prompt}"
                         )
+                        logger.info("AUDIT 409-recovery: %d user msgs injected, prompt=%s",
+                                    len(recent_user_msgs), prompt[:80])
                     else:
                         enhanced = prompt
                     new_conv_id = _create_conversation(enhanced, repo, branch, mode)
-                    logger.info("Recovered: created new conversation %s (%d context msgs)",
-                                new_conv_id, len(recent_msgs))
+                    logger.info("Recovered: created new conv=%s (%d user msgs injected)",
+                                new_conv_id, len(recent_user_msgs))
                     need_new_conv = True  # Phase 1c will store it
                 else:
                     logger.warning("send_message failed (non-409): send_err=%s", send_err)
