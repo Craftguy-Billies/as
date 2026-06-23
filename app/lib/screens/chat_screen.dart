@@ -514,11 +514,39 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _buildTyping() {
-    return const Padding(
-      padding: EdgeInsets.symmetric(vertical: 12),
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
       child: Align(
         alignment: Alignment.centerLeft,
-        child: _TypingIndicator(),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: const Color(0xFF1E1E2E),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFF7C3AED).withAlpha(60)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 14, height: 14,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(const Color(0xFF7C3AED).withAlpha(180)),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'AI Working…',
+                style: TextStyle(
+                  color: Colors.white.withAlpha(160),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -881,28 +909,10 @@ class _ChatBubbleState extends State<_ChatBubble> {
                             fontSize: 10,
                           ),
                         ),
-                        if (showPreview)
-                          Padding(
-                            padding: const EdgeInsets.only(left: 8),
-                            child: Text(
-                              'Tap to expand',
-                              style: TextStyle(
-                                color: Colors.white.withAlpha(60),
-                                fontSize: 9,
-                              ),
-                            ),
-                          ),
+                        if (isAssistant && !_expanded)
+                          Icon(Icons.chevron_right, color: Colors.white.withAlpha(40), size: 16),
                         if (isAssistant && _expanded)
-                          Padding(
-                            padding: const EdgeInsets.only(left: 8),
-                            child: Text(
-                              'Tap to collapse',
-                              style: TextStyle(
-                                color: Colors.white.withAlpha(60),
-                                fontSize: 9,
-                              ),
-                            ),
-                          ),
+                          Icon(Icons.chevron_left, color: Colors.white.withAlpha(40), size: 16),
                       ],
                     ),
                   ],
@@ -995,74 +1005,6 @@ String _fmtTime(int ms) {
   return '$h:$m';
 }
 
-// ---------------------------------------------------------------------------
-// Typing indicator
-// ---------------------------------------------------------------------------
-class _TypingIndicator extends StatefulWidget {
-  const _TypingIndicator();
-
-  @override
-  State<_TypingIndicator> createState() => _TypingIndicatorState();
-}
-
-class _TypingIndicatorState extends State<_TypingIndicator>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _ctrl;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    )..repeat(reverse: true);
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _ctrl,
-      builder: (_, child) => Opacity(
-        opacity: 0.4 + (_ctrl.value * 0.6),
-        child: child,
-      ),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: const Color(0xFF1E1E2E),
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _dot(0),
-            const SizedBox(width: 4),
-            _dot(1),
-            const SizedBox(width: 4),
-            _dot(2),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _dot(int i) {
-    return Container(
-      height: 6,
-      width: 6,
-      decoration: BoxDecoration(
-        color: Colors.grey[500],
-        shape: BoxShape.circle,
-      ),
-    );
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Task queue bottom sheet
@@ -1275,12 +1217,20 @@ class _AiWorkGroupState extends State<_AiWorkGroup> {
                     // Always-visible header row
                     Row(
                       children: [
-                        Icon(
-                          _expanded ? Icons.arrow_drop_down : Icons.arrow_right,
-                          color: const Color(0xFF7C3AED),
-                          size: 18,
+                        // Bigger triangle — clear expand/collapse affordance
+                        AnimatedRotation(
+                          turns: _expanded ? 0.25 : 0.0,
+                          duration: const Duration(milliseconds: 200),
+                          child: Icon(
+                            Icons.chevron_right,
+                            color: const Color(0xFF7C3AED),
+                            size: 24,
+                          ),
                         ),
-                        const SizedBox(width: 4),
+                        const SizedBox(width: 2),
+                        // Pulsing working dot when AI is active (no response yet)
+                        if (response == null && hasResponse == false)
+                          _WorkingDot(),
                         Text(
                           'AI Work · $evtCount step${evtCount > 1 ? 's' : ''}',
                           style: TextStyle(
@@ -1289,17 +1239,6 @@ class _AiWorkGroupState extends State<_AiWorkGroup> {
                             fontWeight: FontWeight.w500,
                           ),
                         ),
-                        if (hasResponse && !_expanded)
-                          Padding(
-                            padding: const EdgeInsets.only(left: 6),
-                            child: Text(
-                              '· Tap to expand',
-                              style: TextStyle(
-                                color: Colors.white.withAlpha(50),
-                                fontSize: 9,
-                              ),
-                            ),
-                          ),
                       ],
                     ),
 
@@ -1356,10 +1295,20 @@ class _AiWorkGroupState extends State<_AiWorkGroup> {
                         _fmtTime(response?.timestamp ?? events.last.timestamp),
                         style: TextStyle(color: Colors.white.withAlpha(80), fontSize: 10),
                       ),
-                      Text(
-                        'Tap to collapse',
-                        style: TextStyle(color: Colors.white.withAlpha(50), fontSize: 9),
-                      ),
+                      if (response == null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Row(
+                            children: [
+                              _WorkingDot(),
+                              const SizedBox(width: 4),
+                              Text(
+                                'Working…',
+                                style: TextStyle(color: const Color(0xFF7C3AED).withAlpha(160), fontSize: 10, fontWeight: FontWeight.w500),
+                              ),
+                            ],
+                          ),
+                        ),
                     ],
                   ],
                 ),
@@ -1403,6 +1352,52 @@ class _AiWorkGroupState extends State<_AiWorkGroup> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+// ---------------------------------------------------------------------------
+// Working dot — pulsing animation for AI-in-progress indicator
+// ---------------------------------------------------------------------------
+class _WorkingDot extends StatefulWidget {
+  @override
+  State<_WorkingDot> createState() => _WorkingDotState();
+}
+
+class _WorkingDotState extends State<_WorkingDot> with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1000),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (_, child) => Opacity(
+        opacity: 0.3 + (_ctrl.value * 0.7),
+        child: child,
+      ),
+      child: Container(
+        width: 8,
+        height: 8,
+        margin: const EdgeInsets.only(right: 4),
+        decoration: const BoxDecoration(
+          color: Color(0xFF7C3AED),
+          shape: BoxShape.circle,
+        ),
       ),
     );
   }
