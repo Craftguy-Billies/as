@@ -91,6 +91,14 @@ _batch_running: bool = False
 _batch_cancelled: bool = False
 _batch_skip_prompt: bool = False  # set by per-prompt cancel, tells worker to skip current
 
+# Response source tracking for Phase 3 diagnostics
+# Set by _wait_for_response() before returning:
+# "events/search" - MessageEvent from event poll (normal path)
+# "zip"           - MessageEvent from trajectory zip fallback
+# "scrape"        - text scraped from observation events
+# ""              - no response found
+_last_response_source: str = "events/search"
+
 # Current conversation status (for UI visibility)
 _conversation_status: str = "idle"
 _CHAT_TIMEOUT = int(os.getenv("VIBECODE_CHAT_TIMEOUT", "600"))  # 10 min default
@@ -838,7 +846,15 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     # so handle prefix-stripping gracefully. Reject byte-identical responses
     # — they indicate the trajectory-zip fallback returned a previous turn's
     # cached response instead of the current turn's output.
+    #
+    # AUDIT: Determine response source for diagnostics.
+    # - events/search: response came from a new MessageEvent in the poll
+    # - zip: response came from trajectory zip fallback
+    # - scrape: response came from _scrape_events_for_text (observation text)
+    # - None: no response found
     duplicate_rejected = False
+    # Read source from _wait_for_response's diagnostic global
+    _response_source = _last_response_source if _last_response_source else "unknown"
     with _lock:
         if response and response.strip():
             response = response.strip()
@@ -854,19 +870,21 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             if last_assistant:
                 if response == last_assistant:
                     logger.warning("Phase 3: response byte-identical to last assistant — "
-                                   "rejecting (len=%d). This indicates the agent returned "
-                                   "a cached/stale response from a previous turn.", len(response))
+                                   "rejecting (len=%d source=%s). Response source=%s, "
+                                   "last_assistant first 80 chars: %s",
+                                   len(response), _response_source, _response_source,
+                                   last_assistant[:80].replace("\n", " "))
                     duplicate_rejected = True
                     response = None
                 elif response.startswith(last_assistant):
                     stripped = response[len(last_assistant):].strip()
                     if stripped:
-                        logger.info("Phase 3: stripped cumulative prefix (was %d, now %d chars)",
-                                    len(response), len(stripped))
+                        logger.info("Phase 3: stripped cumulative prefix (was %d, now %d chars) source=%s",
+                                    len(response), len(stripped), _response_source)
                         response = stripped
                     else:
                         logger.info("Phase 3: only cumulative prefix remains after strip — "
-                                    "saving original (len=%d)", len(response))
+                                    "saving original (len=%d) source=%s", len(response), _response_source)
             if response:  # may have been set to None by duplicate rejection above
                 resp_msg_id = _next_msg_id()
                 event_count_before = sum(1 for m in msgs if m.get("role") == "event")
@@ -1600,7 +1618,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     Also appends live events (tool calls, observations) to the chat history so the client
     can see what the agent is doing via polling get_state().
     """
-    global _last_event_index, _last_event_timestamp, _conversation_status, _sandbox_id
+    global _last_event_index, _last_event_timestamp, _conversation_status, _sandbox_id, _last_response_source
 
     if timeout is None:
         timeout = _CHAT_TIMEOUT
@@ -1953,6 +1971,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                     evt_ts = evt.get("timestamp", 0)
                     logger.info("Trajectory zip: found NEW agent MessageEvent ts=%s (len=%d)", evt_ts, len(raw))
                     all_new_msgs = [raw]
+                    _last_response_source = "zip"
                     found = True
                     break
             if not found:
@@ -1972,6 +1991,16 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         logger.warning("All event kinds seen: %s", sorted(_event_kinds))
         logger.warning("Total events: %d, messages: %d", len(all_events), len(_msgs()))
 
+        # Snapshot last_assistant BEFORE any scrape (Phase 3 will check again,
+        # but catching it here prevents stale scraped text from entering
+        # all_new_msgs at all — cleaner than rejecting in Phase 3).
+        _last_assistant_before_scrape: str | None = None
+        with _lock:
+            for m in reversed(_msgs()):
+                if m.get("role") == "assistant":
+                    _last_assistant_before_scrape = m.get("content", "")
+                    break
+
         # Fallback: scrape events for any text content.
         # Filter to only events from this turn (timestamp >= turn start)
         # to avoid scraping stale agent MessageEvent text from previous turns.
@@ -1983,8 +2012,21 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         logger.warning("Fallback scrape: %d recent events (filtered from %d total)", len(recent), len(all_events))
         fallback_text = _scrape_events_for_text(recent)
         if fallback_text:
-            logger.info("Fallback: scraped %d chars from last 20 events", len(fallback_text))
-            all_new_msgs.append(fallback_text)
+            # CRITICAL: reject scraped text that matches last assistant — it
+            # means the dedup loop skipped a duplicate MessageEvent (same text
+            # as previous turn) and now the scrape is about to dig up the SAME
+            # stale text from event observations. This would trigger the
+            # "cached response" error in Phase 3.
+            if _last_assistant_before_scrape and fallback_text.strip() == _last_assistant_before_scrape.strip():
+                logger.warning("Fallback scrape: REJECTING scraped text (byte-identical to last_assistant — "
+                               "len=%d). events/search found NO new MessageEvent this turn. "
+                               "This means the agent produced no response or produced one with "
+                               "identical content to the previous turn.",
+                               len(fallback_text))
+            else:
+                logger.info("Fallback: scraped %d chars from last 20 events (different from last_assistant)", len(fallback_text))
+                all_new_msgs.append(fallback_text)
+                _last_response_source = "scrape"
 
         if not all_new_msgs:
             with _lock:
@@ -1999,12 +2041,25 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     # AUDIT: log final state before returning
     tool_count = sum(1 for m in _msgs() if m.get("role") == "event" and m.get("kind") not in ("SystemEvent",))
     status_count = sum(1 for m in _msgs() if m.get("role") == "event" and m.get("kind") == "SystemEvent")
+    # Determine response source for Phase 3 diagnostics
+    # all_new_msgs was populated by: events/search (default), zip fallback,
+    # or scrape fallback. The zip fallback sets a flag; scrape is the last resort.
+    # Snapshot the source global so Phase 3 can log it.
+    if all_new_msgs:
+        # Check if zip fallback found data (zip sets _last_zip_response_ts)
+        # We use a heuristic: if all_new_msgs was populated by the event loop
+        # (normal path), _last_response_source stays "events/search".
+        # If the zip or scrape ran, they should have set the source.
+        # If nothing set it, default to events/search.
+        pass  # source was already set by zip/scrape if they ran
+    else:
+        _last_response_source = ""  # no response
     logger.info("AUDIT wait_exit: conv=%s elapsed=%ds msgs=%d tool_evts=%d status_evts=%d "
-                "all_new_msgs=%d seen=%d ts=%s has_response=%s",
+                "all_new_msgs=%d seen=%d ts=%s has_response=%s source=%s",
                 _conversation_id, int(time.time()-start), len(_msgs()),
                 tool_count, status_count, len(all_new_msgs), len(_seen_event_ids),
                 _last_event_timestamp or "(none)",
-                bool(all_new_msgs))
+                bool(all_new_msgs), _last_response_source)
     return "\n\n".join(all_new_msgs) if all_new_msgs else None
 
 
@@ -2014,13 +2069,24 @@ def _scrape_events_for_text(events: list[dict]) -> str | None:
 
     Tries: llm_message.content, observation.content, action.thought, error fields.
     Also includes ConversationStateUpdateEvent value text as a tip off.
+
+    CRITICAL: Agent MessageEvents are NEVER scraped — they are the PRIMARY
+    data source for all_new_msgs / zip fallback. If events/search deduped an
+    agent MessageEvent (same content_hash as previous turn), the scrape would
+    find it and return the PREVIOUS turn's text, causing Phase 3 to reject it
+    as a byte-identical "cached response". This is the #1 root cause of the
+    phantom duplicate bug.
     """
     parts: list[str] = []
     for evt in events:
         kind = evt.get("kind", "")
-        # llm_message (MessageEvent, any source)
-        if kind == "MessageEvent" and evt.get("source") == "user":
-            continue  # never scrape user's own messages
+        source = evt.get("source", "")
+        # NEVER scrape agent MessageEvents — handled by all_new_msgs / zip
+        if kind == "MessageEvent" and source == "agent":
+            continue
+        # Never scrape user's own messages either
+        if kind == "MessageEvent" and source == "user":
+            continue
         llm_msg = evt.get("llm_message") or evt.get("message")
         if isinstance(llm_msg, dict):
             content = llm_msg.get("content") or []
