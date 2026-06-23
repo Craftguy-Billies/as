@@ -545,7 +545,21 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     _last_event_timestamp = ""  # reset timestamp filter for new message
     _seen_event_ids.clear()  # prevent memory leak across messages
 
-    logger.info("Chat send: prompt=%.80s... repo=%s branch=%s mode=%s", prompt, repo, branch or '(default)', mode)
+    logger.info("Chat send: prompt=%.80s... repo=%s branch=%s mode=%s", prompt, repo, branch or '(empty)', mode)
+
+    # Branch validation: if user explicitly provided a branch, verify it exists.
+    # If invalid, reject immediately — no git pull, no message sent.
+    branch_provided = bool(branch)
+    if branch_provided:
+        valid_branches = get_branches(repo)
+        # Also consider the default branch valid (in case GitHub API fails or
+        # the branch list doesn't include it yet — e.g. a very fresh repo).
+        default_branch = _detect_default_branch(repo)
+        all_valid = valid_branches + ([default_branch] if default_branch and default_branch not in valid_branches else [])
+        if branch not in all_valid:
+            logger.warning("send: invalid branch '%s' for %s — available: %s", branch, repo, all_valid[:10])
+            return {"error": f"Branch '{branch}' not found in {repo}. Available: {', '.join(all_valid[:10]) or 'unknown'}"}
+        logger.info("send: branch '%s' validated for %s", branch, repo)
 
     # Phase 1a: Quick check under lock — do we need a new conversation?
     with _lock:
@@ -579,29 +593,32 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
         need_new_conv = _conversation_id is None
         if not need_new_conv:
             current_conv_id = _conversation_id  # snapshot to use outside lock
-        logger.debug("Phase 1a: need_new_conv=%s ctx_changed=%s branch_switched=%s effective_branch=%s",
-                     need_new_conv, ctx_changed, branch_switched, effective_branch or '(none)')
+        logger.debug("Phase 1a: need_new_conv=%s ctx_changed=%s branch_switched=%s branch_provided=%s",
+                     need_new_conv, ctx_changed, branch_switched, branch_provided)
 
     # Phase 1b: HTTP calls OUTSIDE lock (create may poll start-tasks for up to 150s)
     try:
         if need_new_conv:
             logger.info("Phase 1b: creating new conversation for repo=%s branch=%s mode=%s",
-                        repo, branch or '(default)', mode)
+                        repo, branch or '(empty)', mode)
             new_conv_id = _create_conversation(prompt, repo, branch, mode)
             logger.info("Created conversation %s (repo=%s mode=%s)", new_conv_id, repo, mode)
         else:
             logger.info("Reusing conversation %s (repo=%s mode=%s)", current_conv_id, repo, mode)
             effective_prompt = prompt
-            # ALWAYS inject git pull before any action, even on same branch.
-            # This ensures the agent always works on latest code, regardless
-            # of when the app was last opened or what branch was selected.
-            git_prefix = f"cd /workspace && git pull origin {effective_branch or 'main'} 2>&1 || echo 'git pull failed'\n\n"
-            if branch_switched and effective_branch:
-                # Inject git checkout so the agent switches branch before acting
-                checkout_cmd = f"cd /workspace && git fetch origin && git checkout {effective_branch} && git pull origin {effective_branch}"
-                git_prefix = f"{checkout_cmd}\n\n"
-                logger.info("Injected branch switch: checkout %s", effective_branch)
-            effective_prompt = f"{git_prefix}{prompt}"
+            # Only inject git pull when user explicitly provided a branch.
+            # No branch = no git pull = no detection = work on whatever the sandbox has.
+            if branch_provided:
+                git_prefix = f"cd /workspace && git pull origin {branch} 2>&1 || echo 'git pull failed'\n\n"
+                if branch_switched:
+                    checkout_cmd = f"cd /workspace && git fetch origin && git checkout {branch} && git pull origin {branch}"
+                    git_prefix = f"{checkout_cmd}\n\n"
+                    logger.info("Injected branch switch: checkout %s", branch)
+                else:
+                    logger.info("Injected git pull: branch %s", branch)
+                effective_prompt = f"{git_prefix}{prompt}"
+            else:
+                logger.info("No branch — sending prompt as-is, no git pull")
             success, send_err = _send_message(current_conv_id, effective_prompt)
             if not success:
                 # If sandbox is paused/gone, auto-recover: reset + create new

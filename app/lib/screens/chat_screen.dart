@@ -283,9 +283,29 @@ class _ChatScreenState extends State<ChatScreen> {
                         final showTyping = prov.loading;
                         final items = <Widget>[];
                         if (showTyping) items.add(_buildTyping());
-                        for (final m in visible.reversed) {
-                          items.add(_ChatBubble(msg: m));
+                        // Group consecutive events + following assistant into
+                        // ONE collapsed bubble so 50 queued prompts don't flood.
+                        int ii = 0;
+                        while (ii < visible.length) {
+                          if (visible[ii].role == 'event') {
+                            final evts = <ChatMessage>[];
+                            while (ii < visible.length && visible[ii].role == 'event') {
+                              evts.add(visible[ii]);
+                              ii++;
+                            }
+                            ChatMessage? aiResp;
+                            if (ii < visible.length && visible[ii].role == 'assistant') {
+                              aiResp = visible[ii];
+                              ii++;
+                            }
+                            items.add(_AiWorkGroup(events: evts, response: aiResp));
+                          } else {
+                            items.add(_ChatBubble(msg: visible[ii]));
+                            ii++;
+                          }
                         }
+                        // items are oldest-first → reverse for newset-at-bottom ListView
+                        items = items.reversed.toList();
                         if (hasMore) {
                           items.add(Padding(
                             padding: const EdgeInsets.only(top: 12),
@@ -773,8 +793,10 @@ class _ChatBubbleState extends State<_ChatBubble> {
       );
     }
 
-    // For assistant messages: collapsible — show preview, tap to expand full
-    final showPreview = isAssistant && !_expanded && msg.content.length > 150;
+    // ALL assistant messages collapsed by default (even short ones).
+    // When 50 prompts queued, this prevents 750+ event/response lines
+    // from flooding the UI. User taps any AI bubble to expand.
+    final showPreview = isAssistant && !_expanded;
     final previewText = showPreview
         ? (msg.content.length > 300
             ? '${msg.content.substring(0, 300)}…'
@@ -947,22 +969,29 @@ class _ChatBubbleState extends State<_ChatBubble> {
     );
   }
 
-  /// Strip text tag prefix like "[READ] " or "[EDIT] " for display.
-  /// The icon already conveys the meaning; we only show the description.
-  static String _stripTagPrefix(String text) {
-    if (text.isEmpty) return text;
-    final m = RegExp(r'^\[[A-Z]+\]\s?').firstMatch(text);
-    if (m == null) return text;
-    final stripped = text.substring(m.end);
-    return stripped.isEmpty ? '(no details)' : stripped;
-  }
-
   String _fmtTime(int ms) {
     final dt = DateTime.fromMillisecondsSinceEpoch(ms);
     final h = dt.hour.toString().padLeft(2, '0');
     final m = dt.minute.toString().padLeft(2, '0');
     return '$h:$m';
   }
+}
+
+// Top-level helpers shared by _ChatBubbleState, _AiWorkGroupState, etc.
+String _stripTagPrefix(String text) {
+  if (text.isEmpty) return text;
+  final m = RegExp(r'^\[[A-Z]+\]\s?').firstMatch(text);
+  if (m == null) return text;
+  final stripped = text.substring(m.end);
+  return stripped.isEmpty ? '(no details)' : stripped;
+}
+
+String _fmtTime(int ms) {
+  if (ms <= 0) return '';
+  final dt = DateTime.fromMillisecondsSinceEpoch(ms);
+  final h = dt.hour.toString().padLeft(2, '0');
+  final m = dt.minute.toString().padLeft(2, '0');
+  return '$h:$m';
 }
 
 // ---------------------------------------------------------------------------
@@ -1185,3 +1214,195 @@ class ClientLogScreen extends StatelessWidget {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Collapsed AI Work Group — events + response in ONE bubble
+// ---------------------------------------------------------------------------
+class _AiWorkGroup extends StatefulWidget {
+  final List<ChatMessage> events;
+  final ChatMessage? response;
+  const _AiWorkGroup({required this.events, this.response});
+
+  @override
+  State<_AiWorkGroup> createState() => _AiWorkGroupState();
+}
+
+class _AiWorkGroupState extends State<_AiWorkGroup> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final events = widget.events;
+    final response = widget.response;
+    final evtCount = events.length;
+    // Get unique tags from events for the collapsed summary
+    final tags = events.map((e) {
+      final c = e.content;
+      if (c.startsWith('[TERMINAL]')) return 'terminal';
+      if (c.startsWith('[READ]')) return 'read';
+      if (c.startsWith('[EDIT]')) return 'edit';
+      if (c.startsWith('[BROWSER]')) return 'browser';
+      if (c.startsWith('[ERROR]')) return 'error';
+      if (c.startsWith('[SEARCH]')) return 'search';
+      if (c.startsWith('[FILE]')) return 'file';
+      return 'task';
+    }).toSet().join(' · ');
+    final hasResponse = response != null && response.content.trim().isNotEmpty;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          const SizedBox(width: 8),
+          Flexible(
+            child: GestureDetector(
+              onTap: () => setState(() => _expanded = !_expanded),
+              child: Container(
+                constraints: BoxConstraints(
+                  maxWidth: MediaQuery.of(context).size.width * 0.82,
+                ),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E1E2E),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.white.withAlpha(15)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Always-visible header row
+                    Row(
+                      children: [
+                        Icon(
+                          _expanded ? Icons.arrow_drop_down : Icons.arrow_right,
+                          color: const Color(0xFF7C3AED),
+                          size: 18,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          'AI Work · $evtCount step${evtCount > 1 ? 's' : ''}',
+                          style: TextStyle(
+                            color: Colors.white.withAlpha(180),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        if (hasResponse && !_expanded)
+                          Padding(
+                            padding: const EdgeInsets.only(left: 6),
+                            child: Text(
+                              '· Tap to expand',
+                              style: TextStyle(
+                                color: Colors.white.withAlpha(50),
+                                fontSize: 9,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+
+                    // Collapsed: single-line tag summary
+                    if (!_expanded)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          tags.isNotEmpty ? tags : '$evtCount event${evtCount > 1 ? 's' : ''}',
+                          style: TextStyle(
+                            color: Colors.white.withAlpha(70),
+                            fontSize: 10,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+
+                    // Expanded: show all events + response
+                    if (_expanded) ...[
+                      const SizedBox(height: 6),
+                      ...events.map((e) => _buildEventItem(e)),
+                      if (hasResponse) ...[
+                        const Divider(color: Color(0xFF2A2A3E), height: 12),
+                        SelectionArea(
+                          child: MarkdownBody(
+                            data: response!.content,
+                            styleSheet: MarkdownStyleSheet(
+                              p: const TextStyle(color: Colors.white, fontSize: 14.5, height: 1.45),
+                              code: TextStyle(
+                                color: const Color(0xFFA78BFA),
+                                backgroundColor: Colors.white.withAlpha(20),
+                                fontSize: 13,
+                                fontFamily: 'monospace',
+                              ),
+                              codeblockDecoration: BoxDecoration(
+                                color: const Color(0xFF0D0D1A),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              blockquoteDecoration: BoxDecoration(
+                                border: const Border(left: BorderSide(color: Color(0xFF7C3AED), width: 3)),
+                                color: const Color(0xFF7C3AED).withAlpha(20),
+                              ),
+                              a: const TextStyle(color: Color(0xFFA78BFA)),
+                              h1: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+                              h2: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold),
+                              listBullet: const TextStyle(color: Color(0xFF7C3AED)),
+                            ),
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 2),
+                      Text(
+                        _fmtTime(response?.timestamp ?? events.last.timestamp),
+                        style: TextStyle(color: Colors.white.withAlpha(80), fontSize: 10),
+                      ),
+                      Text(
+                        'Tap to collapse',
+                        style: TextStyle(color: Colors.white.withAlpha(50), fontSize: 9),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEventItem(ChatMessage evt) {
+    final c = evt.content;
+    Color iconColor;
+    IconData iconData;
+    if (c.startsWith('[TERMINAL]')) { iconColor = const Color(0xFF00FF88); iconData = Icons.terminal; }
+    else if (c.startsWith('[READ]')) { iconColor = const Color(0xFF10B981); iconData = Icons.menu_book; }
+    else if (c.startsWith('[EDIT]')) { iconColor = const Color(0xFFF59E0B); iconData = Icons.edit; }
+    else if (c.startsWith('[ERROR]')) { iconColor = Colors.redAccent; iconData = Icons.error; }
+    else if (c.startsWith('[SEARCH]')) { iconColor = const Color(0xFF3B82F6); iconData = Icons.search; }
+    else if (c.startsWith('[BROWSER]')) { iconColor = const Color(0xFF06B6D4); iconData = Icons.public; }
+    else if (c.startsWith('[FILE]')) { iconColor = const Color(0xFF10B981); iconData = Icons.description; }
+    else { iconColor = Colors.grey; iconData = Icons.settings; }
+
+    final displayText = _stripTagPrefix(c);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Icon(iconData, size: 13, color: iconColor),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              displayText,
+              style: TextStyle(color: iconColor.withAlpha(200), fontSize: 12, height: 1.4),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
