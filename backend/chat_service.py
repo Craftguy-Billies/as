@@ -2006,7 +2006,8 @@ def _scrape_events_for_text(events: list[dict]) -> str | None:
 
 
 def _format_event_preview(evt: dict) -> str | None:
-    """Format a Cloud API event for chat display — NO TRUNCATION, pass raw details."""
+    """Format a Cloud API event for UI display. All text is TRUNCATED to short
+    previews — the full content is in the Cloud conversation, not needed in chat."""
     kind = evt.get("kind", "")
     tool = evt.get("tool_name", "")
     source = evt.get("source", "")
@@ -2026,7 +2027,8 @@ def _format_event_preview(evt: dict) -> str | None:
         if tool in ("bash", "terminal", "execute_bash_command"):
             cmd = action.get("command", "") or action.get("content", "")
             if cmd:
-                return f"[TERMINAL] $ {cmd}"
+                cmd_short = cmd[:200].replace("\n", " ").strip()
+                return f"[TERMINAL] $ {cmd_short}"
         elif tool in ("file_editor", "str_replace_editor"):
             cmd = (action.get("command") or "").strip()
             path = action.get("path", "") or action.get("file", "")
@@ -2045,11 +2047,13 @@ def _format_event_preview(evt: dict) -> str | None:
         elif tool in ("tavily_search", "tavily_tavily_search"):
             q = action.get("query", "") or action.get("content", "")
             if q:
-                return f"[SEARCH] Searching: {q}"
+                q_short = q[:150].replace("\n", " ").strip()
+                return f"[SEARCH] Searching: {q_short}"
         elif tool == "browser_navigate":
             url = action.get("url", "")
             if url:
-                return f"[BROWSER] Navigate: {url}"
+                url_short = url[:150].replace("\n", " ").strip()
+                return f"[BROWSER] Navigate: {url_short}"
         else:
             # Unknown tool — show tool name + first action key for visibility
             return f"[TOOL] {tool}: {str(action)[:120]}"
@@ -2089,8 +2093,8 @@ def _format_event_preview(evt: dict) -> str | None:
             if isinstance(results, list) and results:
                 lines = [f"[RESULTS] {len(results)} search results:"]
                 for r in results[:5]:
-                    title = r.get("title", "")
-                    url = r.get("url", "")
+                    title = r.get("title", "")[:100].strip()
+                    url = r.get("url", "")[:100].strip()
                     if title:
                         lines.append(f"  • {title}")
                     if url:
@@ -2116,7 +2120,8 @@ def _format_event_preview(evt: dict) -> str | None:
         key = evt.get("key", "")
         val = evt.get("value", "")
         if key and val:
-            return f"[STATE] {key}={val}"
+            val_short = str(val)[:100].replace("\n", " ").strip()
+            return f"[STATE] {key}={val_short}"
         return None
     elif kind == "SystemPromptEvent":
         return None  # internal prompt, not user-facing
