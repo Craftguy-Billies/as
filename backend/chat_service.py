@@ -285,6 +285,18 @@ def _restore_from_db() -> None:
             # them with new local IDs (step count inflation fix).
             _seen_event_ids = set(data.get("seen_event_ids", []))
             _seen_event_hashes = set(data.get("seen_event_hashes", []))
+            # AUDIT: log all restored state so ANY boot issue is detectable
+            repo_msgs = {k: len(v) for k, v in _messages_by_repo.items()}
+            event_count = sum(1 for m in _messages_by_repo.get(_current_repo_key, []) if m.get("role") == "event")
+            logger.info("AUDIT BOOT: conv=%s repo=%s branch=%s mode=%s model=%s "
+                        "idx=%d ts=%s msgs_by_repo=%s cur_key=%s msg_counter=%d "
+                        "seen_ids=%d seen_hashes=%d events_in_cur_repo=%d",
+                        _conversation_id, _conversation_repo, _conversation_branch,
+                        _conversation_mode, _conversation_llm_model,
+                        _last_event_index, _last_event_timestamp or "(none)",
+                        repo_msgs, _current_repo_key, _msg_counter,
+                        len(_seen_event_ids), len(_seen_event_hashes),
+                        event_count)
             if _batch_running and not _batch_cancelled:
                 threading.Thread(target=_process_batch_worker, daemon=True).start()
                 logger.info("Auto-resuming batch: %d/%d remaining", _batch_total - _batch_position, _batch_total)
@@ -334,6 +346,13 @@ def _persist_to_db() -> None:
             (data,),
         )
         db.commit()
+        # AUDIT: log persist summary
+        cur_msgs = _msgs()
+        event_count = sum(1 for m in cur_msgs if m.get("role") == "event")
+        logger.info("AUDIT persist: conv=%s msgs=%d events=%d seen_ids=%d msg_counter=%d ts=%s",
+                    _conversation_id, len(cur_msgs), event_count,
+                    len(_seen_event_ids), _msg_counter,
+                    _last_event_timestamp or "(none)")
     except Exception:
         try:
             db.execute(
@@ -398,10 +417,16 @@ def get_state(repo: str = "", mode: str = "") -> dict:
     with _lock:
         if repo or mode:
             _current_repo_key = _repo_key(repo)
+        msgs = list(_msgs())
+        event_count = sum(1 for m in msgs if m.get("role") == "event")
+        # AUDIT: log state response (limit event_count to avoid spam)
+        logger.info("AUDIT get_state: repo=%s mode=%s conv=%s msgs=%d events=%d seen_ids=%d batch_running=%s",
+                    _current_repo_key, mode, _conversation_id, len(msgs),
+                    event_count, len(_seen_event_ids), _batch_running)
         # Build batch status: position is 0-based index of current prompt.
         # done = number of completed prompts (prompts[0:done] are finished).
         return {
-            "messages": list(_msgs()),
+            "messages": msgs,
             "conversation_id": _conversation_id,
             "sandbox_id": _sandbox_id,
             "repo": _conversation_repo,
@@ -607,8 +632,15 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             and not ctx_changed
             and effective_branch != _conversation_branch
         )
+        # AUDIT: log Phase 1a decision state
+        logger.info("AUDIT 1a: conv=%s repo=%s mode=%s model=%s cur_model=%s "
+                    "from_batch=%s model_changed=%s ctx=%s branch_sw=%s need_new=%s",
+                    _conversation_id or "(none)", _conversation_repo, _conversation_mode,
+                    _conversation_llm_model or "(none)", current_model,
+                    _from_batch, model_changed, ctx_changed, branch_switched,
+                    _conversation_id is None)
         if ctx_changed:
-            logger.info("Context changed: repo '%s'→'%s' mode '%s'→'%s' model '%s'→'%s' — starting new conversation",
+            logger.info("Context changed: repo='%s'→'%s' mode='%s'→'%s' model='%s'→'%s'",
                         _conversation_repo or '(none)', repo or '(none)',
                         _conversation_mode, mode,
                         _conversation_llm_model or '(none)', current_model or '(none)')
@@ -637,10 +669,11 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             logger.info("Phase 1b: creating new conversation for repo=%s branch=%s mode=%s model=%s",
                         repo, branch or '(empty)', mode, current_model)
             new_conv_id = _create_conversation(prompt, repo, branch, mode)
-            logger.info("Created conversation %s (repo=%s mode=%s model=%s)",
-                        new_conv_id, repo, mode, current_model)
+            logger.info("Phase 1b: created conv=%s (repo=%s mode=%s model=%s seen_ids=%d)",
+                        new_conv_id, repo, mode, current_model, len(_seen_event_ids))
         else:
-            logger.info("Reusing conversation %s (repo=%s mode=%s)", current_conv_id, repo, mode)
+            logger.info("Phase 1b: reusing conv=%s repo=%s mode=%s seen_ids=%d",
+                        current_conv_id, repo, mode, len(_seen_event_ids))
             effective_prompt = prompt
             # Only inject git pull when user explicitly provided a branch.
             # No branch = no git pull = no detection = work on whatever the sandbox has.
@@ -722,17 +755,23 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             _conversation_llm_model = current_model
             _current_repo_key = _repo_key(repo)
             _last_event_index = 0
+            _last_event_timestamp = ""  # reset min_timestamp for new conversation
             _seen_event_ids.clear()
             _seen_event_hashes.clear()
-            logger.info("Phase 1c: stored new conv_id=%s repo=%s branch=%s mode=%s model=%s",
+            logger.info("Phase 1c: stored new conv=%s repo=%s branch=%s mode=%s model=%s seen_ids=0",
                         new_conv_id, repo, _conversation_branch, mode, current_model)
-        _msgs().append({"id": _next_msg_id(), 
+        msg_id = _next_msg_id()
+        _msgs().append({"id": msg_id, 
             "role": "user",
             "content": prompt,
             "timestamp": int(time.time() * 1000),
         })
         _persist_to_db()
-        logger.debug("Phase 1c: user message appended (total %d msgs)", len(_msgs()))
+        # AUDIT: log Phase 1c state
+        event_count = sum(1 for m in _msgs() if m.get("role") == "event")
+        logger.info("AUDIT 1c: conv=%s need_new=%s msg_id=%d msgs=%d events=%d seen_ids=%d msg_counter=%d",
+                    _conversation_id, need_new_conv, msg_id,
+                    len(_msgs()), event_count, len(_seen_event_ids), _msg_counter)
 
     # Phase 2: Long wait — NO LOCK, get_state() can read events live
     # Track message count before wait so we can replace live [MSG] events
@@ -776,13 +815,22 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                     else:
                         logger.info("Phase 3: only cumulative prefix remains after strip — "
                                     "saving original (len=%d)", len(response))
-            logger.info("Phase 3: saving response (%d chars)", len(response))
-            _msgs().append({"id": _next_msg_id(), 
+            resp_msg_id = _next_msg_id()
+            event_count_before = sum(1 for m in msgs if m.get("role") == "event")
+            _msgs().append({"id": resp_msg_id, 
                 "role": "assistant",
                 "content": response,
                 "timestamp": int(time.time() * 1000),
             })
             _persist_to_db()
+            # AUDIT: log Phase 3 state
+            event_count_after = sum(1 for m in _msgs() if m.get("role") == "event")
+            logger.info("AUDIT 3: conv=%s resp_id=%d msgs=%d events_before=%d events_after=%d "
+                        "seen_ids=%d msg_counter=%d ts=%s",
+                        _conversation_id, resp_msg_id, len(_msgs()),
+                        event_count_before, event_count_after,
+                        len(_seen_event_ids), _msg_counter,
+                        _last_event_timestamp or "(none)")
             conv_id = _conversation_id
 
     if response:
