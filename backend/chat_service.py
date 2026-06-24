@@ -43,6 +43,7 @@ _current_repo_key: str = ""  # current repo — determines which chat history to
 _messages_by_repo: dict[str, list[dict]] = {}  # per-repo chat history
 _msg_counter: int = 0  # monotonically increasing message ID
 _lock = threading.Lock()
+_processing_repo: str = ""  # repo currently being processed by a non-batch send()
 
 def _next_msg_id() -> int:
     global _msg_counter
@@ -589,9 +590,12 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
 
     # Guard: if called externally while batch is running, auto-enqueue instead.
     # Batch worker passes _from_batch=True to bypass this guard.
-    # CRITICAL: reject if repo doesn't match the running batch's repo — prevents
-    # cross-repo contamination (phone sends to repo B while computer's batch
-    # is running on repo A). The user must wait or start a new conversation.
+    # CRITICAL: Also prevents concurrent non-batch send() for the same repo.
+    # When two requests arrive at the same time (e.g. double-tap, retry),
+    # both would pass Phase 1a with `_conversation_id is None` and create
+    # SEPARATE conversations. Both Phase 3 write to the SAME _messages_by_repo,
+    # producing TWO assistant messages for what the user expects to be ONE
+    # response. This is the #1 root cause of the "duplicate response" bug.
     if not _from_batch:
         with _lock:
             if _batch_running:
@@ -611,6 +615,28 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                 _persist_to_db()
                 logger.info("Batch running — auto-enqueued prompt (now %d total)", _batch_total)
                 return {"status": "appended", "position": _batch_position, "total": _batch_total}
+            # No batch running. Check if another non-batch send() is already
+            # processing THIS repo (concurrent requests). If so, auto-start a
+            # batch queue so they're processed sequentially instead of both
+            # creating separate conversations and writing duplicate responses.
+            if _processing_repo == repo:
+                logger.info("Concurrent send() detected for repo=%s — starting batch queue", repo)
+                _batch_running = True
+                _batch_repo = repo
+                _batch_prompts = [prompt]
+                _batch_prompt_modes = [mode]
+                _batch_position = 0
+                _batch_total = 1
+                _batch_skip_prompt = False
+                _batch_cancelled = False
+                _persist_to_db()
+                # Start worker thread to process queued prompts
+                import threading
+                t = threading.Thread(target=_process_batch_worker, daemon=True)
+                t.start()
+                return {"status": "queued", "position": 0, "total": 1}
+            # Mark this repo as being processed (cleared in finally block)
+            _processing_repo = repo
 
     # DO NOT reset event cursors here — _last_event_index, _last_event_timestamp,
     # and _seen_event_ids persist across send() calls so the SECOND message in a
@@ -783,6 +809,8 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                         _last_event_index = 0
                         _sandbox_id = None
                         _persist_to_db()
+                        if _processing_repo == repo:
+                            _processing_repo = ""
                     return {"error": send_err or "Failed to send message to conversation"}
     except httpx.HTTPStatusError as e:
         status_code = e.response.status_code
@@ -794,9 +822,15 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                 _last_event_index = 0
                 _sandbox_id = None
                 _persist_to_db()
+        with _lock:
+            if _processing_repo == repo:
+                _processing_repo = ""
         return {"error": f"Cloud API error: {status_code}"}
     except Exception as e:
         logger.error("Chat error (keeping conversation): %s", e, exc_info=True)
+        with _lock:
+            if _processing_repo == repo:
+                _processing_repo = ""
         return {"error": str(e)}
 
     # Phase 1c: Update state + save user message under lock
@@ -833,12 +867,16 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     with _lock:
         _msg_count_before = len(_msgs())
     logger.info("Phase 2: waiting for response (msg_count_before=%d)", _msg_count_before)
+    response: str | None = None
     try:
         response = _wait_for_response()
         logger.info("Phase 2: done, response=%s", "non-empty (%d chars)" % len(response) if response else "None/empty")
     except Exception as e:
         logger.error("Phase 2 crashed: %s", e, exc_info=True)
         response = None
+        with _lock:
+            if _processing_repo == repo:
+                _processing_repo = ""
 
     # Phase 3: Save result under lock.
     # _wait_for_response collects only new MessageEvent texts via event ID
@@ -910,9 +948,15 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
 
     if response:
         _auto_append_log(repo, prompt, response, ok=True)
+        with _lock:
+            if _processing_repo == repo:
+                _processing_repo = ""
         return {"response": response, "conversation_id": conv_id}
     elif duplicate_rejected:
         logger.warning("send: returning error (duplicate response rejected)")
+        with _lock:
+            if _processing_repo == repo:
+                _processing_repo = ""
         return {
             "error": "Agent returned a cached response identical to a previous reply. "
                      "The conversation may need to be reset — try New Conversation.",
@@ -921,6 +965,9 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     else:
         _auto_append_log(repo, prompt, str(response), ok=False)
         logger.warning("send: returning error (no response)")
+        with _lock:
+            if _processing_repo == repo:
+                _processing_repo = ""
         return {
             "error": "Agent did not produce a response (timeout or conversation error)",
             "conversation_id": _conversation_id,
