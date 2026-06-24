@@ -137,8 +137,8 @@ async def chat_send_message(req: ChatRequest):
     try:
         result = await loop.run_in_executor(None, chat_send, req.prompt, req.repo.strip(), req.branch.strip(), req.mode)
     except Exception as e:
-        logger.error("chat_send_message EXCEPTION: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("chat_send_message UNEXPECTED EXCEPTION: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
     if "error" in result:
         logger.warning("chat_send_message error: %s", result["error"])
         raise HTTPException(status_code=502, detail=result["error"])
@@ -210,7 +210,7 @@ async def chat_clear():
         return {"ok": True}
     except Exception as e:
         logger.error("chat_clear EXCEPTION: %s", e, exc_info=True)
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": "Failed to clear chat. Try again."}
 
 
 class BatchRequest(BaseModel):
@@ -250,8 +250,8 @@ async def chat_batch(req: BatchRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("chat_batch EXCEPTION: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("chat_batch UNEXPECTED EXCEPTION: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 
 @app.post("/api/chat/batch/cancel")
@@ -264,7 +264,7 @@ async def chat_batch_cancel():
         return result
     except Exception as e:
         logger.error("chat_batch_cancel EXCEPTION: %s", e, exc_info=True)
-        return {"status": "error", "error": str(e)}
+        return {"status": "error", "error": "Failed to cancel. Try again."}
 
 
 @app.post("/api/chat/batch/cancel/{index}")
@@ -277,7 +277,7 @@ async def chat_batch_cancel_prompt(index: int):
         return result
     except Exception as e:
         logger.error("chat_batch_cancel_prompt EXCEPTION: index=%d error=%s", index, e, exc_info=True)
-        return {"status": "error", "error": str(e)}
+        return {"status": "error", "error": "Failed to cancel. Try again."}
 
 
 # ---------------------------------------------------------------------------
@@ -305,8 +305,8 @@ async def create_prompt(req: PromptRequest):
             )
             await db.commit()
     except Exception as e:
-        logger.error(f"Failed to create prompt: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Failed to create prompt: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to create prompt. Try again.")
 
     logger.info(f"Task {task_id} created: repo={req.repo}, mode={req.mode}")
     return TaskResponse(
@@ -614,7 +614,7 @@ async def chat_clear_queue():
         return {"ok": True, "message": "All chat state cleared. Start fresh."}
     except Exception as e:
         logger.error("chat_clear_queue EXCEPTION: %s", e, exc_info=True)
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": "Failed to clear queue. Try again."}
 
 
 # ---------------------------------------------------------------------------

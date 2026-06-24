@@ -599,6 +599,14 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
         logger.error("send: invalid repo format: '%s'", repo)
         return {"error": f"Invalid repo format: '{repo}'. Use owner/repo"}
 
+    # Validate repo exists on GitHub (non-blocking on network error)
+    exists = _repo_exists(repo)
+    if exists is False:
+        logger.error("send: repo '%s' not found on GitHub — blocking send", repo)
+        return {"error": f"Repository '{repo}' not found on GitHub. Check the name and try again."}
+    if exists is None:
+        logger.warning("send: cannot verify repo '%s' — GitHub API error, proceeding anyway", repo)
+
     # Guard: if called externally while batch is running, auto-enqueue instead.
     # Batch worker passes _from_batch=True to bypass this guard.
     # CRITICAL: Also prevents concurrent non-batch send() for the same repo.
@@ -1028,6 +1036,14 @@ def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "", mode: st
     if not cleaned:
         return {"error": "No valid prompts"}
 
+    # Validate repo exists before enqueuing (instant error, not after delay)
+    exists = _repo_exists(repo)
+    if exists is False:
+        logger.error("enqueue_batch: repo '%s' not found on GitHub", repo)
+        return {"error": f"Repository '{repo}' not found on GitHub. Check the name and try again."}
+    if exists is None:
+        logger.warning("enqueue_batch: cannot verify repo '%s' — GitHub API error, proceeding", repo)
+
     with _lock:
         if _batch_running:
             # Reject append if repo changed — prevents cross-repo contamination
@@ -1406,7 +1422,12 @@ def _detect_default_branch(repo: str) -> str | None:
 
 
 def get_branches(repo: str) -> list[str]:
-    """Fetch branch list for a repo from GitHub API. Cached 5 min."""
+    """Fetch branch list for a repo from GitHub API. Cached 5 min.
+
+    Returns:
+        list[str]: Branch names on success.
+        []: If API fails or returns error. Callers should check _repo_exists() first.
+    """
     if not repo:
         return []
     now = time.time()
@@ -1432,6 +1453,28 @@ def get_branches(repo: str) -> list[str]:
     except Exception as e:
         logger.warning("Failed to fetch branches for %s: %s", repo, e)
     return []
+
+
+def _repo_exists(repo: str) -> bool | None:
+    """Check if a GitHub repo exists. Returns True/False, or None on network error."""
+    if not repo:
+        return False
+    try:
+        resp = httpx.get(
+            f"https://api.github.com/repos/{repo}",
+            headers=_gh_headers(),
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            return True
+        if resp.status_code == 404:
+            return False
+        # 403 rate limited, 301 moved, etc. — ambiguous
+        logger.warning("repo_exists(%s): ambiguous HTTP %s", repo, resp.status_code)
+        return None
+    except Exception as e:
+        logger.warning("repo_exists(%s): network error %s", repo, e)
+        return None
 
 
 _branch_cache: dict[str, tuple[list[str], float]] = {}

@@ -579,6 +579,17 @@ class ChatProvider extends ChangeNotifier {
       }
       return;
     }
+
+    // Guard: if a batch is running on a DIFFERENT repo, warn the user.
+    // This prevents losing visibility of the in-progress batch.
+    if (isProcessing && serverRepo.isNotEmpty && repo != serverRepo) {
+      logViewer('ChatProvider.switchRepo: BLOCKED — batch running on $serverRepo');
+      _error = 'Cannot switch to "$repo" — a batch is still running on "$serverRepo". '
+          'Wait for it to finish, then switch.';
+      _notify();
+      return;
+    }
+
     serverRepo = repo;
     serverBranch = branch;
     serverMode = mode;
