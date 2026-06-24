@@ -323,8 +323,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   style: TextStyle(color: Colors.grey[600], fontSize: 11),
                 ),
                 onTap: () {
-                  setState(() => _selectedModel = modelId);
-                  _saveModelSelection();
+                  _saveModelSelection(modelId);
                 },
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
@@ -336,14 +335,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Future<void> _saveModelSelection() async {
+  Future<void> _saveModelSelection(String modelId) async {
     final settings = context.read<SettingsProvider>();
     try {
-      await settings.updateLlmConfig(model: _selectedModel);
+      await settings.updateLlmConfig(model: modelId);
+      setState(() => _selectedModel = modelId);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Model changed to ${_selectedModel.replaceAll("deepseek/", "")}'),
+            content: Text('Model changed to ${modelId.replaceAll("deepseek/", "")}'),
             backgroundColor: Colors.green,
           ),
         );

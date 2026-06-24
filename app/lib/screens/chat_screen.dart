@@ -284,8 +284,8 @@ class _ChatScreenState extends State<ChatScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFF0D0D0D),
       appBar: AppBar(
-        title: Consumer<ChatProvider>(
-          builder: (_, chatProv, __) {
+        title: Consumer2<ChatProvider, SettingsProvider>(
+          builder: (_, chatProv, settings, __) {
             final activeRepo = chatProv.serverRepo.isNotEmpty
                 ? chatProv.serverRepo
                 : _repoCtrl.text.trim();
@@ -296,7 +296,6 @@ class _ChatScreenState extends State<ChatScreen> {
             if (activeRepo.isNotEmpty) parts.add(activeMode.toUpperCase());
             // Show model from SettingsProvider (updated when model is changed in settings).
             // Fall back to SharedPreferences cache if not yet loaded from server.
-            final settings = context.read<SettingsProvider>();
             final displayModel = settings.modelName ?? _activeModel;
             if (displayModel.isNotEmpty) parts.add(displayModel);
             return Column(
