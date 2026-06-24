@@ -297,47 +297,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
       child: Column(
         children: [
           for (final (modelId, label, desc) in models)
-            InkWell(
-              onTap: () {
-                setState(() => _selectedModel = modelId);
-                _saveModelSelection();
-              },
-              borderRadius: BorderRadius.circular(12),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                child: Row(
-                  children: [
-                    Icon(
-                      _selectedModel == modelId
-                          ? Icons.radio_button_checked
-                          : Icons.radio_button_unchecked,
-                      color: _selectedModel == modelId
-                          ? const Color(0xFF7C3AED)
-                          : Colors.grey[600],
-                      size: 22,
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            label,
-                            style: TextStyle(
-                              color: _selectedModel == modelId ? Colors.white : Colors.grey[400],
-                              fontSize: 14,
-                              fontWeight: _selectedModel == modelId ? FontWeight.w600 : FontWeight.normal,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            desc,
-                            style: TextStyle(color: Colors.grey[600], fontSize: 11),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
+            Material(
+              color: Colors.transparent,
+              child: ListTile(
+                dense: true,
+                leading: Icon(
+                  _selectedModel == modelId
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked,
+                  color: _selectedModel == modelId
+                      ? const Color(0xFF7C3AED)
+                      : Colors.grey[600],
+                  size: 22,
+                ),
+                title: Text(
+                  label,
+                  style: TextStyle(
+                    color: _selectedModel == modelId ? Colors.white : Colors.grey[400],
+                    fontSize: 14,
+                    fontWeight: _selectedModel == modelId ? FontWeight.w600 : FontWeight.normal,
+                  ),
+                ),
+                subtitle: Text(
+                  desc,
+                  style: TextStyle(color: Colors.grey[600], fontSize: 11),
+                ),
+                onTap: () {
+                  setState(() => _selectedModel = modelId);
+                  _saveModelSelection();
+                },
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
                 ),
               ),
             ),
