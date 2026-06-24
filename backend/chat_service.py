@@ -660,6 +660,9 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
         all_valid = valid_branches + ([default_branch] if default_branch and default_branch not in valid_branches else [])
         if branch not in all_valid:
             logger.warning("send: invalid branch '%s' for %s — available: %s", branch, repo, all_valid[:10])
+            with _lock:
+                if _processing_repo == repo:
+                    _processing_repo = ""
             return {"error": f"Branch '{branch}' not found in {repo}. Available: {', '.join(all_valid[:10]) or 'unknown'}"}
         logger.info("send: branch '%s' validated for %s", branch, repo)
 
