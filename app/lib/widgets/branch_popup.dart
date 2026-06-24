@@ -53,6 +53,7 @@ class _BranchPopupState extends State<BranchPopup> {
                 Expanded(
                   child: TextField(
                     controller: widget.controller,
+                    maxLines: 1,
                     style: const TextStyle(color: Colors.white, fontSize: 12),
                     onChanged: (_) => widget.onChanged(),
                     decoration: InputDecoration(

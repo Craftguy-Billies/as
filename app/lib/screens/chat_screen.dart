@@ -93,6 +93,8 @@ class _ChatScreenState extends State<ChatScreen> {
     final prefs = context.read<PreferencesService>();
     final savedRepo = prefs.lastRepo;
     final savedBranch = prefs.lastBranch;
+    debugPrint('[ChatScreen._init] ┌─ PERSISTENCE CHAIN ──────────────────────────────');
+    debugPrint('[ChatScreen._init] │ Step1: PreferencesService → repo="$savedRepo" branch="$savedBranch"');
     // Write to controllers immediately so ANY value is better than empty.
     if (savedRepo.isNotEmpty) {
       _repoCtrl.text = savedRepo;
@@ -101,48 +103,59 @@ class _ChatScreenState extends State<ChatScreen> {
     if (savedBranch.isNotEmpty) {
       _branchCtrl.text = savedBranch;
     }
-    debugPrint('[ChatScreen._init] prefs restored repo=$savedRepo branch=$savedBranch');
 
     // Step 2: Populate ChatProvider with saved repo
     if (savedRepo.isNotEmpty) {
       prov.initRepoFromHome(savedRepo);
-      debugPrint('[ChatScreen._init] initRepoFromHome($savedRepo) done, serverRepo=${prov.serverRepo}');
+      debugPrint('[ChatScreen._init] │ Step2: initRepoFromHome → serverRepo="${prov.serverRepo}"');
+    } else {
+      debugPrint('[ChatScreen._init] │ Step2: no savedRepo, serverRepo="${prov.serverRepo}" (unchanged)');
     }
 
     // Step 3: Load cached messages + merge with server.
     // loadFromCache() returns the restored repo (from cache or server).
     // If server is unreachable, cached values still work.
-    final restoredRepo = await prov.loadFromCache();
-    debugPrint('[ChatScreen._init] loadFromCache done, serverRepo=${prov.serverRepo} serverBranch=${prov.serverBranch}');
+    debugPrint('[ChatScreen._init] │ Step3: calling loadFromCache (serverRepo="${prov.serverRepo}" serverBranch="${prov.serverBranch}")');
+    await prov.loadFromCache();
+    debugPrint('[ChatScreen._init] │ Step3: loadFromCache done → serverRepo="${prov.serverRepo}" serverBranch="${prov.serverBranch}"');
 
     // Step 4: ALWAYS sync text controllers from ChatProvider.
     // serverRepo takes priority (both cache & server had a say).
     if (mounted) {
       setState(() {
+        debugPrint('[ChatScreen._init] │ Step4: setState decision:');
+        debugPrint('[ChatScreen._init] │   prov.serverRepo="${prov.serverRepo}" prov.serverBranch="${prov.serverBranch}"');
+        debugPrint('[ChatScreen._init] │   savedRepo="$savedRepo" savedBranch="$savedBranch"');
+
         if (prov.serverRepo.isNotEmpty) {
           _repoCtrl.text = prov.serverRepo;
           _showRepoBar = true;
-          debugPrint('[ChatScreen._init] synced _repoCtrl: ${prov.serverRepo}');
+          debugPrint('[ChatScreen._init] │   → using serverRepo for _repoCtrl');
         } else if (savedRepo.isNotEmpty) {
-          // Fallback: PreferencesService
           _repoCtrl.text = savedRepo;
           _showRepoBar = true;
+          debugPrint('[ChatScreen._init] │   → falling back to savedRepo for _repoCtrl');
         } else {
-          // LAST RESORT: try the provider's own fallback
-          // (if loadFromCache found nothing anywhere)
+          debugPrint('[ChatScreen._init] │   → no repo available, _repoCtrl stays empty');
         }
         if (prov.serverBranch.isNotEmpty) {
           _branchCtrl.text = prov.serverBranch;
-          debugPrint('[ChatScreen._init] synced _branchCtrl: ${prov.serverBranch}');
+          debugPrint('[ChatScreen._init] │   → using serverBranch for _branchCtrl');
         } else if (savedBranch.isNotEmpty) {
           _branchCtrl.text = savedBranch;
+          debugPrint('[ChatScreen._init] │   → falling back to savedBranch for _branchCtrl');
+        } else {
+          debugPrint('[ChatScreen._init] │   → no branch, _branchCtrl stays empty');
         }
         _hasLoaded = true;
       });
+      debugPrint('[ChatScreen._init] │ Step4: setState done, repoCtrl="${_repoCtrl.text}" branchCtrl="${_branchCtrl.text}"');
       // Persist whatever we ended up with so next boot is faster
       if ((_repoCtrl.text.isNotEmpty || prov.serverRepo.isNotEmpty) && mounted) {
         _saveRepoPrefs();
+        debugPrint('[ChatScreen._init] │ Step5: saved to PreferencesService: repo="${_repoCtrl.text}" branch="${_branchCtrl.text}"');
       }
+      debugPrint('[ChatScreen._init] └──────────────────────────────────────────────────');
     }
 
     // Load model preference
@@ -475,6 +488,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     Expanded(
                       child: TextField(
                         controller: _repoCtrl,
+                        maxLines: 1,
                         style: const TextStyle(color: Colors.white, fontSize: 13),
                         onChanged: (_) => _saveRepoPrefs(),
                         onSubmitted: (_) {
@@ -495,34 +509,6 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                       ),
                     ),
-                    // Saved repos dropdown
-                    if (prov.savedRepos.isNotEmpty)
-                      PopupMenuButton<Map<String, dynamic>>(
-                        padding: EdgeInsets.zero,
-                        icon: const Icon(Icons.arrow_drop_down, color: Colors.grey, size: 18),
-                        tooltip: 'Saved repos',
-                        onSelected: (r) {
-                          final repo = r['repo']?.toString() ?? '';
-                          _repoCtrl.text = repo == '(none)' ? '' : repo;
-                          _saveRepoPrefs();
-                          if (repo.isNotEmpty) {
-                            prov.switchRepo(repo, 'code', branch: _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim());
-                          }
-                        },
-                        itemBuilder: (_) => prov.savedRepos.map((r) {
-                          final repo = r['repo']?.toString() ?? '';
-                          final mode = r['mode']?.toString() ?? 'code';
-                          final count = (r['message_count'] as int?) ?? 0;
-                          return PopupMenuItem(
-                            value: r,
-                            height: 36,
-                            child: Text(
-                              '${repo == "(none)" ? "No repo" : repo} [$mode • $count msgs]',
-                              style: const TextStyle(fontSize: 12, color: Colors.white70),
-                            ),
-                          );
-                        }).toList(),
-                      ),
                   ],
                 ),
               ),

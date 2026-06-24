@@ -190,6 +190,9 @@ class ChatProvider extends ChangeNotifier {
     try {
       _savedRepos = await _api.getChatRepos();
       logViewer('ChatProvider.loadFromCache: loaded ${_savedRepos.length} repos from server');
+      if (_savedRepos.isNotEmpty) {
+        logViewer('ChatProvider.loadFromCache: first savedRepo=${_savedRepos.first['repo']} branch=${_savedRepos.first['branch']}');
+      }
     } catch (e) {
       logViewer('ChatProvider.loadFromCache: repo fetch failed: $e');
     }
@@ -202,7 +205,7 @@ class ChatProvider extends ChangeNotifier {
         if (rp != null && rp.isNotEmpty && rp != '(none)') {
           serverRepo = rp;
           serverBranch = r['branch']?.toString() ?? serverBranch;
-          logViewer('ChatProvider.loadFromCache: repo= $serverRepo (from savedRepos fallback)');
+          logViewer('ChatProvider.loadFromCache: repo= $serverRepo (from savedRepos fallback) branch=$serverBranch');
           break;
         }
       }
@@ -212,10 +215,16 @@ class ChatProvider extends ChangeNotifier {
     // Now serverRepo is set from cache, savedRepos, or empty (truly first use).
     try {
       final data = await _api.getChat(repo: serverRepo, mode: serverMode);
-      final serverRp = data['repo']?.toString();
-      if (serverRp != null && serverRp.isNotEmpty) {
-        serverRepo = serverRp;
-        logViewer('ChatProvider.loadFromCache: repo= $serverRp (from server)');
+      // Only trust data['repo'] when we did NOT explicitly request a repo.
+      // This prevents cross-device overwrite: if Device A switched to repo B,
+      // the server's _conversation_repo is B. But Device B requested repo A's
+      // messages — we should keep Device B's serverRepo as A, not switch to B.
+      if (serverRepo.isEmpty) {
+        final serverRp = data['repo']?.toString();
+        if (serverRp != null && serverRp.isNotEmpty) {
+          serverRepo = serverRp;
+          logViewer('ChatProvider.loadFromCache: repo= $serverRp (from server fallback)');
+        }
       }
       if (serverRepo.isEmpty) {
         final key = data['current_repo_key']?.toString();
@@ -224,10 +233,13 @@ class ChatProvider extends ChangeNotifier {
           logViewer('ChatProvider.loadFromCache: repo= $key (from current_repo_key)');
         }
       }
+      // Branch is NOT repo-specific — data['branch'] is the server's
+      // _conversation_branch which reflects the LAST conversation on ANY repo.
+      // Only use it as fallback when local branch is empty.
       final serverBr = data['branch']?.toString();
-      if (serverBr != null && serverBr.isNotEmpty) {
+      if (serverBr != null && serverBr.isNotEmpty && serverBranch.isEmpty) {
         serverBranch = serverBr;
-        logViewer('ChatProvider.loadFromCache: branch= $serverBr (from server)');
+        logViewer('ChatProvider.loadFromCache: branch= $serverBr (from server fallback)');
       }
       await _saveToCache();
 
@@ -546,10 +558,18 @@ class ChatProvider extends ChangeNotifier {
     // Fetch messages for this repo from server
     try {
       final state = await _api.getChat(repo: repo, mode: mode);
-      // Restore branch from server state if available
-      final serverBr = state['branch']?.toString();
-      if (serverBr != null && serverBr.isNotEmpty) {
+      // Do NOT overwrite serverBranch from server response — the user
+      // explicitly typed a branch (or empty). The server's
+      // _conversation_branch reflects the LAST conversation on ANY repo,
+      // not the one the user wants for THIS repo.
+      // Only fallback if user didn't provide a branch AND we have no
+      // saved branch for this repo.
+      final serverBr = state['branch']?.toString() ?? '';
+      if (branch.isEmpty && serverBr.isNotEmpty) {
         serverBranch = serverBr;
+        logViewer('ChatProvider.switchRepo: fallback branch="$serverBr" from server');
+      } else {
+        logViewer('ChatProvider.switchRepo: keeping user branch="$branch" (server had "$serverBr")');
       }
       final serverMsgs = (state['messages'] as List?)
               ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
@@ -559,6 +579,7 @@ class ChatProvider extends ChangeNotifier {
       _resetShowIndex();  // re-clamp for new repo's message count
       _error = null;
       await _saveToCache();
+      logViewer('ChatProvider.switchRepo: loaded ${_messages.length} msgs for repo=$repo branch=$serverBranch');
     } catch (e) {
       logViewer('ChatProvider.switchRepo: failed to fetch messages: $e');
     }

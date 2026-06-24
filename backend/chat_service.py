@@ -654,27 +654,42 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
         _batch_cancelled = False
     logger.info("Chat send: prompt=%.80s... repo=%s branch=%s mode=%s", prompt, repo, branch or '(empty)', mode)
 
-    # Branch validation: if user explicitly provided a branch, verify it exists.
-    # If invalid, reject immediately — no git pull, no message sent.
+    # Phase 0: Branch detection + validation
+    # If user typed a branch, verify it exists. If verification fails (API
+    # error, rate limited), assume valid rather than rejecting a good branch.
+    # If branch is actually invalid, fallback gracefully instead of erroring out.
     branch_provided = bool(branch)
+    default_branch = None
     if branch_provided:
         valid_branches = get_branches(repo)
-        # Also consider the default branch valid (in case GitHub API fails or
-        # the branch list doesn't include it yet — e.g. a very fresh repo).
         default_branch = _detect_default_branch(repo)
         all_valid = valid_branches + ([default_branch] if default_branch and default_branch not in valid_branches else [])
         if branch not in all_valid:
-            logger.warning("send: invalid branch '%s' for %s — available: %s", branch, repo, all_valid[:10])
-            if not _from_batch:
-                with _lock:
-                    if _processing_repo == repo:
-                        _processing_repo = ""
-            return {"error": f"Branch '{branch}' not found in {repo}. Available: {', '.join(all_valid[:10]) or 'unknown'}"}
-        logger.info("send: branch '%s' validated for %s", branch, repo)
+            if valid_branches:
+                # API returned a real list — branch is genuinely invalid.
+                # Fallback: use default branch (or leave empty for auto-detect).
+                logger.warning("send: branch '%s' not found in %s — available: %s, falling back",
+                              branch, repo, all_valid[:10])
+                branch = ""  # clear invalid branch — auto-detect takes over
+                branch_provided = False
+            else:
+                # API returned empty (network error, rate limit, etc.).
+                # Don't reject a potentially valid branch.
+                logger.warning("send: cannot verify branch '%s' for %s — API failed, assuming valid",
+                              branch, repo)
+        else:
+            logger.info("send: branch '%s' validated for %s", branch, repo)
+
+    # Phase 0b: Determine effective branch for this send()
+    # If user provided a branch, use it. If not, use conversation default.
+    effective_branch = branch if branch else (_conversation_branch or default_branch or "")
+    logger.info("send: effective_branch='%s' (provided='%s' conv='%s' default='%s')",
+                effective_branch, branch, _conversation_branch, default_branch or "")
 
     # Phase 1a: Quick check under lock — do we need a new conversation?
     with _lock:
-        effective_branch = branch if branch else _conversation_branch
+        # effective_branch already computed in Phase 0b: branch (validated) or
+        # _conversation_branch or default_branch or ""
         # Detect LLM model change — the current Cloud conversation was
         # created with _conversation_llm_model; if get_llm_config() now
         # returns a different model, force a new conversation (same as
@@ -745,31 +760,27 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             logger.info("Phase 1b: reusing conv=%s repo=%s mode=%s seen_ids=%d",
                         current_conv_id, repo, mode, len(_seen_event_ids))
             effective_prompt = prompt
-            # Only inject git pull when user explicitly provided a branch.
-            # No branch = no git pull = no detection = work on whatever the sandbox has.
+            # Inject git checkout + pull for the effective branch.
+            # When user provides a branch: always checkout that branch (sandbox
+            # may be on a different branch from last operation), then pull.
+            # When user provides no branch: just pull (keep whatever branch
+            # the sandbox is on — typically the default).
             # IMPORTANT: sandbox repo may be at /workspace, /workspace/project/<name>,
             # or another subpath. Don't hardcode — find the .git directory first.
-            if branch_provided:
-                pull_cmd = (
+            if effective_branch:
+                checkout_cmd = (
                     f"for d in /workspace /workspace/project/* /workspace/*; do "
-                    f"[ -d \"$d/.git\" ] && cd \"$d\" && git pull origin {branch} 2>&1 && break; done "
-                    f"|| echo 'git pull failed'"
+                    f"[ -d \"$d/.git\" ] && cd \"$d\" && "
+                    f"git fetch origin && git checkout {effective_branch} 2>&1 && "
+                    f"git pull origin {effective_branch} 2>&1 && break; done "
+                    f"|| echo 'git checkout/pull failed'"
                 )
-                if branch_switched:
-                    checkout_cmd = (
-                        f"for d in /workspace /workspace/project/* /workspace/*; do "
-                        f"[ -d \"$d/.git\" ] && cd \"$d\" && "
-                        f"git fetch origin && git checkout {branch} && git pull origin {branch} 2>&1 && break; done "
-                        f"|| echo 'git checkout failed'"
-                    )
-                    git_prefix = f"{checkout_cmd}\n\n"
-                    logger.info("Injected branch switch: checkout %s (auto-detect git root)", branch)
-                else:
-                    git_prefix = f"{pull_cmd}\n\n"
-                    logger.info("Injected git pull: branch %s (auto-detect git root)", branch)
+                git_prefix = f"{checkout_cmd}\n\n"
+                logger.info("send: injected git checkout+pull for branch=%s (branch_provided=%s branch_switched=%s)",
+                            effective_branch, branch_provided, branch_switched)
                 effective_prompt = f"{git_prefix}{prompt}"
             else:
-                logger.info("No branch — sending prompt as-is, no git pull")
+                logger.info("send: no branch — sending prompt as-is, no git pull")
             success, send_err = _send_message(current_conv_id, effective_prompt)
             if not success:
                 # If sandbox is paused/gone, auto-recover: reset + create new
@@ -1081,7 +1092,8 @@ def _process_batch_worker() -> None:
                 mode = _batch_prompt_modes[_batch_position] if _batch_position < len(_batch_prompt_modes) else _batch_mode
 
             # Send the prompt (this blocks — uses the same send() function)
-            logger.info("Batch [%d/%d]: %.80s...", pos, total, prompt)
+            logger.info("Batch [%d/%d]: %.80s... repo=%s branch=%s mode=%s",
+                        pos, total, prompt, repo, branch or '(default)', mode)
             try:
                 result = send(prompt, repo=repo, branch=branch, mode=mode, _from_batch=True)
                 logger.info("Batch [%d/%d]: send() returned status=%s has_error=%s msgs=%d",
