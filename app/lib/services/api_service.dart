@@ -314,17 +314,13 @@ class ApiService {
   }
 
   Future<void> updateLlmConfig({
-    required String apiKey,
     required String model,
-    String? baseUrl,
   }) async {
     final resp = await http.put(
       Uri.parse('$_url/api/config/llm'),
       headers: {'Content-Type': 'application/json'},
       body: json.encode({
-        'api_key': apiKey,
         'model': model,
-        'base_url': baseUrl,
       }),
     ).timeout(const Duration(seconds: 8));
     if (resp.statusCode != 200) {

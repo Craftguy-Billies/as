@@ -532,22 +532,41 @@ async def register_fcm_token(req: FCMTokenRequest):
 
 @app.put("/api/config/llm")
 async def update_llm_config(req: LLMConfigRequest):
-    """Update the LLM configuration at runtime.
+    """Update the LLM model at runtime.
     
+    Only two models are allowed:
+      - deepseek/deepseek-v4-flash
+      - deepseek/deepseek-v4-pro
+    
+    The API key is read from the LLM_API_KEY env var (set on the server).
     The next send() call detects the model change and creates a new
     Cloud conversation with the new model (preserving message history).
     """
-    logger.info("LLM config update: model=%s base_url=%s", req.model, req.base_url)
+    allowed = {"deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"}
+    if req.model not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model '{req.model}' not allowed. Choose from: {', '.join(sorted(allowed))}"
+        )
+    
+    # Read API key from env var (already set on the server, not sent from client)
+    api_key = os.environ.get("LLM_API_KEY", "") or os.environ.get("OPENHANDS_CLOUD_API_KEY", "")
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="LLM_API_KEY not configured on server. Set the LLM_API_KEY or OPENHANDS_CLOUD_API_KEY env var."
+        )
+    
+    logger.info("LLM model update: %s (using server-side API key)", req.model)
     set_llm_config(AgentConfig(
         model=req.model,
-        api_key=req.api_key,
-        base_url=req.base_url,
+        api_key=api_key,
+        base_url=None,
     ))
     cfg = get_llm_config()
     return {
         "status": "updated",
         "model": cfg.model,
-        "base_url": cfg.base_url,
     }
 
 

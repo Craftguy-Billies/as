@@ -5,6 +5,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/chat_provider.dart';
+import '../providers/settings_provider.dart';
 import '../providers/task_provider.dart';
 import '../services/preferences_service.dart';
 import '../widgets/branch_popup.dart';
@@ -293,7 +294,11 @@ class _ChatScreenState extends State<ChatScreen> {
             if (activeRepo.isNotEmpty) parts.add(activeRepo);
             if (activeRepo.isNotEmpty && chatProv.serverBranch.isNotEmpty) parts.add(chatProv.serverBranch);
             if (activeRepo.isNotEmpty) parts.add(activeMode.toUpperCase());
-            if (_activeModel.isNotEmpty) parts.add(_activeModel);
+            // Show model from SettingsProvider (updated when model is changed in settings).
+            // Fall back to SharedPreferences cache if not yet loaded from server.
+            final settings = context.read<SettingsProvider>();
+            final displayModel = settings.modelName ?? _activeModel;
+            if (displayModel.isNotEmpty) parts.add(displayModel);
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [

@@ -73,19 +73,11 @@ class SettingsProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> updateLlmConfig({
-    required String apiKey,
-    required String model,
-    String? baseUrl,
-  }) async {
+  Future<void> updateLlmConfig({required String model}) async {
     try {
-      await _api.updateLlmConfig(
-        apiKey: apiKey,
-        model: model,
-        baseUrl: baseUrl,
-      );
+      await _api.updateLlmConfig(model: model);
       _modelName = model;
-      // Persist model name for chat subtitle
+      // Persist model name so chat screen can show it immediately
       final sp = await SharedPreferences.getInstance();
       await sp.setString('last_model', model);
       notifyListeners();

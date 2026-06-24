@@ -19,8 +19,8 @@ class PromptRequest(BaseModel):
 
 
 class LLMConfigRequest(BaseModel):
-    api_key: str = Field(..., min_length=1)
     model: str = Field(..., min_length=1)
+    api_key: Optional[str] = None
     base_url: Optional[str] = None
 
 

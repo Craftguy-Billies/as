@@ -13,21 +13,16 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   final _urlCtrl = TextEditingController();
-  final _apiKeyCtrl = TextEditingController();
-  final _modelCtrl = TextEditingController();
-  final _baseUrlCtrl = TextEditingController();
   final _gitNameCtrl = TextEditingController();
   final _gitEmailCtrl = TextEditingController();
   final _implementCtrl = TextEditingController();
+  String _selectedModel = 'deepseek/deepseek-v4-flash';
   Timer? _urlDebounce;
 
   @override
   void dispose() {
     _urlDebounce?.cancel();
     _urlCtrl.dispose();
-    _apiKeyCtrl.dispose();
-    _modelCtrl.dispose();
-    _baseUrlCtrl.dispose();
     _gitNameCtrl.dispose();
     _gitEmailCtrl.dispose();
     _implementCtrl.dispose();
@@ -60,6 +55,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // Pre-populate implement prompt from local prefs
     if (_implementCtrl.text.isEmpty) {
       _implementCtrl.text = context.read<PreferencesService>().implementPrompt;
+    }
+
+    // Pre-populate model selection from server state (only when default = first build)
+    if (settings.modelName != null && settings.modelName!.isNotEmpty && _selectedModel == 'deepseek/deepseek-v4-flash') {
+      _selectedModel = settings.modelName!;
     }
 
     return Scaffold(
@@ -123,68 +123,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
           // LLM Configuration
           _SectionTitle(title: 'LLM Configuration'),
           const SizedBox(height: 8),
-          if (settings.modelName != null && settings.modelName!.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Text(
-                'Current model: ${settings.modelName}',
-                style: const TextStyle(color: Colors.green, fontSize: 13),
-              ),
-            ),
-          _buildTextField(
-            controller: _apiKeyCtrl,
-            label: 'API Key',
-            hint: 'sk-...',
-            icon: Icons.key,
-            obscure: true,
-          ),
-          const SizedBox(height: 8),
-          _buildTextField(
-            controller: _modelCtrl,
-            label: 'Model',
-            hint: 'deepseek-chat / gpt-4o / claude-sonnet-4-20250514',
-            icon: Icons.smart_toy,
-          ),
-          const SizedBox(height: 8),
-          _buildTextField(
-            controller: _baseUrlCtrl,
-            label: 'Base URL (optional)',
-            hint: 'https://api.deepseek.com/v1',
-            icon: Icons.link,
+          Text(
+            'Choose the AI model for all conversations. '
+            'Changes take effect on the next message (existing chats are preserved).',
+            style: TextStyle(color: Colors.grey[600], fontSize: 12),
           ),
           const SizedBox(height: 12),
-          ElevatedButton.icon(
-            onPressed: () async {
-              if (_apiKeyCtrl.text.isEmpty || _modelCtrl.text.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('API Key and Model are required'),
-                    backgroundColor: Colors.red,
-                  ),
-                );
-                return;
-              }
-              await settings.updateLlmConfig(
-                apiKey: _apiKeyCtrl.text.trim(),
-                model: _modelCtrl.text.trim(),
-                baseUrl: _baseUrlCtrl.text.trim().isEmpty
-                    ? null
-                    : _baseUrlCtrl.text.trim(),
-              );
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('LLM config updated'),
-                    backgroundColor: Colors.green,
-                  ),
-                );
-              }
-            },
-            icon: const Icon(Icons.save),
-            label: const Text('Save LLM Config'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF7C3AED),
-            ),
+          // Pre-populate _selectedModel from server state
+          _buildModelSelector(),
+          const SizedBox(height: 8),
+          Text(
+            settings.modelName != null && settings.modelName!.isNotEmpty
+                ? 'Current model: ${settings.modelName}'
+                : 'Current model: ${_selectedModel}',
+            style: TextStyle(color: Colors.grey[500], fontSize: 11),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'API key is pre-configured on the server.',
+            style: TextStyle(color: Colors.grey[700], fontSize: 11),
           ),
 
           const SizedBox(height: 32),
@@ -233,6 +190,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             label: const Text('Save Git Config'),
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFF7C3AED),
+              foregroundColor: Colors.white,
             ),
           ),
 
@@ -294,53 +252,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             label: const Text('Save Implement Prompt'),
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFF7C3AED),
+              foregroundColor: Colors.white,
             ),
-          ),
-
-          const SizedBox(height: 32),
-
-          // Quick Setup
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              _PresetChip(
-                label: 'DeepSeek',
-                onTap: () {
-                  _modelCtrl.text = 'deepseek-chat';
-                  _baseUrlCtrl.text = 'https://api.deepseek.com/v1';
-                },
-              ),
-              _PresetChip(
-                label: 'Claude',
-                onTap: () {
-                  _modelCtrl.text = 'claude-sonnet-4-20250514';
-                  _baseUrlCtrl.clear();
-                },
-              ),
-              _PresetChip(
-                label: 'OpenAI',
-                onTap: () {
-                  _modelCtrl.text = 'gpt-4o';
-                  _baseUrlCtrl.clear();
-                },
-              ),
-              _PresetChip(
-                label: 'Groq',
-                onTap: () {
-                  _modelCtrl.text = 'llama-3.3-70b-versatile';
-                  _baseUrlCtrl.text = 'https://api.groq.com/openai/v1';
-                },
-              ),
-              _PresetChip(
-                label: 'OpenRouter',
-                onTap: () {
-                  _modelCtrl.text = 'openai/gpt-4o';
-                  _baseUrlCtrl.text = 'https://openrouter.ai/api/v1';
-                },
-              ),
-            ],
           ),
 
           const SizedBox(height: 32),
@@ -369,6 +282,92 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ],
       ),
     );
+  }
+
+  Widget _buildModelSelector() {
+    const models = [
+      ('deepseek/deepseek-v4-flash', 'DeepSeek V4 Flash', 'Fast, cost-effective'),
+      ('deepseek/deepseek-v4-pro', 'DeepSeek V4 Pro', 'Best quality, slower'),
+    ];
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A2E),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        children: [
+          for (final (modelId, label, desc) in models)
+            InkWell(
+              onTap: () {
+                setState(() => _selectedModel = modelId);
+                _saveModelSelection();
+              },
+              borderRadius: BorderRadius.circular(12),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                child: Row(
+                  children: [
+                    Icon(
+                      _selectedModel == modelId
+                          ? Icons.radio_button_checked
+                          : Icons.radio_button_unchecked,
+                      color: _selectedModel == modelId
+                          ? const Color(0xFF7C3AED)
+                          : Colors.grey[600],
+                      size: 22,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            label,
+                            style: TextStyle(
+                              color: _selectedModel == modelId ? Colors.white : Colors.grey[400],
+                              fontSize: 14,
+                              fontWeight: _selectedModel == modelId ? FontWeight.w600 : FontWeight.normal,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            desc,
+                            style: TextStyle(color: Colors.grey[600], fontSize: 11),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _saveModelSelection() async {
+    final settings = context.read<SettingsProvider>();
+    try {
+      await settings.updateLlmConfig(model: _selectedModel);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Model changed to ${_selectedModel.replaceAll("deepseek/", "")}'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to save model: ${e.toString().replaceAll("Exception: ", "")}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   Widget _buildTextField({
@@ -414,32 +413,6 @@ class _SectionTitle extends StatelessWidget {
         fontSize: 14,
         fontWeight: FontWeight.w600,
         letterSpacing: 1,
-      ),
-    );
-  }
-}
-
-class _PresetChip extends StatelessWidget {
-  final String label;
-  final VoidCallback onTap;
-
-  const _PresetChip({required this.label, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        decoration: BoxDecoration(
-          color: const Color(0xFF1A1A2E),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: const Color(0xFF7C3AED).withAlpha(70)),
-        ),
-        child: Text(
-          label,
-          style: const TextStyle(color: Colors.white70, fontSize: 13),
-        ),
       ),
     );
   }
