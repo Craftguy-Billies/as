@@ -2065,18 +2065,17 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
 
 def _scrape_events_for_text(events: list[dict]) -> str | None:
-    """Fallback: extract clean text from events when no MessageEvent found.
+    """Fallback: extract a USEFUL short summary from events when no MessageEvent found.
 
-    ONLY scrapes safe sources that won't produce "messy" output:
-    - llm_message from non-MessageEvent events (tool responses with structured text)
-    - ActionEvent thought (agent reasoning — brief, not raw file content)
-    - Error text (diagnostic messages)
-    - ConversationStateUpdateEvent value (status messages)
+    Strategy (from most to least useful):
+    1. llm_message from non-MessageEvent events (tool-structured text)
+    2. ActionEvent.thought (brief agent reasoning)
+    3. SHORT observation snippets (< 300 chars — skip file/terminal dumps)
+    4. Tool action summaries from ActionEvent (e.g. "[TERMINAL] $ cat index.html")
+    5. Error text and ConversationStateUpdateEvent value
 
-    NEVER scrapes observation content (tool results like cat -n output, node
-    validation output, git output) — those are raw file/terminal dumps that
-    produce "messy" responses when concatenated. If only observation content is
-    available, return None so Phase 3 shows a clean "No response" error instead.
+    Capped at 1500 chars — never dump raw file/command output.
+    If nothing useful found, returns None so caller can use a fallback message.
 
     CRITICAL: Agent MessageEvents are NEVER scraped — they are the PRIMARY
     data source for all_new_msgs / zip fallback. If events/search deduped an
@@ -2085,7 +2084,22 @@ def _scrape_events_for_text(events: list[dict]) -> str | None:
     as a byte-identical "cached response". This is the #1 root cause of the
     phantom duplicate bug.
     """
+    MAX_CHARS = 1500
+    SHORT_MAX = 300
     parts: list[str] = []
+    tool_actions: list[str] = []
+    char_count = 0
+
+    def add_if_room(text: str) -> None:
+        nonlocal char_count
+        remaining = MAX_CHARS - char_count
+        if not text.strip():
+            return
+        if len(text) > remaining:
+            text = text[:remaining] + "..."
+        parts.append(text.strip())
+        char_count += len(text)
+
     for evt in events:
         kind = evt.get("kind", "")
         source = evt.get("source", "")
@@ -2095,39 +2109,92 @@ def _scrape_events_for_text(events: list[dict]) -> str | None:
         # Never scrape user's own messages either
         if kind == "MessageEvent" and source == "user":
             continue
-        # llm_message from non-MessageEvent events (tool-structured text)
+        if char_count >= MAX_CHARS:
+            break
+
+        # 1. llm_message from non-MessageEvent events
         llm_msg = evt.get("llm_message") or evt.get("message")
         if isinstance(llm_msg, dict):
             content = llm_msg.get("content") or []
             if isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict) and block.get("text"):
-                        parts.append(str(block["text"]))
+                        add_if_room(str(block["text"]))
             elif isinstance(content, str) and content.strip():
-                parts.append(content.strip())
+                add_if_room(content.strip())
         elif isinstance(llm_msg, str) and llm_msg.strip():
-            parts.append(llm_msg.strip())
-        # ActionEvent.thought — brief agent reasoning, not raw file content
+            add_if_room(llm_msg.strip())
+
+        # 2. ActionEvent.thought (brief agent reasoning)
         thought = evt.get("thought")
         if isinstance(thought, list):
             for item in thought:
                 if isinstance(item, dict) and item.get("text"):
-                    parts.append(str(item["text"]))
-        # Error text (diagnostic messages only)
+                    add_if_room(str(item["text"]))
+
+        # 3. SHORT observation snippets only (< 300 chars)
+        #    Skip long file/terminal/command dumps.
+        if kind == "ObservationEvent" or evt.get("observation"):
+            obs = evt.get("observation")
+            if isinstance(obs, dict):
+                obs_content = obs.get("content") or []
+                if isinstance(obs_content, list):
+                    for block in obs_content:
+                        if isinstance(block, dict) and block.get("text"):
+                            t = str(block["text"]).strip()
+                            if t and len(t) < SHORT_MAX:
+                                add_if_room(t)
+                elif isinstance(obs_content, str) and obs_content.strip():
+                    t = obs_content.strip()
+                    if len(t) < SHORT_MAX:
+                        add_if_room(t)
+
+        # 4. Tool action summaries (short, descriptive)
+        if kind == "ActionEvent":
+            tool = evt.get("tool_name", "")
+            action = evt.get("action") or {}
+            if isinstance(action, str):
+                try:
+                    action = json.loads(action)
+                except Exception:
+                    action = {}
+            if isinstance(action, dict):
+                cmd = action.get("command", "") or action.get("content", "")
+                path = action.get("path", "") or action.get("file", "")
+                summary = ""
+                if cmd:
+                    cmd_short = cmd[:150].replace("\n", " ").strip()
+                    summary = f"[{tool}] {cmd_short}"
+                elif path:
+                    summary = f"[{tool}] {path}"
+                if summary and char_count < MAX_CHARS:
+                    tool_actions.append(summary)
+
+        # 5. Error text and ConversationStateUpdateEvent value
         err = evt.get("error")
         if isinstance(err, str) and err.strip():
-            parts.append(err)
-        # Conversation state value text (e.g. execution_status messages)
+            add_if_room(f"[ERROR] {err.strip()}")
         if kind == "ConversationStateUpdateEvent":
             val = evt.get("value", "")
             if isinstance(val, str) and len(val) > 10 and val.strip():
-                parts.append(val.strip())
-        # OBSERVATION content (e.g. cat -n output, node output, git output)
-        # is DELIBERATELY NOT SCRAPED — it produces messy responses with raw
-        # file contents and command output. Better to return None here and let
-        # Phase 3 show a clean error than dump hundreds of lines of file content.
-    text = "\n".join(parts).strip()
-    return text if text else None
+                add_if_room(val.strip())
+
+    # If we have clean parts, join and return
+    if parts:
+        text = "\n".join(parts).strip()
+        if text and char_count > 0:
+            return text
+
+    # Fallback: return tool action summary instead of raw dumps
+    if tool_actions:
+        unique_actions = list(dict.fromkeys(tool_actions))  # dedup, preserve order
+        summary = "Agent actions:\n" + "\n".join(unique_actions[:8])
+        if len(summary) > MAX_CHARS:
+            summary = summary[:MAX_CHARS] + "..."
+        return summary
+
+    # Nothing useful found
+    return None
 
 
 def _format_event_preview(evt: dict) -> str | None:
