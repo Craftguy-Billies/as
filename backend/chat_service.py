@@ -2065,10 +2065,18 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
 
 def _scrape_events_for_text(events: list[dict]) -> str | None:
-    """Fallback: extract any text from events when no MessageEvent found.
+    """Fallback: extract clean text from events when no MessageEvent found.
 
-    Tries: llm_message.content, observation.content, action.thought, error fields.
-    Also includes ConversationStateUpdateEvent value text as a tip off.
+    ONLY scrapes safe sources that won't produce "messy" output:
+    - llm_message from non-MessageEvent events (tool responses with structured text)
+    - ActionEvent thought (agent reasoning — brief, not raw file content)
+    - Error text (diagnostic messages)
+    - ConversationStateUpdateEvent value (status messages)
+
+    NEVER scrapes observation content (tool results like cat -n output, node
+    validation output, git output) — those are raw file/terminal dumps that
+    produce "messy" responses when concatenated. If only observation content is
+    available, return None so Phase 3 shows a clean "No response" error instead.
 
     CRITICAL: Agent MessageEvents are NEVER scraped — they are the PRIMARY
     data source for all_new_msgs / zip fallback. If events/search deduped an
@@ -2087,6 +2095,7 @@ def _scrape_events_for_text(events: list[dict]) -> str | None:
         # Never scrape user's own messages either
         if kind == "MessageEvent" and source == "user":
             continue
+        # llm_message from non-MessageEvent events (tool-structured text)
         llm_msg = evt.get("llm_message") or evt.get("message")
         if isinstance(llm_msg, dict):
             content = llm_msg.get("content") or []
@@ -2098,25 +2107,13 @@ def _scrape_events_for_text(events: list[dict]) -> str | None:
                 parts.append(content.strip())
         elif isinstance(llm_msg, str) and llm_msg.strip():
             parts.append(llm_msg.strip())
-        # Observation content (tool results with text)
-        obs = evt.get("observation")
-        if isinstance(obs, dict):
-            obs_content = obs.get("content") or []
-            if isinstance(obs_content, list):
-                for block in obs_content:
-                    if isinstance(block, dict) and block.get("text"):
-                        t = str(block["text"]).strip()
-                        if t and len(t) > 20:  # skip trivial messages
-                            parts.append(t)
-            elif isinstance(obs_content, str) and obs_content.strip():
-                parts.append(obs_content.strip())
-        # Action thought (agent reasoning before tool call)
+        # ActionEvent.thought — brief agent reasoning, not raw file content
         thought = evt.get("thought")
         if isinstance(thought, list):
             for item in thought:
                 if isinstance(item, dict) and item.get("text"):
                     parts.append(str(item["text"]))
-        # Error text
+        # Error text (diagnostic messages only)
         err = evt.get("error")
         if isinstance(err, str) and err.strip():
             parts.append(err)
@@ -2125,7 +2122,11 @@ def _scrape_events_for_text(events: list[dict]) -> str | None:
             val = evt.get("value", "")
             if isinstance(val, str) and len(val) > 10 and val.strip():
                 parts.append(val.strip())
-    text = "\n\n".join(parts).strip()
+        # OBSERVATION content (e.g. cat -n output, node output, git output)
+        # is DELIBERATELY NOT SCRAPED — it produces messy responses with raw
+        # file contents and command output. Better to return None here and let
+        # Phase 3 show a clean error than dump hundreds of lines of file content.
+    text = "\n".join(parts).strip()
     return text if text else None
 
 
