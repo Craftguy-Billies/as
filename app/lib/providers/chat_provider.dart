@@ -630,15 +630,18 @@ class ChatProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> fetchBranches() async {
-    if (serverRepo.isEmpty) {
-      _branchesAttempted = true;  // nothing to load
+  Future<void> fetchBranches({String? repo}) async {
+    // Allow caller to specify a repo (e.g. BranchPopup passes the text field
+    // value). When null, fall back to serverRepo.
+    final targetRepo = repo?.trim() ?? serverRepo;
+    if (targetRepo.isEmpty) {
+      _branchesAttempted = true;
       return;
     }
     try {
-      _branches = await _api.getBranches(serverRepo);
+      _branches = await _api.getBranches(targetRepo);
       _branchesAttempted = true;
-      logViewer('ChatProvider.fetchBranches: ${_branches.length} branches for $serverRepo');
+      logViewer('ChatProvider.fetchBranches: ${_branches.length} branches for $targetRepo');
       _notify();
     } catch (e) {
       _branchesAttempted = true;

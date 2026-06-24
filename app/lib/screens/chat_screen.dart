@@ -517,6 +517,7 @@ class _ChatScreenState extends State<ChatScreen> {
               BranchPopup(
                 controller: _branchCtrl,
                 onChanged: () => _saveRepoPrefs(),
+                repo: _repoCtrl.text.trim().isNotEmpty ? _repoCtrl.text.trim() : null,
               ),
               const SizedBox(width: 6),
               // Mode label (code-only, plan mode hidden)
