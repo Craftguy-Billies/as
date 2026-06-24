@@ -847,6 +847,11 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     # — they indicate the trajectory-zip fallback returned a previous turn's
     # cached response instead of the current turn's output.
     #
+    # CRITICAL: Check against ALL previous assistant messages, not just the
+    # last one. If the user sends prompts A→B→A, the second A's response may
+    # match the first A's response but NOT match B (the most recent). A naive
+    # last-assistant check would let it through as a duplicate.
+    #
     # AUDIT: Determine response source for diagnostics.
     # - events/search: response came from a new MessageEvent in the poll
     # - zip: response came from trajectory zip fallback
@@ -859,24 +864,23 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
         if response and response.strip():
             response = response.strip()
             msgs = _msgs()
-            # Strip cumulative prefix: if response starts with the last
-            # assistant message, remove it (handles API returning cumulative
-            # content in rare cases). If they're identical, reject — this
-            # indicates a stale cached response from a previous turn.
-            last_assistant = next(
-                (m["content"] for m in reversed(msgs) if m.get("role") == "assistant"),
-                None,
-            )
-            if last_assistant:
-                if response == last_assistant:
-                    logger.warning("Phase 3: response byte-identical to last assistant — "
-                                   "rejecting (len=%d source=%s). Response source=%s, "
-                                   "last_assistant first 80 chars: %s",
-                                   len(response), _response_source, _response_source,
-                                   last_assistant[:80].replace("\n", " "))
-                    duplicate_rejected = True
-                    response = None
-                elif response.startswith(last_assistant):
+            # Collect ALL previous assistant contents for dedup
+            prev_assistant_contents: list[str] = [
+                m["content"] for m in msgs if m.get("role") == "assistant"
+            ]
+            # If response matches ANY previous assistant message, reject it
+            if prev_assistant_contents and response in prev_assistant_contents:
+                logger.warning("Phase 3: response matches a PREVIOUS assistant message — "
+                               "rejecting (len=%d source=%s). Matched by content, "
+                               "first 80 chars: %s",
+                               len(response), _response_source,
+                               response[:80].replace("\n", " "))
+                duplicate_rejected = True
+                response = None
+            elif prev_assistant_contents:
+                # Also handle cumulative prefix vs the LAST assistant message
+                last_assistant = prev_assistant_contents[-1]
+                if response.startswith(last_assistant):
                     stripped = response[len(last_assistant):].strip()
                     if stripped:
                         logger.info("Phase 3: stripped cumulative prefix (was %d, now %d chars) source=%s",
@@ -910,7 +914,7 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     elif duplicate_rejected:
         logger.warning("send: returning error (duplicate response rejected)")
         return {
-            "error": "Agent returned a cached response identical to the previous reply. "
+            "error": "Agent returned a cached response identical to a previous reply. "
                      "The conversation may need to be reset — try New Conversation.",
             "conversation_id": _conversation_id,
         }

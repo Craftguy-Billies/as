@@ -237,17 +237,17 @@ class ChatProvider extends ChangeNotifier {
           [];
       if (serverMsgs.isNotEmpty) {
         final merged = <ChatMessage>[];
-        final seen = <String>{};
-        final serverContentKeys = <String>{};
+        final seenByKey = <String>{};
+        final seenByContent = <String>{};
         for (final m in serverMsgs) {
-          if (seen.add(m.dedupKey)) {
+          final contentKey = '${m.role}:${m.content}';
+          if (seenByKey.add(m.dedupKey) && seenByContent.add(contentKey)) {
             merged.add(m);
-            serverContentKeys.add('${m.role}:${m.content}');
           }
         }
         for (final m in _messages) {
-          final ck = '${m.role}:${m.content}';
-          if (!serverContentKeys.contains(ck) && seen.add(m.dedupKey)) {
+          final contentKey = '${m.role}:${m.content}';
+          if (!seenByContent.contains(contentKey) && seenByKey.add(m.dedupKey)) {
             merged.add(m);
           }
         }
@@ -437,19 +437,21 @@ class ChatProvider extends ChangeNotifier {
         logViewer('ChatProvider.poll: serverMsgs=${serverMsgs.length} localMsgs=${_messages.length}');
         if (serverMsgs.isNotEmpty) {
           final merged = <ChatMessage>[];
-          final seen = <String>{};
-          final serverContentKeys = <String>{};
-          // Phase 1: server messages (canonical, have IDs)
+          final seenByKey = <String>{};
+          final seenByContent = <String>{};
+          // Phase 1: server messages (canonical, have IDs).
+          // Dedup by BOTH id (for same message in consecutive polls) AND
+          // role:content (for two messages with same content but different IDs).
           for (final m in serverMsgs) {
-            if (seen.add(m.dedupKey)) {
+            final contentKey = '${m.role}:${m.content}';
+            if (seenByKey.add(m.dedupKey) && seenByContent.add(contentKey)) {
               merged.add(m);
-              serverContentKeys.add('${m.role}:${m.content}');
             }
           }
           // Phase 2: client messages only if not covered by server
           for (final m in _messages) {
-            final ck = '${m.role}:${m.content}';
-            if (!serverContentKeys.contains(ck) && seen.add(m.dedupKey)) {
+            final contentKey = '${m.role}:${m.content}';
+            if (!seenByContent.contains(contentKey) && seenByKey.add(m.dedupKey)) {
               merged.add(m);
             }
           }
@@ -593,17 +595,17 @@ class ChatProvider extends ChangeNotifier {
           [];
       if (serverMsgs.isNotEmpty) {
         final merged = <ChatMessage>[];
-        final seen = <String>{};
-        final serverContentKeys = <String>{};
+        final seenByKey = <String>{};
+        final seenByContent = <String>{};
         for (final m in serverMsgs) {
-          if (seen.add(m.dedupKey)) {
+          final contentKey = '${m.role}:${m.content}';
+          if (seenByKey.add(m.dedupKey) && seenByContent.add(contentKey)) {
             merged.add(m);
-            serverContentKeys.add('${m.role}:${m.content}');
           }
         }
         for (final m in _messages) {
-          final ck = '${m.role}:${m.content}';
-          if (!serverContentKeys.contains(ck) && seen.add(m.dedupKey)) {
+          final contentKey = '${m.role}:${m.content}';
+          if (!seenByContent.contains(contentKey) && seenByKey.add(m.dedupKey)) {
             merged.add(m);
           }
         }
@@ -666,17 +668,17 @@ class ChatProvider extends ChangeNotifier {
           [];
       if (serverMsgs.isNotEmpty) {
         final merged = <ChatMessage>[];
-        final seen = <String>{};
-        final serverContentKeys = <String>{};
+        final seenByKey = <String>{};
+        final seenByContent = <String>{};
         for (final m in serverMsgs) {
-          if (seen.add(m.dedupKey)) {
+          final contentKey = '${m.role}:${m.content}';
+          if (seenByKey.add(m.dedupKey) && seenByContent.add(contentKey)) {
             merged.add(m);
-            serverContentKeys.add('${m.role}:${m.content}');
           }
         }
         for (final m in _messages) {
-          final ck = '${m.role}:${m.content}';
-          if (!serverContentKeys.contains(ck) && seen.add(m.dedupKey)) {
+          final contentKey = '${m.role}:${m.content}';
+          if (!seenByContent.contains(contentKey) && seenByKey.add(m.dedupKey)) {
             merged.add(m);
           }
         }
