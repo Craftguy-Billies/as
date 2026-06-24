@@ -660,9 +660,10 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
         all_valid = valid_branches + ([default_branch] if default_branch and default_branch not in valid_branches else [])
         if branch not in all_valid:
             logger.warning("send: invalid branch '%s' for %s — available: %s", branch, repo, all_valid[:10])
-            with _lock:
-                if _processing_repo == repo:
-                    _processing_repo = ""
+            if not _from_batch:
+                with _lock:
+                    if _processing_repo == repo:
+                        _processing_repo = ""
             return {"error": f"Branch '{branch}' not found in {repo}. Available: {', '.join(all_valid[:10]) or 'unknown'}"}
         logger.info("send: branch '%s' validated for %s", branch, repo)
 
@@ -812,7 +813,7 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                         _last_event_index = 0
                         _sandbox_id = None
                         _persist_to_db()
-                        if _processing_repo == repo:
+                        if not _from_batch and _processing_repo == repo:
                             _processing_repo = ""
                     return {"error": send_err or "Failed to send message to conversation"}
     except httpx.HTTPStatusError as e:
@@ -825,15 +826,17 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                 _last_event_index = 0
                 _sandbox_id = None
                 _persist_to_db()
-        with _lock:
-            if _processing_repo == repo:
-                _processing_repo = ""
+        if not _from_batch:
+            with _lock:
+                if _processing_repo == repo:
+                    _processing_repo = ""
         return {"error": f"Cloud API error: {status_code}"}
     except Exception as e:
         logger.error("Chat error (keeping conversation): %s", e, exc_info=True)
-        with _lock:
-            if _processing_repo == repo:
-                _processing_repo = ""
+        if not _from_batch:
+            with _lock:
+                if _processing_repo == repo:
+                    _processing_repo = ""
         return {"error": str(e)}
 
     # Phase 1c: Update state + save user message under lock
@@ -877,9 +880,10 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     except Exception as e:
         logger.error("Phase 2 crashed: %s", e, exc_info=True)
         response = None
-        with _lock:
-            if _processing_repo == repo:
-                _processing_repo = ""
+        if not _from_batch:
+            with _lock:
+                if _processing_repo == repo:
+                    _processing_repo = ""
 
     # Phase 3: Save result under lock.
     # _wait_for_response collects only new MessageEvent texts via event ID
@@ -951,15 +955,17 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
 
     if response:
         _auto_append_log(repo, prompt, response, ok=True)
-        with _lock:
-            if _processing_repo == repo:
-                _processing_repo = ""
+        if not _from_batch:
+            with _lock:
+                if _processing_repo == repo:
+                    _processing_repo = ""
         return {"response": response, "conversation_id": conv_id}
     elif duplicate_rejected:
         logger.warning("send: returning error (duplicate response rejected)")
-        with _lock:
-            if _processing_repo == repo:
-                _processing_repo = ""
+        if not _from_batch:
+            with _lock:
+                if _processing_repo == repo:
+                    _processing_repo = ""
         return {
             "error": "Agent returned a cached response identical to a previous reply. "
                      "The conversation may need to be reset — try New Conversation.",
@@ -968,9 +974,10 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     else:
         _auto_append_log(repo, prompt, str(response), ok=False)
         logger.warning("send: returning error (no response)")
-        with _lock:
-            if _processing_repo == repo:
-                _processing_repo = ""
+        if not _from_batch:
+            with _lock:
+                if _processing_repo == repo:
+                    _processing_repo = ""
         return {
             "error": "Agent did not produce a response (timeout or conversation error)",
             "conversation_id": _conversation_id,
