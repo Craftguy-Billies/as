@@ -888,53 +888,37 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     # Phase 3: Save result under lock.
     # _wait_for_response collects only new MessageEvent texts via event ID
     # dedup. In rare cases the API may return cumulative content (old + new),
-    # so handle prefix-stripping gracefully. Reject byte-identical responses
-    # — they indicate the trajectory-zip fallback returned a previous turn's
-    # cached response instead of the current turn's output.
-    #
-    # CRITICAL: Check against ALL previous assistant messages, not just the
-    # last one. If the user sends prompts A→B→A, the second A's response may
-    # match the first A's response but NOT match B (the most recent). A naive
-    # last-assistant check would let it through as a duplicate.
+    # so handle prefix-stripping against the LAST assistant message.
+    # Do NOT reject exact content matches — that would break legitimate
+    # identical responses (e.g. user sends the same prompt twice in a batch
+    # and the AI produces the same text both times). Those ARE real responses.
     #
     # AUDIT: Determine response source for diagnostics.
     # - events/search: response came from a new MessageEvent in the poll
     # - zip: response came from trajectory zip fallback
     # - scrape: response came from _scrape_events_for_text (observation text)
     # - None: no response found
-    duplicate_rejected = False
-    # Read source from _wait_for_response's diagnostic global
     _response_source = _last_response_source if _last_response_source else "unknown"
     with _lock:
         if response and response.strip():
             response = response.strip()
             msgs = _msgs()
-            # Collect ALL previous assistant contents for dedup
-            prev_assistant_contents: list[str] = [
-                m["content"] for m in msgs if m.get("role") == "assistant"
-            ]
-            # If response matches ANY previous assistant message, reject it
-            if prev_assistant_contents and response in prev_assistant_contents:
-                logger.warning("Phase 3: response matches a PREVIOUS assistant message — "
-                               "rejecting (len=%d source=%s). Matched by content, "
-                               "first 80 chars: %s",
-                               len(response), _response_source,
-                               response[:80].replace("\n", " "))
-                duplicate_rejected = True
-                response = None
-            elif prev_assistant_contents:
-                # Also handle cumulative prefix vs the LAST assistant message
-                last_assistant = prev_assistant_contents[-1]
-                if response.startswith(last_assistant):
-                    stripped = response[len(last_assistant):].strip()
-                    if stripped:
-                        logger.info("Phase 3: stripped cumulative prefix (was %d, now %d chars) source=%s",
-                                    len(response), len(stripped), _response_source)
-                        response = stripped
-                    else:
-                        logger.info("Phase 3: only cumulative prefix remains after strip — "
-                                    "saving original (len=%d) source=%s", len(response), _response_source)
-            if response:  # may have been set to None by duplicate rejection above
+            # Cumulative prefix: the API may return the NEW response prepended
+            # with the previous assistant message. Strip the known prefix.
+            # Only check the LAST assistant (cumulative builds on consecutive
+            # turns, same conversation). Checking ALL previous messages would
+            # false-positive when two different turns produce the same text.
+            for m in reversed(msgs):
+                if m.get("role") == "assistant":
+                    last_assistant = m.get("content", "")
+                    if last_assistant and response.startswith(last_assistant):
+                        stripped = response[len(last_assistant):].strip()
+                        if stripped:
+                            logger.info("Phase 3: stripped cumulative prefix (was %d, now %d chars) source=%s",
+                                        len(response), len(stripped), _response_source)
+                            response = stripped
+                    break  # only check the most recent assistant
+            if response:
                 resp_msg_id = _next_msg_id()
                 event_count_before = sum(1 for m in msgs if m.get("role") == "event")
                 _msgs().append({"id": resp_msg_id, 
@@ -960,17 +944,6 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                 if _processing_repo == repo:
                     _processing_repo = ""
         return {"response": response, "conversation_id": conv_id}
-    elif duplicate_rejected:
-        logger.warning("send: returning error (duplicate response rejected)")
-        if not _from_batch:
-            with _lock:
-                if _processing_repo == repo:
-                    _processing_repo = ""
-        return {
-            "error": "Agent returned a cached response identical to a previous reply. "
-                     "The conversation may need to be reset — try New Conversation.",
-            "conversation_id": _conversation_id,
-        }
     else:
         _auto_append_log(repo, prompt, str(response), ok=False)
         logger.warning("send: returning error (no response)")
