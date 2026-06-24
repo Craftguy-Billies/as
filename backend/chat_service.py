@@ -571,7 +571,7 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     Creates a new conversation when repo or mode changes.
     HTTP calls (create/send) happen OUTSIDE _lock so get_state() polling is never blocked.
     """
-    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _sandbox_id
+    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _sandbox_id, _processing_repo
 
     if not CLOUD_API_KEY:
         logger.error("send: CLOUD_API_KEY not configured")
