@@ -868,12 +868,29 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                     _processing_repo = ""
         return {"error": f"Cloud API error: {status_code}"}
     except Exception as e:
+        # Sanitize raw exceptions — never leak Python error messages to the client.
+        # httpx timeout exceptions produce messages like "read operation timed out"
+        # which look like network bugs but actually mean the AI model is still
+        # generating. Map them to user-friendly, actionable messages.
+        err_msg = str(e).lower()
         logger.error("Chat error (keeping conversation): %s", e, exc_info=True)
+        if "timeout" in err_msg or "timed out" in err_msg:
+            friendly = (
+                "The AI model is taking longer than expected to respond. "
+                "Please wait and try again."
+            )
+        elif "connection" in err_msg and ("refused" in err_msg or "reset" in err_msg or "abort" in err_msg):
+            friendly = (
+                "Connection to the AI service was lost. "
+                "Please check your connection and try again."
+            )
+        else:
+            friendly = "Something went wrong. Please try again."
         if not _from_batch:
             with _lock:
                 if _processing_repo == repo:
                     _processing_repo = ""
-        return {"error": str(e)}
+        return {"error": friendly}
 
     # Phase 1c: Update state + save user message under lock
     with _lock:
@@ -1302,6 +1319,16 @@ def _send_message(conversation_id: str, prompt: str) -> tuple[bool, str | None]:
                     continue  # retry send-message
                 return False, f"Sandbox not running (409). Please wait and try again."
             raise  # re-raise other HTTP errors
+        except httpx.ReadTimeout:
+            return False, (
+                "The AI model is taking longer than expected to respond. "
+                "Please try again — your message is still in the queue."
+            )
+        except httpx.ConnectTimeout:
+            return False, (
+                "Could not connect to the AI service. "
+                "Check your internet connection or try again later."
+            )
 
         data = resp.json()
 
