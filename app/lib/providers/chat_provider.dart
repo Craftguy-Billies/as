@@ -54,6 +54,7 @@ class ChatProvider extends ChangeNotifier {
   int _queueDone = 0;  // number of completed prompts
   int _pollFailures = 0;
   int _pollGeneration = 0;
+  bool _batchSeenRunning = false;  // poll saw batch.running at least once
   Timer? _pollTimer;
   int _lastNotifiedHash = 0;  // avoid redundant rebuilds
 
@@ -416,6 +417,7 @@ class ChatProvider extends ChangeNotifier {
   // -- Polling: fetch messages + progress every 2 seconds --
   void _startPolling({required String repo, required String branch, required String mode}) {
     _pollTimer?.cancel();
+    _batchSeenRunning = false;  // new batch, new detection cycle
     final gen = ++_pollGeneration;
     final pollStarted = DateTime.now();
     _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
@@ -481,8 +483,22 @@ class ChatProvider extends ChangeNotifier {
         if (batch != null) {
           final wasLoading = _loading;
           final isRunning = batch['running'] == true;
-          logViewer('ChatProvider.poll: batch running=$isRunning pos=${batch['position']} total=${batch['total']} done=${batch['done']} wasLoading=$wasLoading');
-          _loading = isRunning;
+          final batchRepo = (batch['repo']?.toString() ?? '').trim();
+          // Only show loading when the running batch is for THIS repo.
+          // _batch_running is a global flag — a batch on repo B should NOT
+          // show a spinner on repo A's poll.
+          final relevantToMe = !isRunning || batchRepo.isEmpty || batchRepo == repo;
+          logViewer('ChatProvider.poll: batch running=$isRunning pos=${batch['position']} '
+                    'total=${batch['total']} done=${batch['done']} repo=$batchRepo '
+                    'myRepo=$repo relevant=$relevantToMe wasLoading=$wasLoading queueTotal=$_queueTotal');
+
+          // CRITICAL: Do NOT set _loading=false when the batch hasn't started yet.
+          // send() returned {status:'queued'} → _queueTotal > 0 but _batch_running
+          // is still False because the worker hasn't picked it up. If we set
+          // _loading=false and cancel the timer here, the batch runs invisibly.
+          if (relevantToMe) {
+            _loading = isRunning;
+          }
           _queuePosition = (batch['position'] as int?) ?? _queuePosition;
           _queueTotal = (batch['total'] as int?) ?? _queueTotal;
           _queueDone = (batch['done'] as int?) ?? _queuePosition;
@@ -497,14 +513,44 @@ class ChatProvider extends ChangeNotifier {
             _batchModes = modes.map((e) => e.toString()).toList();
           }
 
-          // Stop polling when batch completes — regardless of wasLoading.
-          // Handles: cancel during poll, batch finishing between polls, etc.
-          if (!isRunning) {
+          // Track whether this batch was ever seen as "running". Completion is
+          // detected when isRunning goes False after having been True.
+          if (isRunning && _queueTotal > 0) {
+            _batchSeenRunning = true;
+            logViewer('ChatProvider.poll: batch seen running');
+          }
+
+          // Stop polling when batch completes.
+          // CONDITIONS (all must be true):
+          //   1. !isRunning — server says no batch active
+          //   2. _queueTotal > 0 — we queued prompts (poll was started for a reason)
+          //   3. EITHER:
+          //      a. _batchSeenRunning — we witnessed the batch in the running state
+          //      b. poll age > 15s — send was long enough ago that the batch must
+          //         have finished (handles the 2-second window where a fast batch
+          //         runs and completes between two poll iterations without ever
+          //         being seen as "running" by the Flutter side)
+          if (!isRunning && _queueTotal > 0) {
+            final pollAge = DateTime.now().difference(pollStarted);
+            if (_batchSeenRunning || pollAge.inSeconds > 15) {
+              _loadingSince = null;
+              _pollTimer?.cancel();
+              _loading = false;
+              _queuePosition = 0;
+              _queueTotal = 0;
+              _batchSeenRunning = false;
+              logViewer('ChatProvider.poll: batch completed — stopped '
+                        '(seenRunning=$_batchSeenRunning pollAge=${pollAge.inSeconds}s wasLoading=$wasLoading)');
+            } else {
+              logViewer('ChatProvider.poll: batch not yet started — keeping poll '
+                        '(pollAge=${pollAge.inSeconds}s queueTotal=$_queueTotal)');
+            }
+          } else if (!isRunning && _queueTotal <= 0) {
+            // No queue ever — nothing to wait for
             _loadingSince = null;
             _pollTimer?.cancel();
-            _queuePosition = 0;
-            _queueTotal = 0;  // hide progress bar
-            logViewer('ChatProvider.poll: batch not running — stopped (wasLoading=$wasLoading)');
+            _loading = false;
+            logViewer('ChatProvider.poll: no batch — stopped');
           }
         }
 
