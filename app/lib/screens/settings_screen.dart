@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
+import '../services/preferences_service.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -17,6 +18,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _baseUrlCtrl = TextEditingController();
   final _gitNameCtrl = TextEditingController();
   final _gitEmailCtrl = TextEditingController();
+  final _implementCtrl = TextEditingController();
   Timer? _urlDebounce;
 
   @override
@@ -28,6 +30,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _baseUrlCtrl.dispose();
     _gitNameCtrl.dispose();
     _gitEmailCtrl.dispose();
+    _implementCtrl.dispose();
     super.dispose();
   }
 
@@ -52,6 +55,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     if (settings.gitEmail != null && _gitEmailCtrl.text.isEmpty) {
       _gitEmailCtrl.text = settings.gitEmail!;
+    }
+
+    // Pre-populate implement prompt from local prefs
+    if (_implementCtrl.text.isEmpty) {
+      _implementCtrl.text = context.read<PreferencesService>().implementPrompt;
     }
 
     return Scaffold(
@@ -244,8 +252,54 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           const SizedBox(height: 32),
 
-          // Presets
-          _SectionTitle(title: 'Quick Setup'),
+          // Implement Prompt
+          _SectionTitle(title: 'Implement Prompt'),
+          const SizedBox(height: 8),
+          Text(
+            'When the "Implement" checkbox is checked, this prompt is appended '
+            'to each message. Customize it per-device.',
+            style: TextStyle(color: Colors.grey[600], fontSize: 12),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _implementCtrl,
+            maxLines: 6,
+            style: const TextStyle(color: Colors.white, fontSize: 13),
+            decoration: InputDecoration(
+              hintText: 'Enter implement instructions…',
+              hintStyle: TextStyle(color: Colors.grey[700], fontSize: 13),
+              filled: true,
+              fillColor: const Color(0xFF1A1A2E),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide.none,
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          ElevatedButton.icon(
+            onPressed: () async {
+              final prefs = context.read<PreferencesService>();
+              await prefs.setImplementPrompt(_implementCtrl.text.trim());
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Implement prompt saved'),
+                    backgroundColor: Colors.green,
+                  ),
+                );
+              }
+            },
+            icon: const Icon(Icons.save),
+            label: const Text('Save Implement Prompt'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF7C3AED),
+            ),
+          ),
+
+          const SizedBox(height: 32),
+
+          // Quick Setup
           const SizedBox(height: 8),
           Wrap(
             spacing: 8,

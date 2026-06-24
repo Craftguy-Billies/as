@@ -273,10 +273,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
                 const SizedBox(height: 8),
+                // Line 1: repo + branch + mode (send button is on line 2)
                 Row(
                   children: [
                     Expanded(
-                      flex: 3,
                       child: TextField(
                         controller: _repoCtrl,
                         style: const TextStyle(color: Colors.white70, fontSize: 14),
@@ -298,7 +298,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     BranchPopup(
                       controller: _branchCtrl,
                       onChanged: () => context.read<PreferencesService>().saveLastPrompt(_repoCtrl.text, _branchCtrl.text, 'code'),
-                      width: 90,
+                      width: 100,
                       height: 34,
                       borderRadius: 12,
                     ),
@@ -320,27 +320,35 @@ class _HomeScreenState extends State<HomeScreen> {
                         ],
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    SizedBox(
-                      height: 42,
-                      child: ElevatedButton(
-                        onPressed: _sending ? null : _sendPrompt,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF7C3AED),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                        ),
-                        child: _sending
-                            ? const SizedBox(
-                                height: 18, width: 18,
-                                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                              )
-                            : const Icon(Icons.send, color: Colors.white),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                // Line 2: send button (full width)
+                SizedBox(
+                  width: double.infinity,
+                  height: 44,
+                  child: ElevatedButton(
+                    onPressed: _sending ? null : _sendPrompt,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF7C3AED),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
                       ),
                     ),
-                  ],
+                    child: _sending
+                        ? const SizedBox(
+                            height: 20, width: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                          )
+                        : const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.send, color: Colors.white, size: 18),
+                              SizedBox(width: 8),
+                              Text('Send to AI', style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600)),
+                            ],
+                          ),
+                  ),
                 ),
               ],
             ),

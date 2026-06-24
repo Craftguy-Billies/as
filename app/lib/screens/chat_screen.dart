@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -19,6 +20,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final _inputCtrl = TextEditingController();
   final _repoCtrl = TextEditingController();
   final _branchCtrl = TextEditingController();
+  Timer? _repoDebounceTimer;  // debounce for switching repo on typing
   final _scrollCtrl = ScrollController();
   final _inputFocusNode = FocusNode();
   bool _hasLoaded = false;
@@ -179,11 +181,31 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Switch to the repo typed in the text field immediately (no send needed).
+  void _switchToRepo() {
+    _repoDebounceTimer?.cancel();
+    final r = _repoCtrl.text.trim();
+    if (r.isEmpty) return;
+    final prov = context.read<ChatProvider>();
+    final branch = _branchCtrl.text.trim();
+    if (r != prov.serverRepo) {
+      prov.switchRepo(r, 'code', branch: branch);
+      debugPrint('[ChatScreen] immediate switch to repo=$r branch=$branch');
+    }
+  }
+
+  /// Debounced repo switch — fires 600ms after typing stops.
+  void _debounceSwitchRepo() {
+    _repoDebounceTimer?.cancel();
+    _repoDebounceTimer = Timer(const Duration(milliseconds: 600), _switchToRepo);
+  }
+
   @override
   void dispose() {
     _inputCtrl.dispose();
     _repoCtrl.dispose();
     _branchCtrl.dispose();
+    _repoDebounceTimer?.cancel();
     _scrollCtrl.dispose();
     _inputFocusNode.dispose();
     super.dispose();
@@ -194,20 +216,12 @@ class _ChatScreenState extends State<ChatScreen> {
     var text = _inputCtrl.text.trim();
     if (text.isEmpty) return;
 
-    // Append "Implement" audit paragraph when checkbox is checked
+    // Append "Implement" audit paragraph when checkbox is checked.
+    // Reads from PreferencesService (user-editable in settings, per-device).
     if (_implementChecked) {
-      text += (
-        "\n\n===============================================================\n"
-        "for the implementation, double check again and again in the manner of:\n"
-        "\n"
-        "\n"
-        "a full codebase audit, comprehensive enough\n"
-        "robust catch all debug logging without any missing cases no matter how edge it was\n"
-        "100 posibilities of sub use cases like: how about if the user pressed cancel before xxx? how about xxx? make sure all the sub use cases are also considered, whole flow zero issues\n"
-        "\n"
-        "\n"
-        "full codebase view and search all potential possibilities is main requirement"
-      );
+      final implementPrompt = context.read<PreferencesService>().implementPrompt;
+      text += "\n\n===============================================================\n"
+          "$implementPrompt";
     }
 
     final repo = _repoCtrl.text.trim();
@@ -490,11 +504,12 @@ class _ChatScreenState extends State<ChatScreen> {
                         controller: _repoCtrl,
                         maxLines: 1,
                         style: const TextStyle(color: Colors.white, fontSize: 13),
-                        onChanged: (_) => _saveRepoPrefs(),
-                        onSubmitted: (_) {
-                          final r = _repoCtrl.text.trim();
-                          if (r.isNotEmpty) prov.switchRepo(r, 'code', branch: _branchCtrl.text.trim().isEmpty ? '' : _branchCtrl.text.trim());
+                        textInputAction: TextInputAction.go,
+                        onChanged: (_) {
+                          _saveRepoPrefs();
+                          _debounceSwitchRepo();
                         },
+                        onSubmitted: (_) => _switchToRepo(),
                         decoration: InputDecoration(
                           hintText: 'owner/repo',
                           hintStyle: TextStyle(color: Colors.grey[700], fontSize: 12),
@@ -1205,6 +1220,7 @@ class _TaskQueueSheet extends StatelessWidget {
                         subtitle: Text(
                           '${t.status} · ${t.repo}',
                           style: TextStyle(color: Colors.grey[600], fontSize: 11),
+                          overflow: TextOverflow.ellipsis,
                         ),
                         onTap: () {
                           Navigator.pop(context);

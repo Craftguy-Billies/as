@@ -185,31 +185,20 @@ class ChatProvider extends ChangeNotifier {
       }
     }
 
-    // --- Phase B: Fetch saved repos from server (BEFORE server merge) ---
-    // This way, if local cache is empty but server has repos, we can use
-    // the most recent one as the key for the server merge that follows.
+    // --- Phase B: Fetch saved repos from server (for reference only) ---
+    // Previously this also set serverRepo as fallback, but that leaks
+    // cross-device: if Device A used repoA and Device B has no local cache,
+    // Phase B would set Device B's serverRepo to repoA, making Device B
+    // see repoA's messages and batch queue. Each device must independently
+    // choose its repo.
     try {
       _savedRepos = await _api.getChatRepos();
-      logViewer('ChatProvider.loadFromCache: loaded ${_savedRepos.length} repos from server');
+      logViewer('ChatProvider.loadFromCache: loaded ${_savedRepos.length} repos from server (reference only)');
       if (_savedRepos.isNotEmpty) {
         logViewer('ChatProvider.loadFromCache: first savedRepo=${_savedRepos.first['repo']} branch=${_savedRepos.first['branch']}');
       }
     } catch (e) {
       logViewer('ChatProvider.loadFromCache: repo fetch failed: $e');
-    }
-
-    // Phase B fallback: if serverRepo is still empty, use most recent
-    // saved repo from server (sorted by last_timestamp desc).
-    if (serverRepo.isEmpty && _savedRepos.isNotEmpty) {
-      for (final r in _savedRepos) {
-        final rp = r['repo']?.toString();
-        if (rp != null && rp.isNotEmpty && rp != '(none)') {
-          serverRepo = rp;
-          serverBranch = r['branch']?.toString() ?? serverBranch;
-          logViewer('ChatProvider.loadFromCache: repo= $serverRepo (from savedRepos fallback) branch=$serverBranch');
-          break;
-        }
-      }
     }
 
     // --- Phase C: Merge server messages ---

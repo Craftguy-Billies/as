@@ -106,11 +106,14 @@ class TaskTile extends StatelessWidget {
                             ),
                           ),
                           const SizedBox(width: 6),
-                          Text(
-                            task.repo,
-                            style: TextStyle(color: Colors.grey[600], fontSize: 11),
+                          Flexible(
+                            child: Text(
+                              task.repo,
+                              style: TextStyle(color: Colors.grey[600], fontSize: 11),
+                              overflow: TextOverflow.ellipsis,
+                            ),
                           ),
-                          const SizedBox(width: 6),
+                          const SizedBox(width: 4),
                           Text(
                             _safeTime(task.createdAt),
                             style: TextStyle(color: Colors.grey[700], fontSize: 11),

@@ -419,48 +419,54 @@ def reset() -> None:
 def get_state(repo: str = "", mode: str = "") -> dict:
     """Return chat state for API consumers.
     
-    Does NOT mutate _current_repo_key — each Flutter device polls with its OWN
-    repo parameter and gets messages for that repo without overwriting the
-    global key (prevents cross-device ping-pong where phone sets key=B,
-    computer's next poll sets it back to A, phone's poll sets it back to B…).
-    
-    Messages returned: filtered by repo param (if given) or _current_repo_key.
-    The repo param also updates the caller's serverRepo/severBranch via response,
-    so the NEXT poll will use the same repo.
+    Messages are filtered by repo so cross-device polling never leaks
+    conversations. Batch queue state is ALSO repo-scoped — Device B on
+    repo B does NOT see Device A's batch running on repo A.
     """
     global _current_repo_key
     with _lock:
-        # Never mutate _current_repo_key here. Use repo param to FILTER msgs.
+        # Filter messages by requested repo
         if repo:
             msgs = list(_messages_by_repo.get(_repo_key(repo), []))
         else:
             msgs = list(_msgs())
         event_count = sum(1 for m in msgs if m.get("role") == "event")
-        # AUDIT: log state response (limit event_count to avoid spam)
-        logger.info("AUDIT get_state: repo=%s mode=%s conv=%s msgs=%d events=%d seen_ids=%d batch_running=%s",
-                    _current_repo_key, mode, _conversation_id, len(msgs),
-                    event_count, len(_seen_event_ids), _batch_running)
-        # Build batch status: position is 0-based index of current prompt.
-        # done = number of completed prompts (prompts[0:done] are finished).
+        
+        # Batch state: repo-scoped. If the batch repo doesn't match the
+        # requested repo, report it as idle so Device B doesn't show a
+        # spinner for Device A's batch on repo A.
+        batch_repo_matches = (
+            not repo or (_batch_repo and _batch_repo == repo)
+        )
+        logger.info(
+            "AUDIT get_state: repo=%s batch.repo=%s match=%s "
+            "running=%s msgs=%d events=%d",
+            repo or '(none)', _batch_repo, batch_repo_matches,
+            _batch_running, len(msgs), event_count,
+        )
+        batch_info = {
+            "running": _batch_running and batch_repo_matches,
+            "cancelled": _batch_cancelled,
+            "position": _batch_position if batch_repo_matches else 0,
+            "total": _batch_total if batch_repo_matches else 0,
+            "done": _batch_position if batch_repo_matches else 0,
+            "repo": _batch_repo if batch_repo_matches else "",
+            "prompts": list(_batch_prompts) if batch_repo_matches else [],
+            "modes": list(_batch_prompt_modes) if batch_repo_matches else [],
+        }
+        
         return {
             "messages": msgs,
             "conversation_id": _conversation_id,
             "sandbox_id": _sandbox_id,
-            "repo": _conversation_repo,
+            # Return the requested repo (not global _conversation_repo) so
+            # each device gets back what it asked for, never a different repo.
+            "repo": repo if repo else _conversation_repo,
             "branch": _conversation_branch,
             "mode": _conversation_mode,
             "current_repo_key": _current_repo_key,
             "conversation_status": _conversation_status,
-            "batch": {
-                "running": _batch_running,
-                "cancelled": _batch_cancelled,
-                "position": _batch_position,
-                "total": _batch_total,
-                "done": _batch_position,
-                "repo": _batch_repo,
-                "prompts": list(_batch_prompts),
-                "modes": list(_batch_prompt_modes),
-            },
+            "batch": batch_info,
         }
 
 
@@ -620,6 +626,20 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                 _persist_to_db()
                 logger.info("Batch running — auto-enqueued prompt (now %d total)", _batch_total)
                 return {"status": "appended", "position": _batch_position, "total": _batch_total}
+            # Guard: if ANY repo is being processed, block send() to a DIFFERENT
+            # repo. This prevents cross-device conflict (Device A processes repo A,
+            # Device B sends to repo B) which would create two concurrent Cloud
+            # conversations sharing the same sandbox.
+            if _processing_repo and _processing_repo != repo:
+                logger.warning("send: BLOCKED — repo %s is being processed, cannot send to repo %s",
+                               _processing_repo, repo)
+                return {
+                    "error": (
+                        f"Repo {_processing_repo} is currently being processed. "
+                        f"Cannot send to repo {repo}. "
+                        "Wait for processing to finish, then try again."
+                    )
+                }
             # No batch running. Check if another non-batch send() is already
             # processing THIS repo (concurrent requests). If so, auto-start a
             # batch queue so they're processed sequentially instead of both
