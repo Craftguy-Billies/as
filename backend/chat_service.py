@@ -1140,7 +1140,13 @@ def _process_batch_worker() -> None:
                             len(_msgs()))
             except Exception as e:
                 logger.error("Batch send crashed [%d/%d]: %s", pos, total, e)
-                result = {"error": str(e)}
+                err = str(e).lower()
+                if "timeout" in err or "timed out" in err:
+                    result = {"error": "The AI model is taking longer than expected. Try again."}
+                elif "connection" in err and ("refused" in err or "reset" in err or "abort" in err):
+                    result = {"error": "Connection to the AI service was lost."}
+                else:
+                    result = {"error": "Something went wrong. Try again."}
 
             if result and "error" in result:
                 # Check if this was a deliberate cancellation — show STOPPED, not ERROR
@@ -1176,10 +1182,17 @@ def _process_batch_worker() -> None:
             time.sleep(1)  # brief pause between prompts
     except BaseException as e:
         logger.error("Batch worker FATAL crash: %s", e, exc_info=True)
+        err = str(e).lower()
+        if "timeout" in err or "timed out" in err:
+            msg = "Worker timed out. Try again."
+        elif "connection" in err and ("refused" in err or "reset" in err or "abort" in err):
+            msg = "Worker lost connection to the AI service."
+        else:
+            msg = f"Worker crashed. Try again."
         with _lock:
             _msgs().append({"id": _next_msg_id(), 
                 "role": "error",
-                "content": f"Worker crashed: {type(e).__name__}: {e}",
+                "content": msg,
                 "timestamp": int(time.time() * 1000),
             })
     finally:
@@ -1319,15 +1332,10 @@ def _send_message(conversation_id: str, prompt: str) -> tuple[bool, str | None]:
                     continue  # retry send-message
                 return False, f"Sandbox not running (409). Please wait and try again."
             raise  # re-raise other HTTP errors
-        except httpx.ReadTimeout:
+        except httpx.TimeoutException:
             return False, (
                 "The AI model is taking longer than expected to respond. "
-                "Please try again — your message is still in the queue."
-            )
-        except httpx.ConnectTimeout:
-            return False, (
-                "Could not connect to the AI service. "
-                "Check your internet connection or try again later."
+                "Try again in a moment."
             )
 
         data = resp.json()
@@ -1360,7 +1368,8 @@ def _resume_sandbox(sandbox_id: str) -> str | None:
         return None
     except Exception as e:
         logger.error("Failed to resume sandbox %s: %s", sandbox_id, e)
-        return str(e)
+        # Don't leak raw exception text to the caller
+        return "failed to resume sandbox"
 
 
 # Cache for GitHub default branch detection (repo → branch, 1h TTL)
