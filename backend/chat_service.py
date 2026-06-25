@@ -881,7 +881,9 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                                 new_conv_id, len(recent_user_msgs))
                     need_new_conv = True  # Phase 1c will store it
                 else:
-                    logger.warning("send_message failed (non-409): send_err=%s — attempting recovery with new conversation", send_err)
+                    logger.warning("send_message failed (non-409): send_err=%s — attempting recovery with new conversation. "
+                                   "conv=%s status=%s seen_ids=%d",
+                                   send_err, current_conv_id, _conversation_status, len(_seen_event_ids))
                     # Non-409 failures (timeout, model busy, sandbox gone) should
                     # NOT kill the user's request. Create a fresh conversation and
                     # retry. This handles cases where the old conversation is too
@@ -916,13 +918,17 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     except httpx.HTTPStatusError as e:
         status_code = e.response.status_code
         logger.error("HTTP error: %s %s", status_code, e.response.text[:200])
-        if status_code in (404, 409, 410):
-            logger.warning("HTTP %s — resetting conversation_id", status_code)
+        # Reset conversation on ANY error that makes the current conv unusable:
+        # 404 (gone), 409 (paused), 410 (deleted), 429 (rate limited), 5xx (server error)
+        if status_code in (404, 409, 410) or status_code >= 429:
+            logger.warning("HTTP %s — resetting conversation_id to force fresh conv on next send", status_code)
             with _lock:
                 _conversation_id = None
                 _last_event_index = 0
                 _sandbox_id = None
                 _persist_to_db()
+        else:
+            logger.warning("HTTP %s — NOT resetting conversation. May cause issues on next send.", status_code)
         if not _from_batch:
             with _lock:
                 if _processing_repo == repo:
@@ -1277,6 +1283,8 @@ def _process_batch_worker() -> None:
                 with _lock:
                     was_cancelled = _batch_cancelled
                     was_skipped = _batch_skip_prompt
+                logger.warning("BATCH_RESULT [%d/%d]: error=%s cancelled=%s skipped=%s conv=%s",
+                               pos, total, result.get("error", "?"), was_cancelled, was_skipped, _conversation_id)
                 if was_cancelled:
                     with _lock:
                         _msgs().append({"id": _next_msg_id(), 
@@ -2302,11 +2310,17 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     # conversation instead of reusing a "running" conv (which causes silent
     # failures — send-message to a running conv either queues or errors).
     if not _completed_normally:
+        elapsed = int(time.time() - start)
         if all_new_msgs:
-            elapsed = int(time.time() - start)
-            logger.warning("Timeout (%ds) with %d accumulated msgs — DISCARDING partial response (prevents half-cut bug)",
-                           elapsed, len(all_new_msgs))
+            logger.warning("TIMEOUT_CLEANUP (%ds): discarding %d partial msgs + resetting conv=%s (status=%s)",
+                           elapsed, len(all_new_msgs), _conversation_id, last_status)
             all_new_msgs.clear()
+        else:
+            logger.warning("TIMEOUT_CLEANUP (%ds): no partial msgs, resetting conv=%s (status=%s last_status=%s "
+                           "events=%d seen_ids=%d completed=%s)",
+                           elapsed, _conversation_id, _conversation_status, last_status,
+                           len(all_events) if 'all_events' in dir() else -1,
+                           len(_seen_event_ids), _completed_normally)
         # Reset conversation so next send creates a fresh one
         with _lock:
             _conversation_id = None
@@ -2319,7 +2333,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             _persist_to_db()
         _msgs().append({"id": _next_msg_id(), 
             "role": "event",
-            "content": f"[TIMEOUT] Agent did not finish within {int(time.time() - start)}s. Next message starts a fresh conversation.",
+            "content": f"[TIMEOUT] Agent did not finish within {elapsed}s. Next message starts a fresh conversation.",
             "kind": "SystemEvent",
             "timestamp": int(time.time() * 1000),
         })
