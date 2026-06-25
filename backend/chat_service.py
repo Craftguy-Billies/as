@@ -766,11 +766,15 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
         # Force new conversation if the previous one has completed — reusing a
         # finished conversation can cause stale/dedup'd events and duplicate
         # assistant responses (issues #3-#5).
+        # NOTE: Do NOT check branch_switched here — if the conversation is idle
+        # and the user sends a new message, we always create a fresh conversation
+        # regardless of branch state. Branch switching on a completed conversation
+        # would reuse stale event cursors and produce duplicate responses.
+        # The new conversation inherits effective_branch from Phase 0b.
         conv_done = (
             _conversation_id is not None
             and _conversation_status == "idle"
             and not ctx_changed
-            and not branch_switched
             and not _from_batch
         )
         if conv_done:
@@ -937,7 +941,10 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
         if need_new_conv:
             _conversation_id = new_conv_id
             _conversation_repo = repo
-            _conversation_branch = branch if branch else _conversation_branch
+            # Use effective_branch (includes default "main" fallback) rather
+            # than raw `branch` (which may be ""). This ensures the stored
+            # branch matches what was actually sent to _create_conversation.
+            _conversation_branch = effective_branch
             _conversation_mode = mode
             _conversation_llm_model = current_model
             _current_repo_key = _repo_key(repo)
