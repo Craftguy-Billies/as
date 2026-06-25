@@ -104,7 +104,7 @@ _last_response_source: str = "events/search"
 
 # Current conversation status (for UI visibility)
 _conversation_status: str = "idle"
-_CHAT_TIMEOUT = int(os.getenv("VIBECODE_CHAT_TIMEOUT", "600"))  # 10 min default
+_CHAT_TIMEOUT = int(os.getenv("VIBECODE_CHAT_TIMEOUT", "7200"))  # 2 hour default (large tasks like Flutter builds)
 
 # -- Task log: server-side cache, GitHub is mirror --
 # Primary source of truth: in-memory cache. Writes to GitHub are async/background.
@@ -1871,10 +1871,7 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
 def _wait_for_response(timeout: int | None = None) -> str | None:
     """Poll conversation status + events until the agent finishes (SAME logic as agent_runner).
 
-    Timeout: VIBECODE_CHAT_TIMEOUT env var (default 600s = 10 min).
-
-    Also appends live events (tool calls, observations) to the chat history so the client
-    can see what the agent is doing via polling get_state().
+    Timeout: VIBECODE_CHAT_TIMEOUT env var (default 7200s = 2 hours).
     """
     global _last_event_index, _last_event_timestamp, _conversation_status, _sandbox_id, _last_response_source
     global _conversation_id, _seen_event_ids, _seen_event_hashes, _event_kinds
@@ -2302,12 +2299,14 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     # save it as the final assistant message, making the user think the AI
     # finished when it actually timed out mid-work.
     # Also reset _conversation_id so the NEXT send() creates a fresh
-    # conversation (even batch workers that skip conv_done via _from_batch).
-    if not _completed_normally and all_new_msgs:
-        elapsed = int(time.time() - start)
-        logger.warning("Timeout (%ds) with %d accumulated msgs — DISCARDING partial response (prevents half-cut bug)",
-                       elapsed, len(all_new_msgs))
-        all_new_msgs.clear()
+    # conversation instead of reusing a "running" conv (which causes silent
+    # failures — send-message to a running conv either queues or errors).
+    if not _completed_normally:
+        if all_new_msgs:
+            elapsed = int(time.time() - start)
+            logger.warning("Timeout (%ds) with %d accumulated msgs — DISCARDING partial response (prevents half-cut bug)",
+                           elapsed, len(all_new_msgs))
+            all_new_msgs.clear()
         # Reset conversation so next send creates a fresh one
         with _lock:
             _conversation_id = None
@@ -2320,7 +2319,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             _persist_to_db()
         _msgs().append({"id": _next_msg_id(), 
             "role": "event",
-            "content": f"[TIMEOUT] Agent did not finish within {elapsed}s. Next message starts a fresh conversation.",
+            "content": f"[TIMEOUT] Agent did not finish within {int(time.time() - start)}s. Next message starts a fresh conversation.",
             "kind": "SystemEvent",
             "timestamp": int(time.time() * 1000),
         })
