@@ -1442,7 +1442,7 @@ def _send_message(conversation_id: str, prompt: str) -> tuple[bool, str | None]:
                 f"{CLOUD_API_URL}/api/v1/app-conversations/{conversation_id}/send-message",
                 headers=_headers(),
                 json=body,
-                timeout=30,
+                timeout=120,
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
