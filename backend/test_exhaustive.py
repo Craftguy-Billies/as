@@ -929,32 +929,11 @@ for err in conn_errs:
     R.ok("connection" in err.lower() and ("refused" in err.lower() or "reset" in err.lower() or "abort" in err.lower()),
          f"error-msg conn: {err}")
 
-print("\n--- _scrape_events_for_text fallback ---")
-def simulate_scrape(events, last_assistant=None):
-    """Simulate the zip fallback _scrape_events_for_text logic + last_assistant check."""
-    fallback_text = cs._scrape_events_for_text(events)
-    if not fallback_text:
-        return None, "no_text"
-    if last_assistant and fallback_text.strip() == last_assistant.strip():
-        return None, "matches_last_assistant"
-    return fallback_text, "ok"
-
-# Event with text content
-events_with_text = [{"kind": "ObservationEvent", "llm_message": "some content"}]
-text, reason = simulate_scrape(events_with_text)
-R.ok(text is not None or reason == "no_text", "scrape: events with text")
-
-# Empty events
-text, reason = simulate_scrape([])
-R.eq(text, None, "scrape: empty events return None")
-
-# Events with no llm_message
-text, reason = simulate_scrape([{"kind": "ActionEvent", "tool_name": "read"}])
-R.eq(text, None, "scrape: events without llm_message return None")
-
-# Check _scrape_events_for_text function exists and is callable
-R.ok(hasattr(cs, "_scrape_events_for_text"), "scrape: function exists")
-R.ok(callable(cs._scrape_events_for_text), "scrape: function callable")
+print("\n--- fallback scrape removed (no longer used) ---")
+# The _scrape_events_for_text function was removed. The fallback path now
+# returns None when no MessageEvent is found, rather than scraping
+# non-MessageEvent events for garbage text. Phase 3 produces a clean
+# timeout/error instead.
 
 
 # ============================================================

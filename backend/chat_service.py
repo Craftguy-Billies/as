@@ -1748,7 +1748,12 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     elif repo:
         full_prompt = (
             f"Repository: {repo} (branch: {effective_branch}).\n"
-            f"Read the user's message and respond. "
+            f"IMPORTANT: First run `git pull` to get the latest code. "
+            f"The repo's .git directory is NOT at /workspace directly — it's in "
+            f"a subdirectory like /workspace/project/<name>/. "
+            f"Run `cd /workspace && ls` to find it, then cd into the right dir "
+            f"and run `git pull origin {effective_branch}`.\n"
+            f"Read the user's message below and implement what it asks. "
             f"Make edits, commit with a descriptive message, and push.\n\n"
             f"[SANDBOX] REPO RESTRICTION: You are confined to repository `{repo}`. "
             f"You may switch branches within it freely, but you MUST NOT "
@@ -2241,41 +2246,18 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         logger.warning("Total events: %d, messages: %d", len(all_events), len(_msgs()))
 
         # Snapshot last_assistant BEFORE any scrape (Phase 3 will check again,
-        # but catching it here prevents stale scraped text from entering
-        # all_new_msgs at all — cleaner than rejecting in Phase 3).
-        _last_assistant_before_scrape: str | None = None
-        with _lock:
-            for m in reversed(_msgs()):
-                if m.get("role") == "assistant":
-                    _last_assistant_before_scrape = m.get("content", "")
-                    break
 
-        # Fallback: scrape events for any text content.
-        # Filter to only events from this turn (timestamp >= turn start)
-        # to avoid scraping stale agent MessageEvent text from previous turns.
-        recent = [e for e in all_events if str(e.get("timestamp", "")) >= _wait_started_at_ts]
-        if not recent:
-            recent = all_events[-20:]  # fallback within the fallback
-        else:
-            recent = recent[-20:]
-        logger.warning("Fallback scrape: %d recent events (filtered from %d total)", len(recent), len(all_events))
-        fallback_text = _scrape_events_for_text(recent)
-        if fallback_text:
-            # CRITICAL: reject scraped text that matches last assistant — it
-            # means the dedup loop skipped a duplicate MessageEvent (same text
-            # as previous turn) and now the scrape is about to dig up the SAME
-            # stale text from event observations. This would trigger the
-            # "cached response" error in Phase 3.
-            if _last_assistant_before_scrape and fallback_text.strip() == _last_assistant_before_scrape.strip():
-                logger.warning("Fallback scrape: REJECTING scraped text (byte-identical to last_assistant — "
-                               "len=%d). events/search found NO new MessageEvent this turn. "
-                               "This means the agent produced no response or produced one with "
-                               "identical content to the previous turn.",
-                               len(fallback_text))
-            else:
-                logger.info("Fallback: scraped %d chars from last 20 events (different from last_assistant)", len(fallback_text))
-                all_new_msgs.append(fallback_text)
-                _last_response_source = "scrape"
+        # CRITICAL: NEVER scrape non-MessageEvent text as the AI's response.
+        # The fallback _scrape_events_for_text can return ActionEvent.thought (AI
+        # reasoning), llm_message from tool events, or other garbage that is NOT
+        # the AI's actual spoken response. Saving that as "assistant" message
+        # makes the user see terminal output, partial reasoning, or tool dumps
+        # instead of what the AI actually said.
+        # Only MessageEvent text (from events/search or zip fallback) is valid.
+        # If no MessageEvent found, let Phase 3 return a clean timeout/error.
+        logger.warning("No MessageEvent found after %ds (status=%s) — returning None. "
+                       "All event kinds: %s. Total events: %d.",
+                       elapsed, last_status, sorted(_event_kinds), len(all_events))
 
         if not all_new_msgs:
             with _lock:
@@ -2338,122 +2320,6 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 bool(all_new_msgs), _last_response_source)
     return "\n\n".join(all_new_msgs) if all_new_msgs else None
 
-
-
-def _scrape_events_for_text(events: list[dict]) -> str | None:
-    """Fallback: extract a USEFUL short summary from events when no MessageEvent found.
-
-    Strategy (from most to least useful):
-    1. llm_message from non-MessageEvent events (tool-structured text)
-    2. ActionEvent.thought (brief agent reasoning)
-    3. SHORT observation snippets (< 300 chars — skip file/terminal dumps)
-    4. Tool action summaries from ActionEvent (e.g. "[TERMINAL] $ cat index.html")
-    5. Error text and ConversationStateUpdateEvent value
-
-    Capped at 1500 chars — never dump raw file/command output.
-    If nothing useful found, returns None so caller can use a fallback message.
-
-    CRITICAL: Agent MessageEvents are NEVER scraped — they are the PRIMARY
-    data source for all_new_msgs / zip fallback. If events/search deduped an
-    agent MessageEvent (same content_hash as previous turn), the scrape would
-    find it and return the PREVIOUS turn's text, causing Phase 3 to reject it
-    as a byte-identical "cached response". This is the #1 root cause of the
-    phantom duplicate bug.
-    """
-    MAX_CHARS = 1500
-    SHORT_MAX = 300
-    parts: list[str] = []
-    tool_actions: list[str] = []
-    char_count = 0
-
-    def add_if_room(text: str) -> None:
-        nonlocal char_count
-        remaining = MAX_CHARS - char_count
-        if not text.strip():
-            return
-        if len(text) > remaining:
-            text = text[:remaining] + "..."
-        parts.append(text.strip())
-        char_count += len(text)
-
-    for evt in events:
-        kind = evt.get("kind", "")
-        source = evt.get("source", "")
-        # NEVER scrape agent MessageEvents — handled by all_new_msgs / zip
-        if kind == "MessageEvent" and source == "agent":
-            continue
-        # Never scrape user's own messages either
-        if kind == "MessageEvent" and source == "user":
-            continue
-        if char_count >= MAX_CHARS:
-            break
-
-        # 1. llm_message from non-MessageEvent events
-        llm_msg = evt.get("llm_message") or evt.get("message")
-        if isinstance(llm_msg, dict):
-            content = llm_msg.get("content") or []
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("text"):
-                        add_if_room(str(block["text"]))
-            elif isinstance(content, str) and content.strip():
-                add_if_room(content.strip())
-        elif isinstance(llm_msg, str) and llm_msg.strip():
-            add_if_room(llm_msg.strip())
-
-        # 2. ActionEvent.thought (brief agent reasoning)
-        thought = evt.get("thought")
-        if isinstance(thought, list):
-            for item in thought:
-                if isinstance(item, dict) and item.get("text"):
-                    add_if_room(str(item["text"]))
-
-        # 4. Tool action summaries (short, descriptive)
-        if kind == "ActionEvent":
-            tool = evt.get("tool_name", "")
-            action = evt.get("action") or {}
-            if isinstance(action, str):
-                try:
-                    action = json.loads(action)
-                except Exception:
-                    action = {}
-            if isinstance(action, dict):
-                cmd = action.get("command", "") or action.get("content", "")
-                path = action.get("path", "") or action.get("file", "")
-                summary = ""
-                if cmd:
-                    cmd_short = cmd[:150].replace("\n", " ").strip()
-                    summary = f"[{tool}] {cmd_short}"
-                elif path:
-                    summary = f"[{tool}] {path}"
-                if summary and char_count < MAX_CHARS:
-                    tool_actions.append(summary)
-
-        # 5. Error text and ConversationStateUpdateEvent value
-        err = evt.get("error")
-        if isinstance(err, str) and err.strip():
-            add_if_room(f"[ERROR] {err.strip()}")
-        if kind == "ConversationStateUpdateEvent":
-            val = evt.get("value", "")
-            if isinstance(val, str) and len(val) > 10 and val.strip():
-                add_if_room(val.strip())
-
-    # If we have clean parts, join and return
-    if parts:
-        text = "\n".join(parts).strip()
-        if text and char_count > 0:
-            return text
-
-    # Fallback: return tool action summary instead of raw dumps
-    if tool_actions:
-        unique_actions = list(dict.fromkeys(tool_actions))  # dedup, preserve order
-        summary = "Agent actions:\n" + "\n".join(unique_actions[:8])
-        if len(summary) > MAX_CHARS:
-            summary = summary[:MAX_CHARS] + "..."
-        return summary
-
-    # Nothing useful found
-    return None
 
 
 def _format_event_preview(evt: dict) -> str | None:
