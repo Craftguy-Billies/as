@@ -767,9 +767,35 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                     _conversation_llm_model or "(none)", current_model,
                     _from_batch, model_changed, ctx_changed, branch_switched,
                     _conversation_id is None, _conversation_status)
-        # The same conversation is reused across messages to preserve chat history.
-        # No automatic task-complete detection — that's unreliable (the AI may
-        # respond with "let me now..." without actually completing anything).
+        # Force new conversation if the previous one has completed — reusing a
+        # finished conversation can cause stale/dedup'd events, duplicate
+        # assistant responses, context-limit exhaustion, and the AI getting
+        # confused by old conversation history. A fresh conversation per task
+        # is the correct behavior for all edge cases (timeouts, long convs,
+        # user switching tasks explicitly).
+        #
+        # NOTE: the ONLY downside is that _create_conversation's boilerplate
+        # tells the AI to "review relevant files" which can cause it to
+        # continue old workspace tasks. We fix that by CHANGING the boilerplate
+        # (see _create_conversation) instead of removing conv_done.
+        conv_done = (
+            _conversation_id is not None
+            and _conversation_status == "idle"
+            and not ctx_changed
+            and not branch_switched
+            and not _from_batch
+        )
+        if conv_done:
+            logger.info("Conversation %s completed — forcing new conversation (status=%s)",
+                        _conversation_id, _conversation_status)
+            _conversation_id = None
+            _last_event_index = 0
+            _last_event_timestamp = ""
+            _seen_event_ids.clear()
+            _seen_event_hashes.clear()
+            _sandbox_id = None
+            _event_kinds.clear()
+            _persist_to_db()
         if ctx_changed:
             logger.info("Context changed: repo='%s'→'%s' mode='%s'→'%s' model='%s'→'%s'",
                         _conversation_repo or '(none)', repo or '(none)',
@@ -1727,8 +1753,8 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
             f"a subdirectory like /workspace/project/<name>/. "
             f"Run `cd /workspace && ls` to find it, then cd into the right dir "
             f"and run `git pull origin {effective_branch}`.\n"
-            f"When implementing changes: review relevant files, make edits, "
-            f"commit with a descriptive message, and push.\n\n"
+            f"Read the user's message below and implement what it asks. "
+            f"Make edits, commit with a descriptive message, and push.\n\n"
             f"[SANDBOX] REPO RESTRICTION: You are confined to repository `{repo}`. "
             f"You may switch branches within it freely, but you MUST NOT "
             f"clone, fetch, push to, or interact with any other repository. "
@@ -2028,6 +2054,19 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                         text = "\n".join(parts)
                     elif isinstance(content, str):
                         text = content.strip()
+                elif isinstance(llm_msg, list):
+                    parts = []
+                    for block in llm_msg:
+                        if isinstance(block, dict):
+                            t = block.get("text", "") or block.get("content", "")
+                            if t and str(t).strip():
+                                parts.append(str(t).strip())
+                        elif isinstance(block, str) and block.strip():
+                            parts.append(block.strip())
+                    if parts:
+                        text = '\n'.join(parts)
+                    else:
+                        text = str(llm_msg)[:200]
                 if text:
                     # ONLY keep the LAST assistant message (replace, not append).
                     # Multiple MessageEvents per turn (intermediate + final) must
@@ -2502,10 +2541,24 @@ def _format_event_preview(evt: dict) -> str | None:
             if text:
                 return f"[BROWSER] Page: ({len(str(text))} chars)"
         else:
-            # Log unknown observation tools (browser_*, read, write, think, etc.)
-            # so we can add proper formatting later. The ActionEvent for these
-            # IS already shown via the [TOOL] catch-all above.
-            logger.debug("_format_event_preview: obs tool=%s (skipped, action shown as [TOOL])", tool)
+            # Generic observation preview for all unhandled tools.
+            # Previously these were silently dropped, which made the user
+            # see "[TOOL] read: {...}" action but NEVER the result — the
+            # "swallowed events" bug (#3).
+            output = ""
+            for key in ("output", "content", "text", "result", "data"):
+                val = obs.get(key, "")
+                if isinstance(val, (str, int, float)):
+                    output = str(val)
+                    break
+                if isinstance(val, dict) and val.get("output"):
+                    output = str(val["output"])
+                    break
+            if not output:
+                output = str(obs)[:200]
+            short = output[:200].replace("\n", " ").strip()
+            if short:
+                return f"[OUT] {short}"
             return None
 
     elif kind == "ErrorEvent":
@@ -2524,8 +2577,10 @@ def _format_event_preview(evt: dict) -> str | None:
         return None  # internal prompt, not user-facing
     elif kind in ("MessageEvent",):
         return None  # handled in _wait_for_response
-    # Catch-all: log unknown event kinds at DEBUG level so we can learn what
-    # new kinds the Cloud API produces without dropping them silently.
-    logger.debug("_format_event_preview: unknown kind=%s source=%s tool=%s keys=%s",
-                 kind, source, tool, sorted(evt.keys()))
-    return None
+    # Catch-all: show unknown event kinds so the user never sees a
+    # silent drop — even a generic "[EVENT]" is better than nothing.
+    kind_label = kind or "UnknownEvent"
+    evt_str = str(evt.get("message", evt.get("content", "")))[:200]
+    if evt_str:
+        return f"[{kind_label}] {evt_str}"
+    return f"[{kind_label}] (raw)"

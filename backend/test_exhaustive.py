@@ -976,10 +976,9 @@ action_edit = cs._format_event_preview({"kind": "ActionEvent", "tool_name": "wri
                                          "source": "agent", "id": "2"})
 R.ok(action_edit is not None, "fmt: ActionEvent write returns preview")
 
-# Empty event
+# Empty event — should return something (catch-all), not crash
 empty = cs._format_event_preview({})
-# May return None or empty string — either is acceptable
-R.ok(empty is None or empty == "", "fmt: empty event returns None or ''")
+R.ok(empty is not None, "fmt: empty event returns preview (catch-all)")
 
 
 # ============================================================
