@@ -1193,7 +1193,10 @@ def _process_batch_worker() -> None:
     _batch_running=True (which would freeze the client forever).
     Also enforce a 30-minute global timeout per batch.
     """
-    global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _batch_skip_prompt
+    global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes
+    global _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _batch_skip_prompt
+    global _conversation_id, _conversation_status, _last_event_index, _last_event_timestamp, _sandbox_id
+    global _seen_event_ids, _seen_event_hashes, _event_kinds
     _batch_started_at = time.time()
 
     try:
