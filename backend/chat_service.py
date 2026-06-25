@@ -1896,6 +1896,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     can see what the agent is doing via polling get_state().
     """
     global _last_event_index, _last_event_timestamp, _conversation_status, _sandbox_id, _last_response_source
+    global _conversation_id, _seen_event_ids, _seen_event_hashes, _event_kinds
 
     if timeout is None:
         timeout = _CHAT_TIMEOUT
