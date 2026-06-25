@@ -1027,7 +1027,10 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                 # "Tasks have been updated." "Task list updated."
                 # "task list has been updated with 6 item(s). task list..."
                 # Catch all variations of task_tracker plan output.
-                if re.search(r'(?i)(tasks?\s+(list\s+)?(has\s+been\s+|have\s+been\s+|was\s+|were\s+)?updated)', stripped):
+                # Require either "list" OR an auxiliary verb (has/have/was/were)
+                # followed by "updated" — this avoids false matches on generic
+                # phrases like "Task updated successfully" or "code updated".
+                if re.search(r'(?i)(tasks?\s+(?:(?:list\s+)?(?:has\s+been\s+|have\s+been\s+|was\s+|were\s+)|list\s+)updated)', stripped):
                     logger.warning("Phase 3: discarding task_tracker output (%.80s...) source=%s",
                                    stripped[:80], _response_source)
                     response = ""
