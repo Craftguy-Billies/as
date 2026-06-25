@@ -833,11 +833,10 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             _effective_prompt = prompt
             if conv_done and repo:
                 _effective_prompt = (
-                    "[FRESH CONVERSATION — PREVIOUS TASK IS COMPLETE]\n"
-                    "The user is starting something new. Do NOT continue or "
-                    "reference the previous task. The workspace may contain "
-                    "files from past work — ignore them unless the user's "
-                    "current message explicitly asks about them.\n\n"
+                    "[PREVIOUS TASK COMPLETED — NEW REQUEST]\n"
+                    "The conversation is fresh. The workspace is at the latest state "
+                    "from the previous task. Read the workspace to understand context, "
+                    "then respond to the user's current message.\n\n"
                     f"---\n\n{_effective_prompt}"
                 )
             new_conv_id = _create_conversation(_effective_prompt, repo, branch, mode)
