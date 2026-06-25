@@ -1172,7 +1172,7 @@ R.ok(hasattr(cs, "_create_conversation"), "create-conv: function exists")
 import inspect
 sig = inspect.signature(cs._create_conversation)
 params = list(sig.parameters.keys())
-R.eq(params, ['prompt', 'repo', 'branch', 'mode', 'fresh'], "create-conv: params match send() call")
+R.eq(params, ['prompt', 'repo', 'branch', 'mode'], "create-conv: params match send() call")
 # The call at line 820: _create_conversation(prompt, repo, branch, mode)
 # matches the signature. Verified.
 

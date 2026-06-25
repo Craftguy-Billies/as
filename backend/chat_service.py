@@ -30,6 +30,7 @@ CLOUD_API_KEY = os.getenv("OPENHANDS_CLOUD_API_KEY", "")
 # -- Session state (persisted to DB, survives restart) --
 _conversation_id: str | None = None
 _conv_id_at_last_assistant: str | None = None  # conversation ID when last assistant msg was stored
+_task_complete: bool = False  # previous assistant response marked task as complete
 _conversation_repo: str = ""
 _conversation_branch: str = ""
 _conversation_mode: str = "code"
@@ -258,7 +259,7 @@ def _log_sync_to_github(repo: str, entries: list[dict]) -> None:
 
 # -- Restore state from DB on module load --
 def _restore_from_db() -> None:
-    global _conversation_id, _conv_id_at_last_assistant, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _messages_by_repo, _current_repo_key
+    global _conversation_id, _conv_id_at_last_assistant, _task_complete, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _messages_by_repo, _current_repo_key
     global _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_running, _batch_cancelled, _batch_skip_prompt
     global _msg_counter
     global _seen_event_ids, _seen_event_hashes
@@ -272,6 +273,7 @@ def _restore_from_db() -> None:
             data = json.loads(row[0])
             _conversation_id = data.get("conversation_id")
             _conv_id_at_last_assistant = data.get("conv_id_at_last_assistant")
+            _task_complete = data.get("task_complete", False)
             _conversation_repo = data.get("repo", "")
             _conversation_branch = data.get("branch", "")
             _conversation_mode = data.get("mode", "code")
@@ -330,6 +332,7 @@ def _persist_to_db() -> None:
         data = json.dumps({
             "conversation_id": _conversation_id,
             "conv_id_at_last_assistant": _conv_id_at_last_assistant,
+            "task_complete": _task_complete,
             "repo": _conversation_repo,
             "branch": _conversation_branch,
             "mode": _conversation_mode,
@@ -388,7 +391,7 @@ def _headers() -> dict:
 
 def reset() -> None:
     """Clear the current chat session AND cancel any running batch."""
-    global _conversation_id, _conv_id_at_last_assistant, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
+    global _conversation_id, _conv_id_at_last_assistant, _task_complete, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
     global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_skip_prompt
     with _lock:
         # Cancel running batch
@@ -404,6 +407,7 @@ def reset() -> None:
         # Reset conversation
         _conversation_id = None
         _conv_id_at_last_assistant = None
+        _task_complete = False
         _conversation_repo = ""
         _conversation_branch = ""
         _conversation_mode = "code"
@@ -762,36 +766,15 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
         )
         # AUDIT: log Phase 1a decision state
         logger.info("AUDIT 1a: conv=%s repo=%s mode=%s model=%s cur_model=%s "
-                    "from_batch=%s model_changed=%s ctx=%s branch_sw=%s need_new=%s conv_status=%s",
+                    "from_batch=%s model_changed=%s ctx=%s branch_sw=%s need_new=%s conv_status=%s task_complete=%s",
                     _conversation_id or "(none)", _conversation_repo, _conversation_mode,
                     _conversation_llm_model or "(none)", current_model,
                     _from_batch, model_changed, ctx_changed, branch_switched,
-                    _conversation_id is None, _conversation_status)
-        # Force new conversation if the previous one has completed — reusing a
-        # finished conversation can cause stale/dedup'd events and duplicate
-        # assistant responses (issues #3-#5).
-        # NOTE: Do NOT check branch_switched here — if the conversation is idle
-        # and the user sends a new message, we always create a fresh conversation
-        # regardless of branch state. Branch switching on a completed conversation
-        # would reuse stale event cursors and produce duplicate responses.
-        # The new conversation inherits effective_branch from Phase 0b.
-        conv_done = (
-            _conversation_id is not None
-            and _conversation_status == "idle"
-            and not ctx_changed
-            and not _from_batch
-        )
-        if conv_done:
-            logger.info("Conversation %s completed — forcing new conversation (status=%s)",
-                        _conversation_id, _conversation_status)
-            _conversation_id = None
-            _last_event_index = 0
-            _last_event_timestamp = ""
-            _seen_event_ids.clear()
-            _seen_event_hashes.clear()
-            _sandbox_id = None
-            _event_kinds.clear()
-            _persist_to_db()
+                    _conversation_id is None, _conversation_status, _task_complete)
+        # When the previous task is complete, REUSE the same conversation but
+        # prepend a task-complete marker to the prompt so the AI knows this is
+        # a new request and does NOT continue the old task. This preserves the
+        # chat history for the user while preventing the "AI resumes old task" bug.
         if ctx_changed:
             logger.info("Context changed: repo='%s'→'%s' mode='%s'→'%s' model='%s'→'%s'",
                         _conversation_repo or '(none)', repo or '(none)',
@@ -826,27 +809,30 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             if _log_cfg:
                 logger.info("AUDIT model_cfg: configured_model=%s has_api_key=%s has_base_url=%s",
                             _log_cfg.model, bool(_log_cfg.api_key), bool(_log_cfg.base_url))
-            # When conv_done triggered a fresh conversation, the AI may see
-            # leftover workspace files from the previous task and mistakenly
-            # resume old work instead of responding to the new prompt.
-            # Add an explicit "fresh start" instruction to prevent this.
-            _effective_prompt = prompt
-            if conv_done and repo:
-                _effective_prompt = (
-                    "[NEW TASK — PREVIOUS WORK IS COMPLETE]\n"
-                    "This is a fresh, self-contained task. The workspace contains "
-                    "files from previous completed work — ignore them entirely.\n"
-                    "DO NOT continue, reference, or build upon any previous task.\n"
-                    "Your ONLY instruction is the user's message below. Start fresh.\n\n"
-                    f"{_effective_prompt}"
-                )
-            new_conv_id = _create_conversation(_effective_prompt, repo, branch, mode, fresh=conv_done)
+            new_conv_id = _create_conversation(prompt, repo, branch, mode)
             logger.info("Phase 1b: created conv=%s (repo=%s mode=%s model=%s seen_ids=%d)",
                         new_conv_id, repo, mode, current_model, len(_seen_event_ids))
         else:
             logger.info("Phase 1b: reusing conv=%s repo=%s mode=%s seen_ids=%d",
                         current_conv_id, repo, mode, len(_seen_event_ids))
             effective_prompt = prompt
+            # If the previous task is complete, prepend a clear task-complete marker
+            # so the AI treats this as a NEW request, not a continuation of the old task.
+            # The conversation is reused to preserve chat history (the user's messages
+            # and the AI's previous responses remain visible in the UI).
+            if _task_complete:
+                effective_prompt = (
+                    "[PREVIOUS TASK COMPLETE]\n"
+                    "\n"
+                    "The previous task is FINISHED and COMPLETE.\n"
+                    "Do NOT continue it. Do NOT reference it.\n"
+                    "The user's message below is a NEW, independent request.\n"
+                    "Respond to it directly.\n"
+                    "\n"
+                    "---\n"
+                    f"{effective_prompt}"
+                )
+                _task_complete = False
             # Inject git checkout + pull for the effective branch.
             # When user provides a branch: always checkout that branch (sandbox
             # may be on a different branch from last operation), then pull.
@@ -865,7 +851,7 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                 git_prefix = f"{checkout_cmd}\n\n"
                 logger.info("send: injected git checkout+pull for branch=%s (branch_provided=%s branch_switched=%s)",
                             effective_branch, branch_provided, branch_switched)
-                effective_prompt = f"{git_prefix}{prompt}"
+                effective_prompt = f"{git_prefix}{effective_prompt}"
             else:
                 logger.info("send: no branch — sending prompt as-is, no git pull")
             success, send_err = _send_message(current_conv_id, effective_prompt)
@@ -1078,6 +1064,7 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                     "timestamp": int(time.time() * 1000),
                 })
                 _conv_id_at_last_assistant = _conversation_id
+                _task_complete = True
                 _persist_to_db()
                 # AUDIT: log Phase 3 state
                 event_count_after = sum(1 for m in _msgs() if m.get("role") == "event")
@@ -1713,14 +1700,10 @@ def _parse_log_md(content: str) -> list[dict]:
 
 
 
-def _create_conversation(prompt: str, repo: str, branch: str, mode: str, fresh: bool = False) -> str:
+def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     """Create a conversation via POST /api/v1/app-conversations (SAME as agent_runner).
 
     Returns the conversation_id. Raises on failure.
-    When fresh=True, the prompt is a self-contained fresh task — "
-    "review relevant files" boilerplate is skipped so the AI does not
-    explore old workspace context and instead responds directly to the
-    user message.
     """
     # Auto-detect default branch if repo given and branch is empty
     effective_branch = branch
@@ -1760,35 +1743,22 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str, fresh: 
                 f"Task: {prompt}"
             )
     elif repo:
-        if fresh:
-            # Fresh task — no "review relevant files" boilerplate.
-            # The AI must NOT explore the workspace; it responds directly
-            # to the self-contained prompt below.
-            full_prompt = (
-                f"Repository: {repo} (branch: {effective_branch}).\n"
-                f"[FRESH TASK — IGNORE WORKSPACE]\n"
-                f"Do NOT read any project files. Do NOT run git pull.\n"
-                f"Do NOT continue, reference, or build upon any previous work.\n"
-                f"The user's message below is a self-contained task. Start fresh.\n\n"
-                f"{prompt}"
-            )
-        else:
-            full_prompt = (
-                f"Repository: {repo} (branch: {effective_branch}).\n"
-                f"IMPORTANT: First run `git pull` to get the latest code. "
-                f"The repo's .git directory is NOT at /workspace directly — it's in "
-                f"a subdirectory like /workspace/project/<name>/. "
-                f"Run `cd /workspace && ls` to find it, then cd into the right dir "
-                f"and run `git pull origin {effective_branch}`.\n"
-                f"When implementing changes: review relevant files, make edits, "
-                f"commit with a descriptive message, and push.\n\n"
-                f"[SANDBOX] REPO RESTRICTION: You are confined to repository `{repo}`. "
-                f"You may switch branches within it freely, but you MUST NOT "
-                f"clone, fetch, push to, or interact with any other repository. "
-                f"All file edits, git operations, and commits must stay within "
-                f"`{repo}`.\n\n"
-                f"{prompt}"
-            )
+        full_prompt = (
+            f"Repository: {repo} (branch: {effective_branch}).\n"
+            f"IMPORTANT: First run `git pull` to get the latest code. "
+            f"The repo's .git directory is NOT at /workspace directly — it's in "
+            f"a subdirectory like /workspace/project/<name>/. "
+            f"Run `cd /workspace && ls` to find it, then cd into the right dir "
+            f"and run `git pull origin {effective_branch}`.\n"
+            f"When implementing changes: review relevant files, make edits, "
+            f"commit with a descriptive message, and push.\n\n"
+            f"[SANDBOX] REPO RESTRICTION: You are confined to repository `{repo}`. "
+            f"You may switch branches within it freely, but you MUST NOT "
+            f"clone, fetch, push to, or interact with any other repository. "
+            f"All file edits, git operations, and commits must stay within "
+            f"`{repo}`.\n\n"
+            f"{prompt}"
+        )
     else:
         full_prompt = prompt
 
