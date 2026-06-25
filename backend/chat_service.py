@@ -2145,7 +2145,15 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                     "kind": "ErrorEvent",
                     "timestamp": int(time.time() * 1000),
                 })
-            return None
+            # Return any accumulated messages instead of None — the AI may
+            # have generated a partial response before the error. Discarding
+            # it makes the user see only tool events + error (no AI output).
+            # A non-empty response keeps Phase 3 happy and the user informed.
+            if all_new_msgs:
+                logger.info("Error with %d accumulated msgs — returning them", len(all_new_msgs))
+                return "\n\n".join(all_new_msgs) if len(all_new_msgs) > 1 else all_new_msgs[-1]
+            # No messages — return error detail as response so user knows why
+            return f"Task {status}: {err_detail}"
 
     # When finished, try trajectory zip to get the COMPLETE last response.
     # events/search may return truncated event lists. Only use zip as a
@@ -2513,7 +2521,7 @@ def _format_event_preview(evt: dict) -> str | None:
             exit_code = obs.get("exit_code")
             out = stdout or stderr
             if out:
-                short = str(out)[:200].replace("\n", " ").strip()
+                short = str(out)[:2000].replace("\n", " ").strip()
                 tag = "[OUT] " if not stderr else "[WARN] stderr: "
                 extra = f" (exit={exit_code})" if exit_code is not None and exit_code != 0 else ""
                 return f"{tag}{short}{extra}"
@@ -2555,8 +2563,8 @@ def _format_event_preview(evt: dict) -> str | None:
                     output = str(val["output"])
                     break
             if not output:
-                output = str(obs)[:200]
-            short = output[:200].replace("\n", " ").strip()
+                output = str(obs)
+            short = output[:1000].replace("\n", " ").strip()
             if short:
                 return f"[OUT] {short}"
             return None
