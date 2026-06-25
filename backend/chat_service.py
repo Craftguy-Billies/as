@@ -29,6 +29,7 @@ CLOUD_API_KEY = os.getenv("OPENHANDS_CLOUD_API_KEY", "")
 
 # -- Session state (persisted to DB, survives restart) --
 _conversation_id: str | None = None
+_conv_id_at_last_assistant: str | None = None  # conversation ID when last assistant msg was stored
 _conversation_repo: str = ""
 _conversation_branch: str = ""
 _conversation_mode: str = "code"
@@ -257,7 +258,7 @@ def _log_sync_to_github(repo: str, entries: list[dict]) -> None:
 
 # -- Restore state from DB on module load --
 def _restore_from_db() -> None:
-    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _messages_by_repo, _current_repo_key
+    global _conversation_id, _conv_id_at_last_assistant, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _messages_by_repo, _current_repo_key
     global _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_running, _batch_cancelled, _batch_skip_prompt
     global _msg_counter
     global _seen_event_ids, _seen_event_hashes
@@ -270,6 +271,7 @@ def _restore_from_db() -> None:
         if row:
             data = json.loads(row[0])
             _conversation_id = data.get("conversation_id")
+            _conv_id_at_last_assistant = data.get("conv_id_at_last_assistant")
             _conversation_repo = data.get("repo", "")
             _conversation_branch = data.get("branch", "")
             _conversation_mode = data.get("mode", "code")
@@ -327,6 +329,7 @@ def _persist_to_db() -> None:
                 _messages_by_repo[key] = _messages_by_repo[key][-400:]
         data = json.dumps({
             "conversation_id": _conversation_id,
+            "conv_id_at_last_assistant": _conv_id_at_last_assistant,
             "repo": _conversation_repo,
             "branch": _conversation_branch,
             "mode": _conversation_mode,
@@ -385,7 +388,7 @@ def _headers() -> dict:
 
 def reset() -> None:
     """Clear the current chat session AND cancel any running batch."""
-    global _conversation_id, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
+    global _conversation_id, _conv_id_at_last_assistant, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
     global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_skip_prompt
     with _lock:
         # Cancel running batch
@@ -400,6 +403,7 @@ def reset() -> None:
             logger.info("Batch cancelled by chat reset")
         # Reset conversation
         _conversation_id = None
+        _conv_id_at_last_assistant = None
         _conversation_repo = ""
         _conversation_branch = ""
         _conversation_mode = "code"
@@ -1030,10 +1034,16 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             # Only check the LAST assistant (cumulative builds on consecutive
             # turns, same conversation). Checking ALL previous messages would
             # false-positive when two different turns produce the same text.
+            # CRITICAL: only strip if we are in the SAME conversation as when
+            # the last assistant was stored. After conv_done creates a fresh
+            # conversation, the response comes from a different Cloud
+            # conversation and is NOT cumulative — stripping it would remove
+            # legitimate content copied from the previous turn.
             for m in reversed(msgs):
                 if m.get("role") == "assistant":
                     last_assistant = m.get("content", "")
-                    if last_assistant and response.startswith(last_assistant):
+                    if (last_assistant and response.startswith(last_assistant)
+                            and _conversation_id == _conv_id_at_last_assistant):
                         stripped = response[len(last_assistant):].strip()
                         if stripped:
                             logger.info("Phase 3: stripped cumulative prefix (was %d, now %d chars) source=%s",
@@ -1067,6 +1077,7 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                     "content": response,
                     "timestamp": int(time.time() * 1000),
                 })
+                _conv_id_at_last_assistant = _conversation_id
                 _persist_to_db()
                 # AUDIT: log Phase 3 state
                 event_count_after = sum(1 for m in _msgs() if m.get("role") == "event")
