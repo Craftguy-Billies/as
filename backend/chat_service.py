@@ -817,6 +817,11 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
         if need_new_conv:
             logger.info("Phase 1b: creating new conversation for repo=%s branch=%s mode=%s model=%s",
                         repo, branch or '(empty)', mode, current_model)
+            # AUDIT: log the exact llm_config being sent to the Cloud API
+            _log_cfg = get_llm_config()
+            if _log_cfg:
+                logger.info("AUDIT model_cfg: configured_model=%s has_api_key=%s has_base_url=%s",
+                            _log_cfg.model, bool(_log_cfg.api_key), bool(_log_cfg.base_url))
             # When conv_done triggered a fresh conversation, the AI may see
             # leftover workspace files from the previous task and mistakenly
             # resume old work instead of responding to the new prompt.
@@ -968,6 +973,9 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             _seen_event_hashes.clear()
             logger.info("Phase 1c: stored new conv=%s repo=%s branch=%s mode=%s model=%s seen_ids=0",
                         new_conv_id, repo, _conversation_branch, mode, current_model)
+            logger.info("AUDIT 1c_model: conv_model=%s configured_model=%s (match=%s)",
+                        current_model, get_llm_config().model if get_llm_config() else "?",
+                        current_model == (get_llm_config().model if get_llm_config() else None))
         msg_id = _next_msg_id()
         _msgs().append({"id": msg_id, 
             "role": "user",

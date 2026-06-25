@@ -1053,12 +1053,14 @@ class _ChatBubbleState extends State<_ChatBubble> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     isUser
-                        ? SelectableText(
-                            msg.content,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 14.5,
-                              height: 1.45,
+                        ? SelectionArea(
+                            child: SelectableText(
+                              msg.content,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14.5,
+                                height: 1.45,
+                              ),
                             ),
                           )
                         : SelectionArea(
@@ -1096,6 +1098,27 @@ class _ChatBubbleState extends State<_ChatBubble> {
                           style: TextStyle(
                             color: Colors.white.withAlpha(80),
                             fontSize: 10,
+                          ),
+                        ),
+                        const Spacer(),
+                        // Copy button for ALL messages (user + assistant)
+                        GestureDetector(
+                          onTap: () {
+                            Clipboard.setData(ClipboardData(text: msg.content));
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: const Text('Copied to clipboard'),
+                                duration: const Duration(seconds: 1),
+                                backgroundColor: isUser
+                                    ? const Color(0xFF7C3AED)
+                                    : const Color(0xFF1E1E2E),
+                              ),
+                            );
+                          },
+                          child: Icon(
+                            Icons.copy,
+                            color: Colors.white.withAlpha(80),
+                            size: 14,
                           ),
                         ),
                         if (isAssistant && !_expanded)
