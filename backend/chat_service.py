@@ -1748,12 +1748,7 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     elif repo:
         full_prompt = (
             f"Repository: {repo} (branch: {effective_branch}).\n"
-            f"IMPORTANT: First run `git pull` to get the latest code. "
-            f"The repo's .git directory is NOT at /workspace directly — it's in "
-            f"a subdirectory like /workspace/project/<name>/. "
-            f"Run `cd /workspace && ls` to find it, then cd into the right dir "
-            f"and run `git pull origin {effective_branch}`.\n"
-            f"Read the user's message below and implement what it asks. "
+            f"Read the user's message and respond. "
             f"Make edits, commit with a descriptive message, and push.\n\n"
             f"[SANDBOX] REPO RESTRICTION: You are confined to repository `{repo}`. "
             f"You may switch branches within it freely, but you MUST NOT "
@@ -2309,6 +2304,9 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             _last_event_index = 0
             _last_event_timestamp = ""
             _sandbox_id = None
+            _seen_event_ids.clear()
+            _seen_event_hashes.clear()
+            _event_kinds.clear()
             _persist_to_db()
         _msgs().append({"id": _next_msg_id(), 
             "role": "event",
@@ -2409,23 +2407,6 @@ def _scrape_events_for_text(events: list[dict]) -> str | None:
             for item in thought:
                 if isinstance(item, dict) and item.get("text"):
                     add_if_room(str(item["text"]))
-
-        # 3. SHORT observation snippets only (< 300 chars)
-        #    Skip long file/terminal/command dumps.
-        if kind == "ObservationEvent" or evt.get("observation"):
-            obs = evt.get("observation")
-            if isinstance(obs, dict):
-                obs_content = obs.get("content") or []
-                if isinstance(obs_content, list):
-                    for block in obs_content:
-                        if isinstance(block, dict) and block.get("text"):
-                            t = str(block["text"]).strip()
-                            if t and len(t) < SHORT_MAX:
-                                add_if_room(t)
-                elif isinstance(obs_content, str) and obs_content.strip():
-                    t = obs_content.strip()
-                    if len(t) < SHORT_MAX:
-                        add_if_room(t)
 
         # 4. Tool action summaries (short, descriptive)
         if kind == "ActionEvent":
