@@ -2,7 +2,7 @@
 
 Tests are organized by code path:
   0. Imports, helpers, and assertion framework
-  1. Phase 1a — State transition matrix (conv_done, ctx_changed, branch_switched, model_changed)
+  1. Phase 1a — State transition matrix (ctx_changed, branch_switched, model_changed)
   2. Phase 1b — Conversation creation and 409 recovery
   3. Phase 1c — State storage after creation
   4. Phase 2  — _wait_for_response event processing
@@ -112,18 +112,13 @@ def simulate_phase1a(repo, mode="code", branch="main", current_model="", from_ba
             and not ctx_changed
             and branch != cs._conversation_branch
         )
-        conv_done = (
-            cs._conversation_id is not None
-            and cs._conversation_status == "idle"
-            and not ctx_changed
-            and not from_batch
-        )
         need_new_conv = cs._conversation_id is None
 
-        # Simulate the action that would be taken
-        if conv_done:
-            action = "conv_done"
-        elif ctx_changed:
+        # conv_done removed: reuse conversation across tasks so DeepSeek
+        # prompt caching works. Only create new conv on error/timeout
+        # recovery (sets _conversation_id=None) or context change.
+        # Priority: ctx_changed > branch_switched > new_conv > reuse
+        if ctx_changed:
             action = "ctx_changed"
         elif branch_switched:
             action = "branch_switched"
@@ -136,7 +131,6 @@ def simulate_phase1a(repo, mode="code", branch="main", current_model="", from_ba
             "model_changed": model_changed,
             "ctx_changed": ctx_changed,
             "branch_switched": branch_switched,
-            "conv_done": conv_done,
             "need_new_conv": need_new_conv,
             "action": action,
             "conv_id": cs._conversation_id,
@@ -164,7 +158,7 @@ print("=" * 70)
 # For each combination of (has_conv, conv_status, same_repo, same_mode,
 # same_model, same_branch, from_batch), compute the expected action.
 #
-# Priority: conv_done > ctx_changed > branch_switched > new_conv > reuse
+# Priority: ctx_changed > branch_switched > new_conv > reuse
 
 scenarios = []
 # We enumerate all meaningful combinations:
@@ -178,8 +172,10 @@ conv_states = [
     ("error", "error"),
     ("stopped", "stopped"),
 ]
-# Note: "idle" is treated as "completed" for conv_done purposes
-# Other statuses (running, completed, failed, error, stopped) should NOT trigger conv_done
+# Note: "idle" status no longer triggers conv_done — conversations are reused
+# across tasks so DeepSeek prompt caching works. Only error/timeout recovery
+# (sets _conversation_id=None) or context change creates new conversations.
+# Priority: ctx_changed > branch_switched > new_conv > reuse
 
 # Scenario list: (label, conv_id, status, conv_repo, conv_mode, conv_model, conv_branch,
 #                       new_repo, new_mode, new_model, new_branch, from_batch, expected_action)
@@ -193,16 +189,16 @@ SL.append(("NO-CONV-2: first msg in batch",
     None, "idle", "", "", "", "",
     "test/repo", "code", "d4-flash", "main", True, "new_conv"))
 
-# --- IDLE, same everything ---
-SL.append(("IDLE-SAME-1: idle, same everything",
+# --- IDLE, same everything (no longer creates new conv — reuse for caching) ---
+SL.append(("IDLE-SAME-1: idle, same everything (reuse)",
     "c1", "idle", "test/r", "code", "d4-pro", "main",
-    "test/r", "code", "d4-pro", "main", False, "conv_done"))
-SL.append(("IDLE-SAME-2: idle, same, BATCH (should NOT conv_done)",
+    "test/r", "code", "d4-pro", "main", False, "reuse"))
+SL.append(("IDLE-SAME-2: idle, same, BATCH (reuse)",
     "c1", "idle", "test/r", "code", "d4-pro", "main",
     "test/r", "code", "d4-pro", "main", True, "reuse"))
-SL.append(("IDLE-SAME-3: idle, same, empty branch never set",
+SL.append(("IDLE-SAME-3: idle, same, empty branch never set (reuse)",
     "c1", "idle", "test/r", "code", "d4-pro", "",
-    "test/r", "code", "d4-pro", "main", False, "conv_done"))
+    "test/r", "code", "d4-pro", "main", False, "branch_switched"))
 
 # --- IDLE, repo changed ---
 SL.append(("IDLE-REPO-1: idle, different repo",
@@ -221,20 +217,20 @@ SL.append(("IDLE-MODEL-1: idle, model changed",
 SL.append(("IDLE-MODEL-2: idle, model changed, BATCH (should NOT ctx_changed)",
     "c1", "idle", "test/r", "code", "d4-pro", "main",
     "test/r", "code", "d4-flash", "main", True, "reuse"))
-SL.append(("IDLE-MODEL-3: idle, model same as conv (no change)",
+SL.append(("IDLE-MODEL-3: idle, model same as conv (no change, reuse)",
     "c1", "idle", "test/r", "code", "d4-pro", "main",
-    "test/r", "code", "d4-pro", "main", False, "conv_done"))
+    "test/r", "code", "d4-pro", "main", False, "reuse"))
 
-# --- IDLE, branch switched ---
-SL.append(("IDLE-BRANCH-1: idle, different branch (conv_done wins)",
+# --- IDLE, branch switched (no conv_done, so branch_switched wins) ---
+SL.append(("IDLE-BRANCH-1: idle, different branch (branch_switched wins)",
     "c1", "idle", "test/r", "code", "d4-pro", "main",
-    "test/r", "code", "d4-pro", "feature", False, "conv_done"))
+    "test/r", "code", "d4-pro", "feature", False, "branch_switched"))
 SL.append(("IDLE-BRANCH-2: idle, branch switch, BATCH (branch_sw wins)",
     "c1", "idle", "test/r", "code", "d4-pro", "main",
     "test/r", "code", "d4-pro", "feature", True, "branch_switched"))
-SL.append(("IDLE-BRANCH-3: no branch set, default 'main' passed (conv_done wins)",
+SL.append(("IDLE-BRANCH-3: no branch set, default 'main' passed (branch_switched)",
     "c1", "idle", "test/r", "code", "d4-pro", "",
-    "test/r", "code", "d4-pro", "main", False, "conv_done"))
+    "test/r", "code", "d4-pro", "main", False, "branch_switched"))
 
 # --- RUNNING (not idle) ---
 for status in ("running", "completed", "failed", "error", "stopped"):
@@ -269,9 +265,9 @@ SL.append(("MULTI-4: everything changed (ctx_changed wins)",
 SL.append(("EDGE-1: conv_id set, all empty fields, repo provided",
     "c1", "idle", "", "", "", "",
     "test/r", "code", "d4-flash", "main", False, "ctx_changed"))
-SL.append(("EDGE-2: conv_id set, empty fields, same repo empty (conv_done)",
+SL.append(("EDGE-2: conv_id set, empty fields, same repo empty (branch_switched)",
     "c1", "idle", "", "", "", "",
-    "", "", "", "main", False, "conv_done"))
+    "", "", "", "main", False, "branch_switched"))
 SL.append(("EDGE-3: batch, conv idle, empty fields, same mode empty (reuse)",
     "c1", "idle", "", "", "", "",
     "", "", "", "main", True, "branch_switched"))
@@ -309,7 +305,7 @@ print("\n" + "=" * 70)
 print("SECTION 2: Phase 1b + 1c — Conv creation, 409 recovery")
 print("=" * 70)
 
-# When conv_done triggers, what happens in Phase 1c?
+# When Phase 1b creates a new conversation (need_new_conv=True), Phase 1c stores:
 # - _conversation_id = new_conv_id
 # - _conversation_repo = repo
 # - _conversation_branch = effective_branch  (NEW — was branch if branch else _conversation_branch)
@@ -337,9 +333,9 @@ def simulate_phase1c(need_new_conv, new_conv_id, repo, effective_branch, mode, c
             cs._seen_event_ids.clear()
             cs._seen_event_hashes.clear()
 
-print("\n--- Phase 1c: state storage after conv_done ---")
+print("\n--- Phase 1c: state storage after new conversation ---")
 
-# Test: conv_done triggers, Phase 1c stores correct values
+# Test: Phase 1c stores correct values
 reset("old-conv", "idle", "old/repo", "code", "d4-pro", "main",
       last_ts="1719000000123", seen_ids={"e1"}, seen_hashes={12345})
 
@@ -352,7 +348,9 @@ R.ok(cs._conversation_id == "old-conv", "1c-setup: old conv exists")
 R.ok(bool(old_ts), "1c-setup: last_event_timestamp set")
 R.ok(old_seen > 0, "1c-setup: seen_event_ids populated")
 
-# conv_done fires
+# conv_done removed — conv is reused, state NOT cleared.
+# Phase 1c only fires when need_new_conv=True (error/timeout recovery).
+# Simulate what happens when server recovers from error: clears conv state.
 with cs._lock:
     cs._conversation_id = None
     cs._last_event_index = 0
@@ -367,7 +365,7 @@ R.eq(cs._last_event_timestamp, "", "1c-done: timestamp cleared")
 R.eq(len(cs._seen_event_ids), 0, "1c-done: seen_ids cleared")
 R.eq(len(cs._seen_event_hashes), 0, "1c-done: seen_hashes cleared")
 
-# Phase 1c: new conv stored
+# Phase 1c: new conv stored (only happens on error/timeout recovery)
 simulate_phase1c(True, "new-conv-42", "new/repo", "feature-x", "plan", "d4-flash")
 R.eq(cs._conversation_id, "new-conv-42", "1c-store: new conv id")
 R.eq(cs._conversation_repo, "new/repo", "1c-store: repo updated")
@@ -387,7 +385,7 @@ R.eq(cs._conversation_id, old_id, "1c-store: skip when need_new_conv=False")
 # Test: effective_branch is stored, NOT raw branch
 reset("old-c", "idle", "test/r", "code", "d4-pro", "")  # branch never set
 with cs._lock:
-    cs._conversation_id = None  # conv_done
+    cs._conversation_id = None  # simulate error recovery
 simulate_phase1c(True, "new-c", "test/r", "main", "code", "d4-flash")
 R.eq(cs._conversation_branch, "main", "1c-store: effective_branch='main' stored, not raw ''")
 
@@ -969,8 +967,8 @@ print("=" * 70)
 
 # Simulate:
 # Turn 1: First message → new conv → events → response
-# conv_done triggers after completion
-# Turn 2: Second message → conv_done → new conv → events → response
+# conv is REUSED for subsequent turns (no conv_done — DeepSeek caching)
+# Turn 2: Second message → reuse conv → events → response
 
 # Turn 1 setup
 reset(None, "idle", "", "", "", "")
@@ -990,7 +988,8 @@ R.eq(cs._last_event_timestamp, "", "lifecycle-1c: ts reset")
 evts = [EventFactory.action("read", "agent", "t1-e1"),
         EventFactory.action("edit", "agent", "t1-e2"),
         EventFactory.msg_text("Turn 1 response", "agent", "t1-m1")]
-msgs, stats, _, _ = simulate_event_dedup(evts)
+with cs._lock:
+    msgs, stats, _, _ = simulate_event_dedup(evts, cs._seen_event_ids, cs._seen_event_hashes)
 R.eq(stats["added"], 3, "lifecycle-events: 3 events added")
 R.eq(len(msgs), 1, "lifecycle-events: 1 response msg")
 R.eq(msgs[0], "Turn 1 response", "lifecycle-events: correct response")
@@ -1000,37 +999,36 @@ with cs._lock:
     cs._conversation_status = "idle"
     cs._last_event_timestamp = "1719000000500"
 
-# Turn 2: User sends another message
-# Phase 1a: conv_done should trigger
+# Turn 2: User sends another message — conv is REUSED (no conv_done)
 p1a2 = simulate_phase1a("test/r", "code", "main", "d4-flash")
-R.eq(p1a2["action"], "conv_done", "lifecycle-2a: conv_done fires")
+R.eq(p1a2["action"], "reuse", "lifecycle-2a: reuse conv (no conv_done)")
+R.eq(cs._conversation_id, "turn1-conv", "lifecycle-2a: conv id unchanged")
 
-# Simulate conv_done action
+# No Phase 1c state change — conv is reused as-is
+# (no _conversation_id reset, no seen_event_ids clear)
+R.eq(cs._conversation_id, "turn1-conv", "lifecycle-2c: conv still turn1-conv")
+R.eq(cs._last_event_timestamp, "1719000000500", "lifecycle-2c: ts preserved")
+
+# Turn 2 events (new IDs — not in seen_event_ids from turn 1)
 with cs._lock:
-    cs._conversation_id = None
-
-# Phase 1c: store new conv
-simulate_phase1c(True, "turn2-conv", "test/r", "main", "code", "d4-flash")
-R.ne(cs._conversation_id, "turn1-conv", "lifecycle-2c: new conv id")
-R.eq(cs._conversation_id, "turn2-conv", "lifecycle-2c: turn2 conv stored")
-R.eq(cs._last_event_timestamp, "", "lifecycle-2c: ts reset for turn2")
-R.eq(len(cs._seen_event_ids), 0, "lifecycle-2c: seen_ids empty for turn2")
-
-# Turn 2 events (completely different IDs, no dedup)
+    seen_before = len(cs._seen_event_ids)
 evts2 = [EventFactory.action("browser", "agent", "t2-e1"),
          EventFactory.msg_text("Turn 2 response", "agent", "t2-m1")]
-msgs2, stats2, _, _ = simulate_event_dedup(evts2)
-R.eq(stats2["added"], 2, "lifecycle-2-events: 2 events added")
+with cs._lock:
+    msgs2, stats2, _, _ = simulate_event_dedup(evts2, cs._seen_event_ids, cs._seen_event_hashes)
+R.eq(stats2["added"], 2, "lifecycle-2-events: 2 new events added (no dedup)")
 R.eq(len(msgs2), 1, "lifecycle-2-events: 1 response")
 R.eq(msgs2[0], "Turn 2 response", "lifecycle-2-events: correct response")
+with cs._lock:
+    R.eq(len(cs._seen_event_ids), seen_before + 2, "lifecycle-2-events: seen_ids grew by 2")
 
-# Turn 3: Same scenario, with different model
+# Turn 3: Same scenario, same model → reuse
 with cs._lock:
     cs._conversation_status = "idle"
 p1a3 = simulate_phase1a("test/r", "code", "main", "d4-flash")
-R.eq(p1a3["action"], "conv_done", "lifecycle-3a: conv_done with same model")
+R.eq(p1a3["action"], "reuse", "lifecycle-3a: reuse (no conv_done)")
 
-# Now test model change
+# Now test model change → ctx_changed
 p1a3b = simulate_phase1a("test/r", "code", "main", "d4-pro")
 R.eq(p1a3b["action"], "ctx_changed", "lifecycle-3b: model change → ctx_changed")
 
@@ -1044,7 +1042,7 @@ with cs._lock:
     cs._conversation_llm_model = "d4-pro"
     cs._conversation_branch = "main"
 
-# Batch processing should NOT trigger conv_done or ctx_changed for model
+# Batch processing reuses conv (no conv_done, model change ignored in batch)
 p1a_batch = simulate_phase1a("test/r", "code", "main", "d4-flash", from_batch=True)
 R.eq(p1a_batch["action"], "reuse", "lifecycle-batch: batch reuses conv (model change ignored)")
 R.eq(p1a_batch["model_changed"], False, "lifecycle-batch: model_changed=False in batch")
@@ -1190,12 +1188,11 @@ R.eq(test_enabled, False, "flutter-prefs: test_enabled defaults to False")
 # SECTION 15: _seen_event_ids growth management
 # ============================================================
 print("\n" + "=" * 70)
-print("SECTION 15: _seen_event_ids growth management")
+print("SECTION 15: _seen_event_ids with conversation reuse")
 print("=" * 70)
 
-# _seen_event_ids is a set that grows with each event. Never cleared between
-# conv_done cycles (conv_done clears it). Check that it doesn't grow unbounded
-# when conv is reused many times without conv_done.
+# With conv_done removed, _seen_event_ids is NOT cleared between tasks.
+# It grows across tasks in the same conversation. Verify dedup still works.
 
 reset("c1", "running", "test/r", "code", "d4-pro", "main")
 with cs._lock:
@@ -1205,31 +1202,33 @@ with cs._lock:
 R.eq(len(cs._seen_event_ids), 500, "growth: 500 seen ids")
 R.eq(len(cs._seen_event_hashes), 500, "growth: 500 seen hashes")
 
-# conv_done should clear all
+# Phase 1a: conv is reused (no conv_done) — seen_ids stay
 with cs._lock:
     cs._conversation_status = "idle"
 p1a = simulate_phase1a("test/r", "code", "main", "d4-pro")
-R.eq(p1a["action"], "conv_done", "growth: conv_done fires with 500 ids")
+R.eq(p1a["action"], "reuse", "growth: reuse (no conv_done)")
+R.eq(len(cs._seen_event_ids), 500, "growth: seen_ids preserved across reuse")
 
-# After conv_done
-with cs._lock:
-    cs._conversation_id = None
-R.eq(cs._conversation_id, None, "growth: conv cleared")
-# _seen_event_ids is NOT cleared here (would be done in Phase 1c or the conv_done block)
-# Check: does my conv_done code clear _seen_event_ids? YES at line 786-789.
-# Let me verify the actual code:
-with cs._lock:
-    # Simulate what conv_done block does
-    cs._conversation_id = None
-    cs._last_event_index = 0
-    cs._last_event_timestamp = ""
-    cs._seen_event_ids.clear()
-    cs._seen_event_hashes.clear()
-    cs._sandbox_id = None
-    cs._event_kinds.clear()
+# Simulate dedup with some OLD (already seen) and some NEW events
+old_events = [{"id": f"evt-{i}", "source": "agent", "type": "message"} for i in range(100)]
+new_events = [{"id": f"new-evt-{i}", "source": "agent", "type": "message"} for i in range(50)]
+total_before = len(cs._seen_event_ids)
+added_old, skipped_old = 0, 0
+for e in old_events:
+    if e["id"] not in cs._seen_event_ids:
+        cs._seen_event_ids.add(e["id"])
+        added_old += 1
+added_new, skipped_new = 0, 0
+for e in new_events:
+    if e["id"] not in cs._seen_event_ids:
+        cs._seen_event_ids.add(e["id"])
+        added_new += 1
+R.eq(added_old, 0, "growth: 0 old events re-added (dedup works)")
+R.eq(added_new, 50, "growth: 50 new events added")
+R.eq(len(cs._seen_event_ids), total_before + 50, "growth: seen_ids = 550")
 
-R.eq(len(cs._seen_event_ids), 0, "growth: seen_ids cleared by conv_done")
-R.eq(len(cs._seen_event_hashes), 0, "growth: seen_hashes cleared by conv_done")
+# Verify _seen_event_hashes also preserved
+R.eq(len(cs._seen_event_hashes), 500, "growth: seen_hashes preserved")
 
 
 # ============================================================

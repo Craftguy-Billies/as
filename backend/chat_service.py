@@ -767,35 +767,16 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                     _conversation_llm_model or "(none)", current_model,
                     _from_batch, model_changed, ctx_changed, branch_switched,
                     _conversation_id is None, _conversation_status)
-        # Force new conversation if the previous one has completed — reusing a
-        # finished conversation can cause stale/dedup'd events, duplicate
-        # assistant responses, context-limit exhaustion, and the AI getting
-        # confused by old conversation history. A fresh conversation per task
-        # is the correct behavior for all edge cases (timeouts, long convs,
-        # user switching tasks explicitly).
+        # Reuse the same conversation across tasks so DeepSeek's prompt
+        # caching works (shared prefix = cached = ~90% cheaper). Only create
+        # a new conversation when forced by error/timeout recovery (which
+        # already sets _conversation_id = None) or context change (repo/mode/
+        # model switch). Do NOT force a new conv on normal completion — that
+        # would burn uncached tokens on every task.
         #
-        # NOTE: the ONLY downside is that _create_conversation's boilerplate
-        # tells the AI to "review relevant files" which can cause it to
-        # continue old workspace tasks. We fix that by CHANGING the boilerplate
-        # (see _create_conversation) instead of removing conv_done.
-        conv_done = (
-            _conversation_id is not None
-            and _conversation_status == "idle"
-            and not ctx_changed
-            and not branch_switched
-            and not _from_batch
-        )
-        if conv_done:
-            logger.info("Conversation %s completed — forcing new conversation (status=%s)",
-                        _conversation_id, _conversation_status)
-            _conversation_id = None
-            _last_event_index = 0
-            _last_event_timestamp = ""
-            _seen_event_ids.clear()
-            _seen_event_hashes.clear()
-            _sandbox_id = None
-            _event_kinds.clear()
-            _persist_to_db()
+        # The stale-conv check in _process_batch_worker handles the case
+        # where a NEW batch finds an idle conversation from a PREVIOUS
+        # server session (which may be too large to reuse).
         if ctx_changed:
             logger.info("Context changed: repo='%s'→'%s' mode='%s'→'%s' model='%s'→'%s'",
                         _conversation_repo or '(none)', repo or '(none)',
