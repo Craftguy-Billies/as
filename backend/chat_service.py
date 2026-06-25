@@ -1867,6 +1867,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 timeout, len(_msgs()))
 
     poll_count = 0
+    _completed_normally = False  # True only if loop exits via "completed"/"finished"
     while time.time() - start < timeout:
         time.sleep(3)
 
@@ -2119,6 +2120,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
         if status in ("completed", "finished"):
             _conversation_status = "idle"
+            _completed_normally = True
             logger.info("Conversation %s: finished. Kinds=%s new_msgs=%d total_msgs=%d "
                         "with_id=%d no_id=%d skipped=%d added=%d seen_ids=%d seen_hashes=%d",
                         _conversation_id,
@@ -2290,6 +2292,30 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 })
 
     _conversation_status = "idle"
+    # CRITICAL: on timeout (not completed, not failed), do NOT return partial
+    # MessageEvent text — that's the "half-cut response" bug. Phase 3 would
+    # save it as the final assistant message, making the user think the AI
+    # finished when it actually timed out mid-work.
+    # Also reset _conversation_id so the NEXT send() creates a fresh
+    # conversation (even batch workers that skip conv_done via _from_batch).
+    if not _completed_normally and all_new_msgs:
+        elapsed = int(time.time() - start)
+        logger.warning("Timeout (%ds) with %d accumulated msgs — DISCARDING partial response (prevents half-cut bug)",
+                       elapsed, len(all_new_msgs))
+        all_new_msgs.clear()
+        # Reset conversation so next send creates a fresh one
+        with _lock:
+            _conversation_id = None
+            _last_event_index = 0
+            _last_event_timestamp = ""
+            _sandbox_id = None
+            _persist_to_db()
+        _msgs().append({"id": _next_msg_id(), 
+            "role": "event",
+            "content": f"[TIMEOUT] Agent did not finish within {elapsed}s. Next message starts a fresh conversation.",
+            "kind": "SystemEvent",
+            "timestamp": int(time.time() * 1000),
+        })
     # AUDIT: log final state before returning
     tool_count = sum(1 for m in _msgs() if m.get("role") == "event" and m.get("kind") not in ("SystemEvent",))
     status_count = sum(1 for m in _msgs() if m.get("role") == "event" and m.get("kind") == "SystemEvent")
