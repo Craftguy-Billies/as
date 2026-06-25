@@ -2162,6 +2162,17 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                         len(_msgs()),
                         with_id, no_id, skipped, added,
                         len(_seen_event_ids), len(_seen_event_hashes))
+            # CRITICAL: even if no MessageEvent found (race condition where
+            # final message isn't indexed yet), do NOT reset _conversation_id.
+            # The zip fallback below tries recovery. If zip also fails, the
+            # next send() reuses the same conversation — _send_message() gets
+            # 409 (sandbox paused), _resume_sandbox() wakes it, retry succeeds.
+            # This preserves DeepSeek caching (same conv = cached prefix).
+            # Only create a new conv if the 409 recovery itself fails.
+            if not all_new_msgs:
+                logger.warning("COMPLETED_NO_MSG: conv=%s status=%s new_msgs=0 seen_ids=%d — "
+                               "keeping conv for zip fallback + next send",
+                               _conversation_id, status, len(_seen_event_ids))
             break
         elif status in ("failed", "error", "stopped"):
             _conversation_status = "idle"
@@ -2306,34 +2317,27 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     # MessageEvent text — that's the "half-cut response" bug. Phase 3 would
     # save it as the final assistant message, making the user think the AI
     # finished when it actually timed out mid-work.
-    # Also reset _conversation_id so the NEXT send() creates a fresh
-    # conversation instead of reusing a "running" conv (which causes silent
-    # failures — send-message to a running conv either queues or errors).
+    #
+    # Do NOT reset _conversation_id here. The conversation is still "running"
+    # on the Cloud. The next send() reuses it — _send_message() queues a new
+    # message or gets 409 → resume → retry. Either way: SAME conversation →
+    # DeepSeek caching preserved → cheap. Only create a new conv if the
+    # 409 recovery itself fails (handled in send() recovery path).
     if not _completed_normally:
         elapsed = int(time.time() - start)
         if all_new_msgs:
-            logger.warning("TIMEOUT_CLEANUP (%ds): discarding %d partial msgs + resetting conv=%s (status=%s)",
-                           elapsed, len(all_new_msgs), _conversation_id, last_status)
+            logger.warning("TIMEOUT_CLEANUP (%ds): discarding %d partial msgs, conv=%s NOT reset (kept for caching)",
+                           elapsed, len(all_new_msgs), _conversation_id)
             all_new_msgs.clear()
         else:
-            logger.warning("TIMEOUT_CLEANUP (%ds): no partial msgs, resetting conv=%s (status=%s last_status=%s "
-                           "events=%d seen_ids=%d completed=%s)",
+            logger.warning("TIMEOUT_CLEANUP (%ds): no partial msgs, conv=%s NOT reset (kept for caching). "
+                           "status=%s last_status=%s events=%d seen_ids=%d completed=%s",
                            elapsed, _conversation_id, _conversation_status, last_status,
                            len(all_events) if 'all_events' in dir() else -1,
                            len(_seen_event_ids), _completed_normally)
-        # Reset conversation so next send creates a fresh one
-        with _lock:
-            _conversation_id = None
-            _last_event_index = 0
-            _last_event_timestamp = ""
-            _sandbox_id = None
-            _seen_event_ids.clear()
-            _seen_event_hashes.clear()
-            _event_kinds.clear()
-            _persist_to_db()
         _msgs().append({"id": _next_msg_id(), 
             "role": "event",
-            "content": f"[TIMEOUT] Agent did not finish within {elapsed}s. Next message starts a fresh conversation.",
+            "content": f"[TIMEOUT] Agent did not finish within {elapsed}s. The agent may still be running — try 'continue'.",
             "kind": "SystemEvent",
             "timestamp": int(time.time() * 1000),
         })
