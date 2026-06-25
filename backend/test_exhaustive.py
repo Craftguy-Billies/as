@@ -700,12 +700,14 @@ for text in MUST_NOT_MATCH:
 print("\n--- Task tracker filter: simulate Phase 3 application ---")
 
 def simulate_phase3_filter(response):
-    """Simulate Phase 3 task_tracker filter."""
+    """Simulate Phase 3 task_tracker filter (mirrors production regex)."""
     if not response or not response.strip():
         return ""
     stripped = response.strip()
-    TASK_PAT = r'(?i)(tasks?\s+(?:(?:list\s+)?(?:has\s+been\s+|have\s+been\s+|was\s+|were\s+)|list\s+)updated)'
-    if re.search(TASK_PAT, stripped):
+    # Production uses re.fullmatch to ensure ONLY task_tracker output matches
+    # (not legitimate AI responses that mention task updates).
+    TASK_PAT = r'(?i)(?:(?:task\s+list)|tasks)\s+(?:(?:has\s+been\s+|have\s+been\s+|was\s+|were\s+)|list\s+)?updated\s*(?:with\s+(?:\d+|N)\s+item(?:\(s\)|s)?)?\.?\s*'
+    if re.fullmatch(TASK_PAT, stripped):
         return ""  # filtered
     return stripped
 
@@ -715,6 +717,9 @@ R.eq(simulate_phase3_filter("Tasks have been updated."), "", "filter-tasks-updat
 # Should NOT filter
 R.eq(simulate_phase3_filter("Here's the Flutter app."), "Here's the Flutter app.", "filter-real")
 R.eq(simulate_phase3_filter("The code has been updated."), "The code has been updated.", "filter-code-update")
+R.eq(simulate_phase3_filter("task has been updated in the database"), "task has been updated in the database", "filter-no-false-positive")
+R.eq(simulate_phase3_filter("I can see the task list has been updated"), "I can see the task list has been updated", "filter-no-substring")
+R.eq(simulate_phase3_filter("Your task has been updated to completed."), "Your task has been updated to completed.", "filter-no-task-verb")
 
 
 # ============================================================

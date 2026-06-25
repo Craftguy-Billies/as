@@ -1037,14 +1037,17 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             # returns the tool's output text as a MessageEvent. Detect and discard.
             if response and response.strip():
                 stripped = response.strip()
-                # Common patterns: "Task list has been updated with N item(s)."
-                # "Tasks have been updated." "Task list updated."
-                # "task list has been updated with 6 item(s). task list..."
-                # Catch all variations of task_tracker plan output.
-                # Require either "list" OR an auxiliary verb (has/have/was/were)
-                # followed by "updated" — this avoids false matches on generic
-                # phrases like "Task updated successfully" or "code updated".
-                if re.search(r'(?i)(tasks?\s+(?:(?:list\s+)?(?:has\s+been\s+|have\s+been\s+|was\s+|were\s+)|list\s+)updated)', stripped):
+                # Task_tracker outputs are EXACT tool outputs (entire response),
+                # never a substring of a legitimate AI answer. Use fullmatch to
+                # avoid discarding responses that merely MENTION task updates.
+                # Patterns: "Task list has been updated with N item(s)."
+                #           "Tasks have been updated."  "task list updated"
+                # Require either "list" after "task" OR plural "tasks"
+                # plus optional aux verb and optional item count.
+                if stripped and re.fullmatch(
+                    r'(?i)(?:(?:task\s+list)|tasks)\s+(?:(?:has\s+been\s+|have\s+been\s+|was\s+|were\s+)|list\s+)?updated\s*(?:with\s+(?:\d+|N)\s+item(?:\(s\)|s)?)?\.?\s*',
+                    stripped
+                ):
                     logger.warning("Phase 3: discarding task_tracker output (%.80s...) source=%s",
                                    stripped[:80], _response_source)
                     response = ""
