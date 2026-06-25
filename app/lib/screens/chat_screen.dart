@@ -30,6 +30,7 @@ class _ChatScreenState extends State<ChatScreen> {
   String _activeModel = '';
   bool _showScrollToBottom = false;  // FAB visible when scrolled up
   bool _implementChecked = false;  // "Implement" checkbox — appends audit guard paragraph
+  bool _testChecked = false;       // "Test & Debug" checkbox — appends test prompt
 
   String _lastRepo = '';  // track repo changes to auto-clear branch
 
@@ -161,10 +162,11 @@ class _ChatScreenState extends State<ChatScreen> {
       debugPrint('[ChatScreen._init] └──────────────────────────────────────────────────');
     }
 
-    // Load model preference
+    // Load model preference + test checkbox state
     try {
       final sp = await SharedPreferences.getInstance();
       setState(() => _activeModel = sp.getString('last_model') ?? '');
+      setState(() => _testChecked = sp.getBool('test_enabled') ?? false);
     } catch (e) {
       debugPrint('[ChatScreen._init] model load error: $e');
     }
@@ -224,6 +226,16 @@ class _ChatScreenState extends State<ChatScreen> {
       text += "\n\n===============================================================\n"
           "$implementPrompt";
     }
+    // Append "Test & Debug" prompt when checkbox is checked.
+    // Reads from PreferencesService (user-editable in settings, per-device).
+    // Default is empty — user writes their own test/debug instructions.
+    if (_testChecked) {
+      final testPrompt = context.read<PreferencesService>().testPrompt;
+      if (testPrompt.isNotEmpty) {
+        text += "\n\n===============================================================\n"
+            "$testPrompt";
+      }
+    }
 
     final repo = _repoCtrl.text.trim();
     if (repo.isEmpty) {
@@ -257,7 +269,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final branch = _branchCtrl.text.trim().isEmpty ? 'main' : _branchCtrl.text.trim();
     final prov = context.read<ChatProvider>();
 
-    debugPrint('[ChatScreen._send] repo=$repo branch=$branch mode=code implement=$_implementChecked');
+    debugPrint('[ChatScreen._send] repo=$repo branch=$branch mode=code implement=$_implementChecked test=$_testChecked');
     prov.send(text, repo: repo, branch: branch, mode: 'code');
   }
 
@@ -836,6 +848,40 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                   ),
                 ),
+                const SizedBox(width: 12),
+                // "Test & Debug" checkbox — appends test prompt
+                SizedBox(
+                  height: 20,
+                  width: 20,
+                  child: Checkbox(
+                    value: _testChecked,
+                    onChanged: (v) {
+                      setState(() => _testChecked = v ?? false);
+                      // Persist immediately so state survives app restart
+                      context.read<PreferencesService>().setTestEnabled(v ?? false);
+                    },
+                    activeColor: const Color(0xFF7C3AED),
+                    checkColor: Colors.white,
+                    side: const BorderSide(color: Color(0xFF4A4A5E), width: 1.5),
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                GestureDetector(
+                  onTap: () {
+                    final newVal = !_testChecked;
+                    setState(() => _testChecked = newVal);
+                    context.read<PreferencesService>().setTestEnabled(newVal);
+                  },
+                  child: Text(
+                    'Test',
+                    style: TextStyle(
+                      color: _testChecked ? const Color(0xFFA78BFA) : Colors.grey[500],
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
@@ -1352,7 +1398,7 @@ class _AiWorkGroupState extends State<_AiWorkGroup> {
       if (c.startsWith('[ERROR]')) return 'error';
       if (c.startsWith('[SEARCH]')) return 'search';
       if (c.startsWith('[FILE]')) return 'file';
-      return 'task';
+      return 'event';
     }).toSet().join(' · ');
     final hasResponse = response != null && response.content.trim().isNotEmpty;
 

@@ -16,6 +16,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _gitNameCtrl = TextEditingController();
   final _gitEmailCtrl = TextEditingController();
   final _implementCtrl = TextEditingController();
+  final _testCtrl = TextEditingController();
   String _selectedModel = 'deepseek/deepseek-v4-flash';
   Timer? _urlDebounce;
 
@@ -26,6 +27,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _gitNameCtrl.dispose();
     _gitEmailCtrl.dispose();
     _implementCtrl.dispose();
+    _testCtrl.dispose();
     super.dispose();
   }
 
@@ -55,6 +57,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // Pre-populate implement prompt from local prefs
     if (_implementCtrl.text.isEmpty) {
       _implementCtrl.text = context.read<PreferencesService>().implementPrompt;
+    }
+    // Pre-populate test prompt from local prefs (default empty)
+    if (_testCtrl.text.isEmpty) {
+      _testCtrl.text = context.read<PreferencesService>().testPrompt;
     }
 
     // Pre-populate model selection from server state (only when default = first build)
@@ -250,6 +256,54 @@ class _SettingsScreenState extends State<SettingsScreen> {
             },
             icon: const Icon(Icons.save),
             label: const Text('Save Implement Prompt'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF7C3AED),
+              foregroundColor: Colors.white,
+            ),
+          ),
+
+          const SizedBox(height: 32),
+
+          // Test & Debug Prompt
+          _SectionTitle(title: 'Test & Debug Prompt'),
+          const SizedBox(height: 8),
+          Text(
+            'When the "Test" checkbox is checked, this prompt is appended '
+            'to each message. Leave blank to disable. Customize per-device.',
+            style: TextStyle(color: Colors.grey[600], fontSize: 12),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _testCtrl,
+            maxLines: 6,
+            style: const TextStyle(color: Colors.white, fontSize: 13),
+            decoration: InputDecoration(
+              hintText: 'Enter test/debug instructions… (default: empty)',
+              hintStyle: TextStyle(color: Colors.grey[700], fontSize: 13),
+              filled: true,
+              fillColor: const Color(0xFF1A1A2E),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide.none,
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          ElevatedButton.icon(
+            onPressed: () async {
+              final prefs = context.read<PreferencesService>();
+              await prefs.setTestPrompt(_testCtrl.text.trim());
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Test prompt saved'),
+                    backgroundColor: Colors.green,
+                  ),
+                );
+              }
+            },
+            icon: const Icon(Icons.save),
+            label: const Text('Save Test Prompt'),
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFF7C3AED),
               foregroundColor: Colors.white,

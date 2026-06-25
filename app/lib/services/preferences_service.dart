@@ -7,6 +7,8 @@ class PreferencesService {
   static const _lastBranchKey = 'last_branch';
   static const _lastModeKey = 'last_mode';
   static const _implementPromptKey = 'implement_prompt';
+  static const _testPromptKey = 'test_prompt';
+  static const _testEnabledKey = 'test_enabled';
 
   late SharedPreferences _prefs;
 
@@ -34,6 +36,11 @@ class PreferencesService {
   /// Falls back to defaultImplementPrompt when never customized.
   String get implementPrompt => _prefs.getString(_implementPromptKey) ?? defaultImplementPrompt;
 
+  /// The test & debug prompt appended when the test checkbox is checked.
+  /// Default is empty string — user writes their own.
+  String get testPrompt => _prefs.getString(_testPromptKey) ?? '';
+  bool get testEnabled => _prefs.getBool(_testEnabledKey) ?? false;
+
   Future<void> setServerUrl(String url) async {
     await _prefs.setString(_serverUrlKey, url);
   }
@@ -56,6 +63,14 @@ class PreferencesService {
 
   Future<void> setImplementPrompt(String prompt) async {
     await _prefs.setString(_implementPromptKey, prompt);
+  }
+
+  Future<void> setTestPrompt(String prompt) async {
+    await _prefs.setString(_testPromptKey, prompt);
+  }
+
+  Future<void> setTestEnabled(bool enabled) async {
+    await _prefs.setBool(_testEnabledKey, enabled);
   }
 
   bool get hasServerUrl => _prefs.getString(_serverUrlKey)?.isNotEmpty == true;

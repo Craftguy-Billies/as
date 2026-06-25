@@ -14,6 +14,7 @@ import httpx
 import json
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone, timedelta
@@ -455,6 +456,14 @@ def get_state(repo: str = "", mode: str = "") -> dict:
             "modes": list(_batch_prompt_modes) if batch_repo_matches else [],
         }
         
+        # Include the model the current conversation was created with AND
+        # the currently configured model (may differ after a settings change).
+        from agent_runner import get_llm_config
+        try:
+            configured_model = get_llm_config().model
+        except Exception:
+            configured_model = ""
+        
         return {
             "messages": msgs,
             "conversation_id": _conversation_id,
@@ -466,6 +475,8 @@ def get_state(repo: str = "", mode: str = "") -> dict:
             "mode": _conversation_mode,
             "current_repo_key": _current_repo_key,
             "conversation_status": _conversation_status,
+            "llm_model": _conversation_llm_model,
+            "configured_model": configured_model,
             "batch": batch_info,
         }
 
@@ -747,11 +758,32 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
         )
         # AUDIT: log Phase 1a decision state
         logger.info("AUDIT 1a: conv=%s repo=%s mode=%s model=%s cur_model=%s "
-                    "from_batch=%s model_changed=%s ctx=%s branch_sw=%s need_new=%s",
+                    "from_batch=%s model_changed=%s ctx=%s branch_sw=%s need_new=%s conv_status=%s",
                     _conversation_id or "(none)", _conversation_repo, _conversation_mode,
                     _conversation_llm_model or "(none)", current_model,
                     _from_batch, model_changed, ctx_changed, branch_switched,
-                    _conversation_id is None)
+                    _conversation_id is None, _conversation_status)
+        # Force new conversation if the previous one has completed — reusing a
+        # finished conversation can cause stale/dedup'd events and duplicate
+        # assistant responses (issues #3-#5).
+        conv_done = (
+            _conversation_id is not None
+            and _conversation_status == "idle"
+            and not ctx_changed
+            and not branch_switched
+            and not _from_batch
+        )
+        if conv_done:
+            logger.info("Conversation %s completed — forcing new conversation (status=%s)",
+                        _conversation_id, _conversation_status)
+            _conversation_id = None
+            _last_event_index = 0
+            _last_event_timestamp = ""
+            _seen_event_ids.clear()
+            _seen_event_hashes.clear()
+            _sandbox_id = None
+            _event_kinds.clear()
+            _persist_to_db()
         if ctx_changed:
             logger.info("Context changed: repo='%s'→'%s' mode='%s'→'%s' model='%s'→'%s'",
                         _conversation_repo or '(none)', repo or '(none)',
@@ -955,7 +987,7 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     # and the AI produces the same text both times). Those ARE real responses.
     #
     # AUDIT: Determine response source for diagnostics.
-    # - events/search: response came from a new MessageEvent in the poll
+    # - events/search: response came from a new MessageEvent in the event poll
     # - zip: response came from trajectory zip fallback
     # - scrape: response came from _scrape_events_for_text (observation text)
     # - None: no response found
@@ -979,6 +1011,19 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                                         len(response), len(stripped), _response_source)
                             response = stripped
                     break  # only check the most recent assistant
+            # Filter out task_tracker tool output masquerading as assistant response.
+            # The AI uses task_tracker.plan() internally, and the Cloud API sometimes
+            # returns the tool's output text as a MessageEvent. Detect and discard.
+            if response and response.strip():
+                stripped = response.strip()
+                # Common patterns: "Task list has been updated with N item(s)."
+                # "Tasks have been updated." "Task list updated."
+                # "task list has been updated with 6 item(s). task list..."
+                # Catch all variations of task_tracker plan output.
+                if re.search(r'(?i)(tasks?\s+(list\s+)?(has\s+been\s+|have\s+been\s+|was\s+|were\s+)?updated)', stripped):
+                    logger.warning("Phase 3: discarding task_tracker output (%.80s...) source=%s",
+                                   stripped[:80], _response_source)
+                    response = ""
             if response:
                 resp_msg_id = _next_msg_id()
                 event_count_before = sum(1 for m in msgs if m.get("role") == "event")
