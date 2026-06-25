@@ -833,13 +833,14 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             _effective_prompt = prompt
             if conv_done and repo:
                 _effective_prompt = (
-                    "[PREVIOUS TASK COMPLETED — NEW REQUEST]\n"
-                    "The conversation is fresh. The workspace is at the latest state "
-                    "from the previous task. Read the workspace to understand context, "
-                    "then respond to the user's current message.\n\n"
-                    f"---\n\n{_effective_prompt}"
+                    "[NEW TASK — PREVIOUS WORK IS COMPLETE]\n"
+                    "This is a fresh, self-contained task. The workspace contains "
+                    "files from previous completed work — ignore them entirely.\n"
+                    "DO NOT continue, reference, or build upon any previous task.\n"
+                    "Your ONLY instruction is the user's message below. Start fresh.\n\n"
+                    f"{_effective_prompt}"
                 )
-            new_conv_id = _create_conversation(_effective_prompt, repo, branch, mode)
+            new_conv_id = _create_conversation(_effective_prompt, repo, branch, mode, fresh=conv_done)
             logger.info("Phase 1b: created conv=%s (repo=%s mode=%s model=%s seen_ids=%d)",
                         new_conv_id, repo, mode, current_model, len(_seen_event_ids))
         else:
@@ -1712,10 +1713,14 @@ def _parse_log_md(content: str) -> list[dict]:
 
 
 
-def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
+def _create_conversation(prompt: str, repo: str, branch: str, mode: str, fresh: bool = False) -> str:
     """Create a conversation via POST /api/v1/app-conversations (SAME as agent_runner).
 
     Returns the conversation_id. Raises on failure.
+    When fresh=True, the prompt is a self-contained fresh task — "
+    "review relevant files" boilerplate is skipped so the AI does not
+    explore old workspace context and instead responds directly to the
+    user message.
     """
     # Auto-detect default branch if repo given and branch is empty
     effective_branch = branch
@@ -1755,22 +1760,35 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
                 f"Task: {prompt}"
             )
     elif repo:
-        full_prompt = (
-            f"Repository: {repo} (branch: {effective_branch}).\n"
-            f"IMPORTANT: First run `git pull` to get the latest code. "
-            f"The repo's .git directory is NOT at /workspace directly — it's in "
-            f"a subdirectory like /workspace/project/<name>/. "
-            f"Run `cd /workspace && ls` to find it, then cd into the right dir "
-            f"and run `git pull origin {effective_branch}`.\n"
-            f"When implementing changes: review relevant files, make edits, "
-            f"commit with a descriptive message, and push.\n\n"
-            f"[SANDBOX] REPO RESTRICTION: You are confined to repository `{repo}`. "
-            f"You may switch branches within it freely, but you MUST NOT "
-            f"clone, fetch, push to, or interact with any other repository. "
-            f"All file edits, git operations, and commits must stay within "
-            f"`{repo}`.\n\n"
-            f"{prompt}"
-        )
+        if fresh:
+            # Fresh task — no "review relevant files" boilerplate.
+            # The AI must NOT explore the workspace; it responds directly
+            # to the self-contained prompt below.
+            full_prompt = (
+                f"Repository: {repo} (branch: {effective_branch}).\n"
+                f"[FRESH TASK — IGNORE WORKSPACE]\n"
+                f"Do NOT read any project files. Do NOT run git pull.\n"
+                f"Do NOT continue, reference, or build upon any previous work.\n"
+                f"The user's message below is a self-contained task. Start fresh.\n\n"
+                f"{prompt}"
+            )
+        else:
+            full_prompt = (
+                f"Repository: {repo} (branch: {effective_branch}).\n"
+                f"IMPORTANT: First run `git pull` to get the latest code. "
+                f"The repo's .git directory is NOT at /workspace directly — it's in "
+                f"a subdirectory like /workspace/project/<name>/. "
+                f"Run `cd /workspace && ls` to find it, then cd into the right dir "
+                f"and run `git pull origin {effective_branch}`.\n"
+                f"When implementing changes: review relevant files, make edits, "
+                f"commit with a descriptive message, and push.\n\n"
+                f"[SANDBOX] REPO RESTRICTION: You are confined to repository `{repo}`. "
+                f"You may switch branches within it freely, but you MUST NOT "
+                f"clone, fetch, push to, or interact with any other repository. "
+                f"All file edits, git operations, and commits must stay within "
+                f"`{repo}`.\n\n"
+                f"{prompt}"
+            )
     else:
         full_prompt = prompt
 
