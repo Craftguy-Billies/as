@@ -900,15 +900,38 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                                 new_conv_id, len(recent_user_msgs))
                     need_new_conv = True  # Phase 1c will store it
                 else:
-                    logger.warning("send_message failed (non-409): send_err=%s", send_err)
+                    logger.warning("send_message failed (non-409): send_err=%s — attempting recovery with new conversation", send_err)
+                    # Non-409 failures (timeout, model busy, sandbox gone) should
+                    # NOT kill the user's request. Create a fresh conversation and
+                    # retry. This handles cases where the old conversation is too
+                    # large (401+ msgs), the sandbox is cold, or the Cloud API is
+                    # slow to respond.
+                    recent_user_msgs = []
                     with _lock:
+                        for m in _msgs()[-6:]:
+                            role = m.get("role", "")
+                            if role == "user" and m.get("content"):
+                                recent_user_msgs.append(m["content"])
                         _conversation_id = None
                         _last_event_index = 0
                         _sandbox_id = None
                         _persist_to_db()
-                        if not _from_batch and _processing_repo == repo:
-                            _processing_repo = ""
-                    return {"error": send_err or "Failed to send message to conversation"}
+                    if recent_user_msgs:
+                        summarized = "; ".join(
+                            m[:200].replace("\n", " ") for m in recent_user_msgs
+                        )
+                        enhanced = (
+                            f"Previous user messages (from before timeout): {summarized}\n\n"
+                            f"---\n\n"
+                            f"{prompt}"
+                        )
+                        logger.info("AUDIT non-409-recovery: %d user msgs injected, prompt=%s",
+                                    len(recent_user_msgs), prompt[:80])
+                    else:
+                        enhanced = prompt
+                    new_conv_id = _create_conversation(enhanced, repo, branch, mode)
+                    logger.info("Recovered from non-409: created new conv=%s", new_conv_id)
+                    need_new_conv = True
     except httpx.HTTPStatusError as e:
         status_code = e.response.status_code
         logger.error("HTTP error: %s %s", status_code, e.response.text[:200])
@@ -1228,6 +1251,26 @@ def _process_batch_worker() -> None:
             # Send the prompt (this blocks — uses the same send() function)
             logger.info("Batch [%d/%d]: %.80s... repo=%s branch=%s mode=%s",
                         pos, total, prompt, repo, branch or '(default)', mode)
+
+            # CRITICAL: if this is the FIRST prompt in the batch and the old
+            # conversation is idle (completed by a PREVIOUS batch), force a
+            # fresh conversation. Without this guard, _from_batch=True prevents
+            # conv_done from triggering (line 786), so a stale conversation
+            # with 401+ messages gets reused and _send_message() times out.
+            if pos == 1:
+                with _lock:
+                    if _conversation_id is not None and _conversation_status == "idle":
+                        logger.info("Batch [%d/%d]: clearing stale conv=%s (idle from previous batch) "
+                                    "to force fresh conversation", pos, total, _conversation_id)
+                        _conversation_id = None
+                        _last_event_index = 0
+                        _last_event_timestamp = ""
+                        _sandbox_id = None
+                        _seen_event_ids.clear()
+                        _seen_event_hashes.clear()
+                        _event_kinds.clear()
+                        _persist_to_db()
+
             try:
                 result = send(prompt, repo=repo, branch=branch, mode=mode, _from_batch=True)
                 logger.info("Batch [%d/%d]: send() returned status=%s has_error=%s msgs=%d",
