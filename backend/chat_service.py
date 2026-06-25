@@ -817,7 +817,21 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
         if need_new_conv:
             logger.info("Phase 1b: creating new conversation for repo=%s branch=%s mode=%s model=%s",
                         repo, branch or '(empty)', mode, current_model)
-            new_conv_id = _create_conversation(prompt, repo, branch, mode)
+            # When conv_done triggered a fresh conversation, the AI may see
+            # leftover workspace files from the previous task and mistakenly
+            # resume old work instead of responding to the new prompt.
+            # Add an explicit "fresh start" instruction to prevent this.
+            _effective_prompt = prompt
+            if conv_done and repo:
+                _effective_prompt = (
+                    "[FRESH CONVERSATION — PREVIOUS TASK IS COMPLETE]\n"
+                    "The user is starting something new. Do NOT continue or "
+                    "reference the previous task. The workspace may contain "
+                    "files from past work — ignore them unless the user's "
+                    "current message explicitly asks about them.\n\n"
+                    f"---\n\n{_effective_prompt}"
+                )
+            new_conv_id = _create_conversation(_effective_prompt, repo, branch, mode)
             logger.info("Phase 1b: created conv=%s (repo=%s mode=%s model=%s seen_ids=%d)",
                         new_conv_id, repo, mode, current_model, len(_seen_event_ids))
         else:
