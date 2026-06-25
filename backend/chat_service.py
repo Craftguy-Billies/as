@@ -30,7 +30,6 @@ CLOUD_API_KEY = os.getenv("OPENHANDS_CLOUD_API_KEY", "")
 # -- Session state (persisted to DB, survives restart) --
 _conversation_id: str | None = None
 _conv_id_at_last_assistant: str | None = None  # conversation ID when last assistant msg was stored
-_task_complete: bool = False  # previous assistant response marked task as complete
 _conversation_repo: str = ""
 _conversation_branch: str = ""
 _conversation_mode: str = "code"
@@ -259,7 +258,7 @@ def _log_sync_to_github(repo: str, entries: list[dict]) -> None:
 
 # -- Restore state from DB on module load --
 def _restore_from_db() -> None:
-    global _conversation_id, _conv_id_at_last_assistant, _task_complete, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _messages_by_repo, _current_repo_key
+    global _conversation_id, _conv_id_at_last_assistant, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _messages_by_repo, _current_repo_key
     global _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_running, _batch_cancelled, _batch_skip_prompt
     global _msg_counter
     global _seen_event_ids, _seen_event_hashes
@@ -273,7 +272,6 @@ def _restore_from_db() -> None:
             data = json.loads(row[0])
             _conversation_id = data.get("conversation_id")
             _conv_id_at_last_assistant = data.get("conv_id_at_last_assistant")
-            _task_complete = data.get("task_complete", False)
             _conversation_repo = data.get("repo", "")
             _conversation_branch = data.get("branch", "")
             _conversation_mode = data.get("mode", "code")
@@ -332,7 +330,6 @@ def _persist_to_db() -> None:
         data = json.dumps({
             "conversation_id": _conversation_id,
             "conv_id_at_last_assistant": _conv_id_at_last_assistant,
-            "task_complete": _task_complete,
             "repo": _conversation_repo,
             "branch": _conversation_branch,
             "mode": _conversation_mode,
@@ -391,7 +388,7 @@ def _headers() -> dict:
 
 def reset() -> None:
     """Clear the current chat session AND cancel any running batch."""
-    global _conversation_id, _conv_id_at_last_assistant, _task_complete, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
+    global _conversation_id, _conv_id_at_last_assistant, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
     global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_skip_prompt
     with _lock:
         # Cancel running batch
@@ -407,7 +404,6 @@ def reset() -> None:
         # Reset conversation
         _conversation_id = None
         _conv_id_at_last_assistant = None
-        _task_complete = False
         _conversation_repo = ""
         _conversation_branch = ""
         _conversation_mode = "code"
@@ -766,15 +762,14 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
         )
         # AUDIT: log Phase 1a decision state
         logger.info("AUDIT 1a: conv=%s repo=%s mode=%s model=%s cur_model=%s "
-                    "from_batch=%s model_changed=%s ctx=%s branch_sw=%s need_new=%s conv_status=%s task_complete=%s",
+                    "from_batch=%s model_changed=%s ctx=%s branch_sw=%s need_new=%s conv_status=%s",
                     _conversation_id or "(none)", _conversation_repo, _conversation_mode,
                     _conversation_llm_model or "(none)", current_model,
                     _from_batch, model_changed, ctx_changed, branch_switched,
-                    _conversation_id is None, _conversation_status, _task_complete)
-        # When the previous task is complete, REUSE the same conversation but
-        # prepend a task-complete marker to the prompt so the AI knows this is
-        # a new request and does NOT continue the old task. This preserves the
-        # chat history for the user while preventing the "AI resumes old task" bug.
+                    _conversation_id is None, _conversation_status)
+        # The same conversation is reused across messages to preserve chat history.
+        # No automatic task-complete detection — that's unreliable (the AI may
+        # respond with "let me now..." without actually completing anything).
         if ctx_changed:
             logger.info("Context changed: repo='%s'→'%s' mode='%s'→'%s' model='%s'→'%s'",
                         _conversation_repo or '(none)', repo or '(none)',
@@ -816,23 +811,6 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             logger.info("Phase 1b: reusing conv=%s repo=%s mode=%s seen_ids=%d",
                         current_conv_id, repo, mode, len(_seen_event_ids))
             effective_prompt = prompt
-            # If the previous task is complete, prepend a clear task-complete marker
-            # so the AI treats this as a NEW request, not a continuation of the old task.
-            # The conversation is reused to preserve chat history (the user's messages
-            # and the AI's previous responses remain visible in the UI).
-            if _task_complete:
-                effective_prompt = (
-                    "[PREVIOUS TASK COMPLETE]\n"
-                    "\n"
-                    "The previous task is FINISHED and COMPLETE.\n"
-                    "Do NOT continue it. Do NOT reference it.\n"
-                    "The user's message below is a NEW, independent request.\n"
-                    "Respond to it directly.\n"
-                    "\n"
-                    "---\n"
-                    f"{effective_prompt}"
-                )
-                _task_complete = False
             # Inject git checkout + pull for the effective branch.
             # When user provides a branch: always checkout that branch (sandbox
             # may be on a different branch from last operation), then pull.
@@ -1064,7 +1042,6 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                     "timestamp": int(time.time() * 1000),
                 })
                 _conv_id_at_last_assistant = _conversation_id
-                _task_complete = True
                 _persist_to_db()
                 # AUDIT: log Phase 3 state
                 event_count_after = sum(1 for m in _msgs() if m.get("role") == "event")
