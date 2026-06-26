@@ -597,7 +597,7 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     global _last_event_timestamp, _sandbox_id, _processing_repo
     global _batch_running, _batch_repo, _batch_prompts, _batch_prompt_modes
     global _batch_position, _batch_total, _batch_cancelled, _batch_skip_prompt
-    global _current_repo_key
+    global _current_repo_key, _conversation_status, _last_completed_no_msg
 
     if not CLOUD_API_KEY:
         logger.error("send: CLOUD_API_KEY not configured")
