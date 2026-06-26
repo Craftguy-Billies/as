@@ -2314,47 +2314,64 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     # event indexing and the final status poll). The min_timestamp filter then
     # EXCLUDES the MessageEvent and we get COMPLETED_NO_MSG.
     #
-    # Fix: do ONE final events/search call with NO timestamp filter.
-    # Scan ALL returned events for any agent MessageEvent that isn't already
-    # in _seen_event_ids. This catches MessageEvents that were excluded by
-    # the min_timestamp race.
+    # Also: Cloud API may not have indexed the final assistant MessageEvent
+    # by the time status transitions to "finished". Retry with backoff to
+    # give the API time to index (same pattern as zip retry below).
     if last_status in ("completed", "finished") and not all_new_msgs:
-        try:
-            logger.info("DESPERATION_POLL: conv=%s ts=%s seen_ids=%d — retrying events/search WITHOUT min_timestamp",
-                        _conversation_id, _last_event_timestamp or "(none)", len(_seen_event_ids))
-            r_final = httpx.get(
-                f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
-                headers=_headers(),
-                params={"limit": 100},
-                timeout=10,
-            )
-            r_final.raise_for_status()
-            fd = r_final.json()
-            final_events = (
-                fd if isinstance(fd, list)
-                else fd.get("items") or fd.get("events") or fd.get("data") or fd.get("results") or []
-            )
-            for evt in reversed(final_events):
-                if evt.get("kind") != "MessageEvent" or evt.get("source") == "user":
-                    continue
-                eid = evt.get("id", "")
-                if eid and eid in _seen_event_ids:
-                    continue
-                msg_text = _extract_message_text(evt)
-                if msg_text:
-                    logger.info("DESPERATION_POLL: FOUND assistant MessageEvent! len=%d ts=%s",
-                                len(msg_text), evt.get("timestamp", 0))
-                    all_new_msgs = [msg_text]
-                    _last_response_source = "events/search"
-                    # Register dedup now that extraction succeeded
-                    if eid:
-                        _seen_event_ids.add(eid)
+        for dp_attempt in range(3):
+            try:
+                if dp_attempt > 0:
+                    backoff = 2 ** dp_attempt  # 2s, 4s
+                    logger.info("DESPERATION_POLL attempt %d/3: waiting %ds before retry",
+                                dp_attempt + 1, backoff)
+                    time.sleep(backoff)
+                logger.info("DESPERATION_POLL attempt %d/3: conv=%s ts=%s seen_ids=%d",
+                            dp_attempt + 1, _conversation_id, _last_event_timestamp or "(none)", len(_seen_event_ids))
+                r_final = httpx.get(
+                    f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
+                    headers=_headers(),
+                    params={"limit": 100},
+                    timeout=10,
+                )
+                r_final.raise_for_status()
+                fd = r_final.json()
+                final_events = (
+                    fd if isinstance(fd, list)
+                    else fd.get("items") or fd.get("events") or fd.get("data") or fd.get("results") or []
+                )
+                found = False
+                for evt in reversed(final_events):
+                    if evt.get("kind") != "MessageEvent" or evt.get("source") == "user":
+                        continue
+                    eid = evt.get("id", "")
+                    if eid and eid in _seen_event_ids:
+                        continue
+                    msg_text = _extract_message_text(evt)
+                    if msg_text:
+                        logger.info("DESPERATION_POLL attempt %d/3: FOUND assistant MessageEvent! len=%d ts=%s",
+                                    dp_attempt + 1, len(msg_text), evt.get("timestamp", 0))
+                        all_new_msgs = [msg_text]
+                        _last_response_source = "events/search"
+                        if eid:
+                            _seen_event_ids.add(eid)
+                        found = True
+                        break
+                if found:
                     break
-            if not all_new_msgs:
-                logger.info("DESPERATION_POLL: no MessageEvent found in %d events (seen_ids=%d)",
-                            len(final_events), len(_seen_event_ids))
-        except Exception as e:
-            logger.warning("DESPERATION_POLL error: %s", e)
+                logger.info("DESPERATION_POLL attempt %d/3: no agent MessageEvent in %d events (seen_ids=%d)",
+                            dp_attempt + 1, len(final_events), len(_seen_event_ids))
+                # Log event kinds to help debug
+                _kinds_in_poll = {e.get("kind", "?") for e in final_events}
+                _agent_msgs = [e for e in final_events if e.get("kind") == "MessageEvent" and e.get("source") != "user"]
+                if _agent_msgs:
+                    logger.warning("DESPERATION_POLL attempt %d/3: %d agent MessageEvent(s) found but ALL skipped (seen_ids or empty text). "
+                                   "First agent msg keys: %s",
+                                   dp_attempt + 1, len(_agent_msgs), list(_agent_msgs[0].keys()))
+                else:
+                    logger.info("DESPERATION_POLL attempt %d/3: event kinds=%s (no agent MessageEvent at all)",
+                                dp_attempt + 1, sorted(_kinds_in_poll))
+            except Exception as e:
+                logger.warning("DESPERATION_POLL attempt %d/3 error: %s", dp_attempt + 1, e)
 
     # --- ZIP FALLBACK with retry ---
     # If both the main poll AND desperation poll failed, try the trajectory
