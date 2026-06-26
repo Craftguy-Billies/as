@@ -36,6 +36,8 @@ _conversation_mode: str = "code"
 _conversation_llm_model: str = ""  # model used when current Cloud conversation was created
 _last_event_index: int = 0
 _last_event_timestamp: str = ""  # timestamp of last seen event for min_timestamp filtering
+_forced_min_timestamp: str | None = None  # set by PAGINATION_DEADLOCK to force-skip same-ts events
+_stuck_polls: int = 0  # consecutive polls where all events were dedup-skipped
 _sandbox_id: str | None = None
 _event_kinds: set[str] = set()  # diagnostic: all event kinds seen in current conversation
 _seen_event_ids: set[str] = set()  # dedup: event IDs already added to chat
@@ -1983,7 +1985,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
     Timeout: VIBECODE_CHAT_TIMEOUT env var (default 7200s = 2 hours).
     """
-    global _last_event_index, _last_event_timestamp, _conversation_status, _sandbox_id, _last_response_source
+    global _last_event_index, _last_event_timestamp, _conversation_status, _sandbox_id, _last_response_source, _forced_min_timestamp, _stuck_polls
     global _conversation_id, _seen_event_ids, _seen_event_hashes, _event_kinds
     global _last_completed_no_msg
 
@@ -2076,8 +2078,10 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         all_events: list = []
         try:
             params: dict = {"limit": 100}
-            if _last_event_timestamp:
-                params["min_timestamp"] = _last_event_timestamp
+            # Use forced timestamp if set (PAGINATION_DEADLOCK bypass), else normal
+            _ts_to_use = _forced_min_timestamp or _last_event_timestamp
+            if _ts_to_use:
+                params["min_timestamp"] = _ts_to_use
             r2 = httpx.get(
                 f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
                 headers=_headers(),
@@ -2242,33 +2246,36 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         # timestamp (e.g. agent generated 100+ tool events in <1ms), the
         # min_timestamp filter keeps returning the same 100 events forever
         # because _last_event_timestamp never advances past the batch.
-        # Detect this: if ALL events were dedup-skipped and timestamp didn't
-        # change, we're stuck. Artificially bump the timestamp by 1µs to
-        # skip past the current batch and reach the actual new events.
-        if all_events and skipped > 0 and skipped == len(all_events):
-            _same_ts = (_last_event_timestamp == getattr(_wait_for_response, '_prev_ts', ''))
-            if _same_ts:
-                _stuck_count = getattr(_wait_for_response, '_stuck_count', 0) + 1
-                _wait_for_response._stuck_count = _stuck_count
-                if _stuck_count >= 3:
-                    # Bump timestamp by 1µs to break the pagination deadlock
-                    import re as _ts_re
-                    _ts_match = _ts_re.search(r'(\d+)$', _last_event_timestamp)
-                    if _ts_match:
-                        _digits = _ts_match.group(1)
-                        _bumped = str(int(_digits) + 1).zfill(len(_digits))
-                        _old_ts = _last_event_timestamp
-                        _last_event_timestamp = _last_event_timestamp[:_ts_match.start(1)] + _bumped
-                        logger.warning("PAGINATION_DEADLOCK: ts=%s stuck for %d polls — bumping to %s",
-                                       _old_ts, _stuck_count, _last_event_timestamp)
-                        _wait_for_response._stuck_count = 0
-            else:
-                _wait_for_response._stuck_count = 0
-            _wait_for_response._prev_ts = _last_event_timestamp
+        # Detect this: if ALL events were dedup-skipped AND total msgs count
+        # didn't increase, we're stuck on the same batch.
+        if all_events and added == 0 and skipped == len(all_events) and processed_count == 0:
+            _stuck_polls = (_stuck_polls or 0) + 1
+            if _stuck_polls >= 3 and _forced_min_timestamp is None:
+                # Bump min_timestamp by 1 SECOND to skip past the entire
+                # same-timestamp batch. 1µs was too small (API may truncate
+                # sub-ms precision).
+                import re as _ts_re
+                _ts_match = _ts_re.search(r'(\d+)$', _last_event_timestamp)
+                if _ts_match:
+                    _digits = _ts_match.group(1)
+                    _bumped = str(int(_digits) + 1000000).zfill(len(_digits))
+                    _forced_min_timestamp = _last_event_timestamp[:_ts_match.start(1)] + _bumped
+                    logger.warning("PAGINATION_DEADLOCK: ts=%s stuck for %d polls — "
+                                   "forced bump to %s (+1s)",
+                                   _last_event_timestamp, _stuck_polls, _forced_min_timestamp)
+                    _stuck_polls = 0
+        elif not all_events or len(all_events) == 0:
+            # No events at all this poll — clear forced ts if set
+            _stuck_polls = 0
+            if _forced_min_timestamp is not None:
+                logger.info("PAGINATION_DEADLOCK: no events with forced ts — clearing")
+                _forced_min_timestamp = None
         else:
-            _wait_for_response._stuck_count = 0
-            if all_events:
-                _wait_for_response._prev_ts = _last_event_timestamp
+            _stuck_polls = 0
+            # New events found — clear forced timestamp
+            if added > 0 and _forced_min_timestamp is not None:
+                logger.info("PAGINATION_DEADLOCK: break through — new events found after forced bump")
+                _forced_min_timestamp = None
 
         # AUDIT: log per-poll stats for event streaming diagnostics
         poll_count += 1
