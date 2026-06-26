@@ -1099,28 +1099,6 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     else:
         _auto_append_log(repo, prompt, str(response), ok=False)
         logger.warning("send: returning error (no response)")
-        # CRITICAL: If the conversation completed normally but produced NO
-        # MessageEvent text (COMPLETED_NO_MSG after all fallbacks), the
-        # conversation is in a broken state for our purposes. Keeping it
-        # would cause the next send() to reuse the same stale conversation
-        # → 409 → resume → retry → same COMPLETED_NO_MSG → infinite loop /
-        # "swallowing all tasks". Reset the conversation so the next
-        # send() creates a fresh one. DeepSeek caching is wasted anyway
-        # since the agent produced no output on this conversation.
-        if _last_completed_no_msg:
-            logger.warning("send: COMPLETED_NO_MSG detected — resetting stale conv=%s "
-                           "to prevent cascade swallowing", _conversation_id)
-            with _lock:
-                _conversation_id = None
-                _conv_id_at_last_assistant = None
-                _last_event_index = 0
-                _last_event_timestamp = ""
-                _sandbox_id = None
-                _seen_event_ids.clear()
-                _seen_event_hashes.clear()
-                _event_kinds.clear()
-                _conversation_status = "idle"
-                _persist_to_db()
         if not _from_batch:
             with _lock:
                 if _processing_repo == repo:
@@ -1205,6 +1183,7 @@ def _process_batch_worker() -> None:
     global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes
     global _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _batch_skip_prompt
     global _conversation_id, _conversation_status, _last_event_index, _last_event_timestamp, _sandbox_id
+    global _last_completed_no_msg
     global _seen_event_ids, _seen_event_hashes, _event_kinds
     _batch_started_at = time.time()
 
@@ -1307,6 +1286,29 @@ def _process_batch_worker() -> None:
                     was_skipped = _batch_skip_prompt
                 logger.warning("BATCH_RESULT [%d/%d]: error=%s cancelled=%s skipped=%s conv=%s",
                                pos, total, result.get("error", "?"), was_cancelled, was_skipped, _conversation_id)
+
+                # COMPLETED_NO_MSG recovery: if the conversation completed but
+                # produced no agent response, reset it so the NEXT prompt in
+                # the batch creates a fresh conversation. Without this guard,
+                # every subsequent prompt reuses the same broken conv → 409 →
+                # resume → retry → same COMPLETED_NO_MSG → infinite loop =
+                # "cascade swallowing". The first retry is allowed to reuse
+                # the conv (cache preserved). Consecutive failures trigger reset.
+                if _last_completed_no_msg and _conversation_id is not None:
+                    logger.warning("BATCH COMPLETED_NO_MSG [%d/%d]: resetting stale conv=%s "
+                                   "to prevent cascade swallowing of remaining prompts",
+                                   pos, total, _conversation_id)
+                    with _lock:
+                        _conversation_id = None
+                        _conv_id_at_last_assistant = None
+                        _last_event_index = 0
+                        _last_event_timestamp = ""
+                        _sandbox_id = None
+                        _seen_event_ids.clear()
+                        _seen_event_hashes.clear()
+                        _event_kinds.clear()
+                        _persist_to_db()
+
                 if was_cancelled:
                     with _lock:
                         _msgs().append({"id": _next_msg_id(), 
