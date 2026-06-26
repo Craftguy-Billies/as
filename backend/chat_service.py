@@ -1099,6 +1099,28 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
     else:
         _auto_append_log(repo, prompt, str(response), ok=False)
         logger.warning("send: returning error (no response)")
+        # CRITICAL: If the conversation completed normally but produced NO
+        # MessageEvent text (COMPLETED_NO_MSG after all fallbacks), the
+        # conversation is in a broken state for our purposes. Keeping it
+        # would cause the next send() to reuse the same stale conversation
+        # → 409 → resume → retry → same COMPLETED_NO_MSG → infinite loop /
+        # "swallowing all tasks". Reset the conversation so the next
+        # send() creates a fresh one. DeepSeek caching is wasted anyway
+        # since the agent produced no output on this conversation.
+        if _last_completed_no_msg:
+            logger.warning("send: COMPLETED_NO_MSG detected — resetting stale conv=%s "
+                           "to prevent cascade swallowing", _conversation_id)
+            with _lock:
+                _conversation_id = None
+                _conv_id_at_last_assistant = None
+                _last_event_index = 0
+                _last_event_timestamp = ""
+                _sandbox_id = None
+                _seen_event_ids.clear()
+                _seen_event_hashes.clear()
+                _event_kinds.clear()
+                _conversation_status = "idle"
+                _persist_to_db()
         if not _from_batch:
             with _lock:
                 if _processing_repo == repo:
@@ -1876,6 +1898,54 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
     return conversation_id
 
 
+def _extract_message_text(evt: dict) -> str | None:
+    """Extract assistant response text from a MessageEvent.
+
+    Returns the text string, or None if no text could be extracted
+    (event has no llm_message, wrong format, empty content, etc.).
+    """
+    if evt.get("source") == "user":
+        return None
+    llm_msg = evt.get("llm_message") or evt.get("message") or {}
+    text = ""
+    if isinstance(llm_msg, str) and llm_msg.strip():
+        text = llm_msg.strip()
+    elif isinstance(llm_msg, dict):
+        # content is [{type: "text", text: "..."}, ...]
+        content = llm_msg.get("content") or []
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    t = block.get("text", "")
+                    if t.strip():
+                        parts.append(t.strip())
+            text = "\n".join(parts)
+        elif isinstance(content, str):
+            text = content.strip()
+    elif isinstance(llm_msg, list):
+        parts = []
+        for block in llm_msg:
+            if isinstance(block, dict):
+                t = block.get("text", "") or block.get("content", "")
+                if t and str(t).strip():
+                    parts.append(str(t).strip())
+            elif isinstance(block, str) and block.strip():
+                parts.append(block.strip())
+        if parts:
+            text = '\n'.join(parts)
+        else:
+            text = str(llm_msg)[:200]
+    return text if text.strip() else None
+
+
+# Module-level flag: set by _wait_for_response when conversation completed
+# normally (status="completed"/"finished") but NO MessageEvent text was found
+# after ALL fallbacks (desperation poll, zip retry). send() uses this to
+# decide whether to reset the stale conversation for the next request.
+_last_completed_no_msg: bool = False
+
+
 def _wait_for_response(timeout: int | None = None) -> str | None:
     """Poll conversation status + events until the agent finishes (SAME logic as agent_runner).
 
@@ -1883,6 +1953,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     """
     global _last_event_index, _last_event_timestamp, _conversation_status, _sandbox_id, _last_response_source
     global _conversation_id, _seen_event_ids, _seen_event_hashes, _event_kinds
+    global _last_completed_no_msg
 
     if timeout is None:
         timeout = _CHAT_TIMEOUT
@@ -1892,6 +1963,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     all_new_msgs: list[str] = []
     last_status = ""
     last_event_count = 0
+    _last_completed_no_msg = False
 
     # AUDIT: log entry state
     logger.info("AUDIT wait_entry: conv=%s ts=%s seen_ids=%d seen_hashes=%d last_idx=%d timeout=%d msgs_before=%d",
@@ -2036,10 +2108,14 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             source = evt.get("source", "")
             tool = evt.get("tool_name", "")
 
-            # Skip already-seen events (dedup across send() calls)
+            # --- DEDUP WITH DEFERRED REGISTRATION FOR MessageEvents ---
+            # For non-MessageEvents: register dedup immediately (correct).
+            # For MessageEvents: register dedup ONLY AFTER successful text
+            # extraction below. This prevents "dedup poisoning" where a
+            # MessageEvent with empty/unparseable text is permanently skipped
+            # on subsequent polls (the _seen_event_ids set grows unboundedly
+            # and the event can never be re-parsed).
             dedup_by_id = bool(evt_id) and evt_id in _seen_event_ids
-            # For events without Cloud API IDs, use content hash as fallback
-            # so they're not re-added on every send() (inflating step count).
             if not evt_id:
                 no_id += 1
                 content_str = f"{kind}:{source}:{tool}:{json.dumps(evt.get('llm_message', evt.get('message', '')), sort_keys=True, default=str)}"
@@ -2054,10 +2130,14 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 skipped += 1
                 continue
             added += 1
-            if evt_id:
-                _seen_event_ids.add(evt_id)
-            else:
-                _seen_event_hashes.add(content_hash)
+            # Defer dedup registration for MessageEvents (registered after
+            # text extraction succeeds). For all other events, register now.
+            _is_msg_evt = (kind == "MessageEvent" and source != "user")
+            if not _is_msg_evt:
+                if evt_id:
+                    _seen_event_ids.add(evt_id)
+                else:
+                    _seen_event_hashes.add(content_hash)
             if skipped == 0 and added < 5:
                 # First new events — log a few to aid debugging
                 logger.info("_wait_for_response: FIRST_NEW_EVENTS id=%s kind=%s source=%s tool=%s",
@@ -2069,50 +2149,33 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             if kind == "MessageEvent":
                 # Skip user messages (initial prompt echo) — only show agent text
                 if source == "user":
+                    # If we deferred dedup for a user msg, register it now
+                    if _is_msg_evt and evt_id:
+                        _seen_event_ids.add(evt_id)
+                    elif _is_msg_evt and not evt_id:
+                        _seen_event_hashes.add(content_hash)
                     continue
-                # API returns llm_message (a Message object), not plain "message"
-                llm_msg = evt.get("llm_message") or evt.get("message") or {}
-                text = ""
-                if isinstance(llm_msg, str) and llm_msg.strip():
-                    text = llm_msg.strip()
-                elif isinstance(llm_msg, dict):
-                    # content is [{type: "text", text: "..."}, ...]
-                    content = llm_msg.get("content") or []
-                    if isinstance(content, list):
-                        parts = []
-                        for block in content:
-                            if isinstance(block, dict) and block.get("type") == "text":
-                                t = block.get("text", "")
-                                if t.strip():
-                                    parts.append(t.strip())
-                        text = "\n".join(parts)
-                    elif isinstance(content, str):
-                        text = content.strip()
-                elif isinstance(llm_msg, list):
-                    parts = []
-                    for block in llm_msg:
-                        if isinstance(block, dict):
-                            t = block.get("text", "") or block.get("content", "")
-                            if t and str(t).strip():
-                                parts.append(str(t).strip())
-                        elif isinstance(block, str) and block.strip():
-                            parts.append(block.strip())
-                    if parts:
-                        text = '\n'.join(parts)
-                    else:
-                        text = str(llm_msg)[:200]
+                # Use shared helper for text extraction
+                text = _extract_message_text(evt)
                 if text:
                     # ONLY keep the LAST assistant message (replace, not append).
                     # Multiple MessageEvents per turn (intermediate + final) must
                     # not all be joined — the final one IS the response.
-                    # Intermediate tool events (ActionEvent/ObservationEvent) are
-                    # already streamed via _format_event_preview. Phase 3 appends
-                    # the final response as "assistant" role. Do NOT also add as
-                    # [MSG] event here — that would duplicate the final response.
                     all_new_msgs = [text]
+                    # Register dedup NOW that text extraction succeeded.
+                    # This prevents re-parsing the same event on future polls
+                    # while also NOT poisoning the dedup set with events whose
+                    # text could not be extracted (they get retried next poll).
+                    if evt_id:
+                        _seen_event_ids.add(evt_id)
+                    else:
+                        _seen_event_hashes.add(content_hash)
                 else:
-                    logger.warning("MessageEvent found but NO text extracted: source=%s llm_msg_keys=%s",
-                                   source, sorted(llm_msg.keys()) if isinstance(llm_msg, dict) else type(llm_msg).__name__)
+                    logger.warning("MessageEvent found but NO text extracted: source=%s evt_id=%s",
+                                   source, evt_id[:20] if evt_id else "(no_id)")
+                    # DO NOT register dedup — the event may be parseable on
+                    # the next poll (e.g. llm_message was not yet populated
+                    # when we first polled). This is the "dedup poisoning" fix.
 
             # Stream tool calls, observations, errors as live events
             event_preview = _format_event_preview(evt)
@@ -2211,106 +2274,159 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     # be a stale copy from a previous turn, causing Phase 3 to reject the
     # response as "cached" (byte-identical to last_assistant). Also skip
     # events with IDs already in _seen_event_ids.
+
+    # --- DESPERATION POLL: retry events/search WITHOUT min_timestamp ---
+    # The main poll loop uses min_timestamp to avoid re-processing old events.
+    # Bug scenario: events/search?limit=100 returns events AFTER min_timestamp,
+    # but the MessageEvent has a timestamp JUST BEFORE the cutoff (race between
+    # event indexing and the final status poll). The min_timestamp filter then
+    # EXCLUDES the MessageEvent and we get COMPLETED_NO_MSG.
+    #
+    # Fix: do ONE final events/search call with NO timestamp filter.
+    # Scan ALL returned events for any agent MessageEvent that isn't already
+    # in _seen_event_ids. This catches MessageEvents that were excluded by
+    # the min_timestamp race.
     if last_status in ("completed", "finished") and not all_new_msgs:
         try:
-            import io, re, zipfile
-            # Snapshot last_assistant BEFORE the lock check (Phase 3 uses lock)
-            _last_assistant_text: str | None = None
-            with _lock:
-                for m in reversed(_msgs()):
-                    if m.get("role") == "assistant":
-                        _last_assistant_text = m.get("content", "")
-                        break
-            r3 = httpx.get(
-                f"{CLOUD_API_URL}/api/v1/app-conversations/{_conversation_id}/download",
+            logger.info("DESPERATION_POLL: conv=%s ts=%s seen_ids=%d — retrying events/search WITHOUT min_timestamp",
+                        _conversation_id, _last_event_timestamp or "(none)", len(_seen_event_ids))
+            r_final = httpx.get(
+                f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
                 headers=_headers(),
-                timeout=30,
+                params={"limit": 100},
+                timeout=10,
             )
-            r3.raise_for_status()
-            zf = zipfile.ZipFile(io.BytesIO(r3.content))
-            def _num_key(name: str) -> list:
-                return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', name)]
-            event_files = sorted(
-                [n for n in zf.namelist() if n.startswith("event_") and n.endswith(".json")],
-                key=_num_key,
+            r_final.raise_for_status()
+            fd = r_final.json()
+            final_events = (
+                fd if isinstance(fd, list)
+                else fd.get("items") or fd.get("events") or fd.get("data") or fd.get("results") or []
             )
-            if not event_files:
+            for evt in reversed(final_events):
+                if evt.get("kind") != "MessageEvent" or evt.get("source") == "user":
+                    continue
+                eid = evt.get("id", "")
+                if eid and eid in _seen_event_ids:
+                    continue
+                msg_text = _extract_message_text(evt)
+                if msg_text:
+                    logger.info("DESPERATION_POLL: FOUND assistant MessageEvent! len=%d ts=%s",
+                                len(msg_text), evt.get("timestamp", 0))
+                    all_new_msgs = [msg_text]
+                    _last_response_source = "events/search"
+                    # Register dedup now that extraction succeeded
+                    if eid:
+                        _seen_event_ids.add(eid)
+                    break
+            if not all_new_msgs:
+                logger.info("DESPERATION_POLL: no MessageEvent found in %d events (seen_ids=%d)",
+                            len(final_events), len(_seen_event_ids))
+        except Exception as e:
+            logger.warning("DESPERATION_POLL error: %s", e)
+
+    # --- ZIP FALLBACK with retry ---
+    # If both the main poll AND desperation poll failed, try the trajectory
+    # zip download. The zip may not be immediately available after the
+    # conversation finishes (race with Cloud API zip generation), so retry
+    # with backoff.
+    if last_status in ("completed", "finished") and not all_new_msgs:
+        import io, re, zipfile
+        _zip_exc: Exception | None = None
+        for zip_attempt in range(3):
+            try:
+                # Snapshot last_assistant BEFORE the lock check (Phase 3 uses lock)
+                _last_assistant_text: str | None = None
+                with _lock:
+                    for m in reversed(_msgs()):
+                        if m.get("role") == "assistant":
+                            _last_assistant_text = m.get("content", "")
+                            break
+                r3 = httpx.get(
+                    f"{CLOUD_API_URL}/api/v1/app-conversations/{_conversation_id}/download",
+                    headers=_headers(),
+                    timeout=30,
+                )
+                r3.raise_for_status()
+                zf = zipfile.ZipFile(io.BytesIO(r3.content))
+                def _num_key(name: str) -> list:
+                    return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', name)]
                 event_files = sorted(
-                    [n for n in zf.namelist() if "event" in n.lower() and n.endswith(".json")],
+                    [n for n in zf.namelist() if n.startswith("event_") and n.endswith(".json")],
                     key=_num_key,
                 )
-            logger.info("Trajectory zip fallback: %d event files, searching for agent MessageEvent", len(event_files))
-            found = False
-            for fname in reversed(event_files):
-                with zf.open(fname) as f:
-                    evt = json.loads(f.read())
-                if evt.get("kind") == "MessageEvent" and evt.get("source") == "agent":
-                    # Skip if already seen via events/search (duplicate event ID)
-                    evt_id = evt.get("id", "")
-                    if evt_id and evt_id in _seen_event_ids:
-                        logger.info("Trajectory zip: skipping MessageEvent id=%s (already seen via events/search)", evt_id[:20])
-                        continue
-                    llm_msg = evt.get("llm_message") or evt.get("message") or {}
-                    raw = ""
-                    if isinstance(llm_msg, dict):
-                        content = llm_msg.get("content") or []
-                        if isinstance(content, list):
-                            parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip()]
-                            if parts:
-                                raw = "\n".join(parts)
-                    elif isinstance(llm_msg, str) and llm_msg.strip():
-                        raw = llm_msg.strip()
-                    if not raw:
-                        continue
-                    # CRITICAL: skip if text matches last_assistant (stale from previous turn)
-                    if _last_assistant_text and raw.strip() == _last_assistant_text.strip():
-                        logger.warning("Trajectory zip: SKIPPING MessageEvent ts=%s (text matches last_assistant — stale zip data)", evt.get("timestamp", 0))
-                        continue
-                    evt_ts = evt.get("timestamp", 0)
-                    logger.info("Trajectory zip: found NEW agent MessageEvent ts=%s (len=%d)", evt_ts, len(raw))
-                    all_new_msgs = [raw]
-                    _last_response_source = "zip"
-                    found = True
-                    break
-            if not found:
-                logger.warning("Trajectory zip: no NEW assistant MessageEvent in %d files (zip may be stale)", len(event_files))
-                seen = set()
-                for fname in event_files[-30:]:
+                if not event_files:
+                    event_files = sorted(
+                        [n for n in zf.namelist() if "event" in n.lower() and n.endswith(".json")],
+                        key=_num_key,
+                    )
+                logger.info("ZIP_ATTEMPT %d/3: %d event files, searching for agent MessageEvent",
+                            zip_attempt + 1, len(event_files))
+                found = False
+                for fname in reversed(event_files):
                     with zf.open(fname) as f:
                         evt = json.loads(f.read())
-                    seen.add((evt.get("kind", "?"), evt.get("source", "?")))
-                logger.warning("Trajectory zip last 30 (kind,source): %s", sorted(seen))
-        except Exception as e:
-            logger.warning("Trajectory zip error: %s", e)
+                    if evt.get("kind") == "MessageEvent" and evt.get("source") == "agent":
+                        # Skip if already seen via events/search (duplicate event ID)
+                        evt_id = evt.get("id", "")
+                        if evt_id and evt_id in _seen_event_ids:
+                            logger.info("ZIP_ATTEMPT %d/3: skipping MessageEvent id=%s (already seen via events/search)",
+                                        zip_attempt + 1, evt_id[:20])
+                            continue
+                        # Use shared helper
+                        raw = _extract_message_text(evt)
+                        if not raw:
+                            continue
+                        # CRITICAL: skip if text matches last_assistant (stale from previous turn)
+                        if _last_assistant_text and raw.strip() == _last_assistant_text.strip():
+                            logger.warning("ZIP_ATTEMPT %d/3: SKIPPING MessageEvent ts=%s (text matches last_assistant — stale zip)",
+                                           zip_attempt + 1, evt.get("timestamp", 0))
+                            continue
+                        evt_ts = evt.get("timestamp", 0)
+                        logger.info("ZIP_ATTEMPT %d/3: FOUND new agent MessageEvent ts=%s (len=%d)",
+                                    zip_attempt + 1, evt_ts, len(raw))
+                        all_new_msgs = [raw]
+                        _last_response_source = "zip"
+                        # Register dedup
+                        if evt_id:
+                            _seen_event_ids.add(evt_id)
+                        found = True
+                        break
+                if found:
+                    break
+                else:
+                    logger.warning("ZIP_ATTEMPT %d/3: no NEW assistant MessageEvent in %d files",
+                                   zip_attempt + 1, len(event_files))
+                    if zip_attempt < 2:
+                        backoff = 2 ** (zip_attempt + 1)  # 2s, 4s
+                        logger.info("ZIP_ATTEMPT %d/3: retrying in %ds (zip may not be ready yet)", zip_attempt + 1, backoff)
+                        time.sleep(backoff)
+            except Exception as e:
+                _zip_exc = e
+                logger.warning("ZIP_ATTEMPT %d/3 error: %s", zip_attempt + 1, e)
+                if zip_attempt < 2:
+                    backoff = 2 ** (zip_attempt + 1)
+                    time.sleep(backoff)
 
     if not all_new_msgs:
         elapsed = int(time.time() - start)
         logger.warning("No assistant messages found after %ds (status=%s)", elapsed, last_status)
         logger.warning("All event kinds seen: %s", sorted(_event_kinds))
         logger.warning("Total events: %d, messages: %d", len(all_events), len(_msgs()))
-
-        # Snapshot last_assistant BEFORE any scrape (Phase 3 will check again,
-
-        # CRITICAL: NEVER scrape non-MessageEvent text as the AI's response.
-        # The fallback _scrape_events_for_text can return ActionEvent.thought (AI
-        # reasoning), llm_message from tool events, or other garbage that is NOT
-        # the AI's actual spoken response. Saving that as "assistant" message
-        # makes the user see terminal output, partial reasoning, or tool dumps
-        # instead of what the AI actually said.
-        # Only MessageEvent text (from events/search or zip fallback) is valid.
-        # If no MessageEvent found, let Phase 3 return a clean timeout/error.
         logger.warning("No MessageEvent found after %ds (status=%s) — returning None. "
                        "All event kinds: %s. Total events: %d.",
                        elapsed, last_status, sorted(_event_kinds), len(all_events))
 
-        if not all_new_msgs:
-            with _lock:
-                _msgs().append({"id": _next_msg_id(), 
-                    "role": "event",
-                    "content": f"[WARN] No response from agent after {elapsed}s (status: {last_status or 'unknown'}). The agent may be stuck or the LLM may not be configured correctly on the server.",
-                    "kind": "SystemEvent",
-                    "timestamp": int(time.time() * 1000),
-                })
+        # Set module-level flag so send() can detect this specific failure mode
+        # and reset the stale conversation to prevent cascade swallowing.
+        _last_completed_no_msg = bool(_completed_normally)
+
+        with _lock:
+            _msgs().append({"id": _next_msg_id(), 
+                "role": "event",
+                "content": f"[WARN] No response from agent after {elapsed}s (status: {last_status or 'unknown'}). The agent may be stuck or the LLM may not be configured correctly on the server.",
+                "kind": "SystemEvent",
+                "timestamp": int(time.time() * 1000),
+            })
 
     _conversation_status = "idle"
     # CRITICAL: on timeout (not completed, not failed), do NOT return partial
