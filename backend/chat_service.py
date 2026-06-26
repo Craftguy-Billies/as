@@ -93,6 +93,7 @@ _batch_mode: str = "code"
 _batch_running: bool = False
 _batch_cancelled: bool = False
 _batch_skip_prompt: bool = False  # set by per-prompt cancel, tells worker to skip current
+_batch_started_at: float = 0.0  # set by _process_batch_worker; read by enqueue_batch for stale detection
 
 # Response source tracking for Phase 3 diagnostics
 # Set by _wait_for_response() before returning:
@@ -310,8 +311,14 @@ def _restore_from_db() -> None:
                         len(_seen_event_ids), len(_seen_event_hashes),
                         event_count)
             if _batch_running and not _batch_cancelled:
-                threading.Thread(target=_process_batch_worker, daemon=True).start()
-                logger.info("Auto-resuming batch: %d/%d remaining", _batch_total - _batch_position, _batch_total)
+                # Use globals() lookup so _process_batch_worker is resolved at
+                # runtime (it's defined later in the file, after this function).
+                _fn = globals().get('_process_batch_worker')
+                if _fn:
+                    threading.Thread(target=_fn, daemon=True).start()
+                    logger.info("Auto-resuming batch: %d/%d remaining", _batch_total - _batch_position, _batch_total)
+                else:
+                    logger.error("Cannot resume batch: _process_batch_worker not yet defined")
             elif _batch_cancelled:
                 logger.info("Batch was cancelled before restart — not resuming")
     except Exception as e:
@@ -1215,7 +1222,7 @@ def _process_batch_worker() -> None:
     global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes
     global _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _batch_skip_prompt
     global _conversation_id, _conversation_status, _last_event_index, _last_event_timestamp, _sandbox_id
-    global _last_completed_no_msg
+    global _last_completed_no_msg, _batch_started_at
     global _seen_event_ids, _seen_event_hashes, _event_kinds
     _batch_started_at = time.time()
 
