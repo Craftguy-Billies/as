@@ -2363,14 +2363,15 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     # by the time status transitions to "finished". Retry with backoff to
     # give the API time to index (same pattern as zip retry below).
     if last_status in ("completed", "finished") and not all_new_msgs:
-        for dp_attempt in range(5):
+        _dp_max_attempts = 10
+        for dp_attempt in range(_dp_max_attempts):
             try:
                 if dp_attempt > 0:
-                    backoff = min(2 ** dp_attempt, 16)  # 2s, 4s, 8s, 16s
-                    logger.info("DESPERATION_POLL attempt %d/5: waiting %ds before retry",
-                                dp_attempt + 1, backoff)
+                    backoff = min(2 ** dp_attempt, 45)  # 2s, 4s, 8s, 16s, 32s, 45s×4
+                    logger.info("DESPERATION_POLL attempt %d/%d: waiting %ds before retry",
+                                dp_attempt + 1, _dp_max_attempts, backoff)
                     time.sleep(backoff)
-                logger.info("DESPERATION_POLL attempt %d/5: conv=%s ts=%s seen_ids=%d",
+                logger.info("DESPERATION_POLL attempt %d/%d: conv=%s ts=%s seen_ids=%d",
                             dp_attempt + 1, _conversation_id, _last_event_timestamp or "(none)", len(_seen_event_ids))
                 r_final = httpx.get(
                     f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
@@ -2393,7 +2394,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                         continue
                     msg_text = _extract_message_text(evt)
                     if msg_text:
-                        logger.info("DESPERATION_POLL attempt %d/5: FOUND assistant MessageEvent! len=%d ts=%s",
+                        logger.info("DESPERATION_POLL attempt %d/%d: FOUND assistant MessageEvent! len=%d ts=%s",
                                     dp_attempt + 1, len(msg_text), evt.get("timestamp", 0))
                         all_new_msgs = [msg_text]
                         _last_response_source = "events/search"
@@ -2403,20 +2404,20 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                         break
                 if found:
                     break
-                logger.info("DESPERATION_POLL attempt %d/5: no agent MessageEvent in %d events (seen_ids=%d)",
+                logger.info("DESPERATION_POLL attempt %d/%d: no agent MessageEvent in %d events (seen_ids=%d)",
                             dp_attempt + 1, len(final_events), len(_seen_event_ids))
                 # Log event kinds to help debug
                 _kinds_in_poll = {e.get("kind", "?") for e in final_events}
                 _agent_msgs = [e for e in final_events if e.get("kind") == "MessageEvent" and e.get("source") != "user"]
                 if _agent_msgs:
-                    logger.warning("DESPERATION_POLL attempt %d/5: %d agent MessageEvent(s) found but ALL skipped (seen_ids or empty text). "
+                    logger.warning("DESPERATION_POLL attempt %d/%d: %d agent MessageEvent(s) found but ALL skipped (seen_ids or empty text). "
                                    "First agent msg keys: %s",
                                    dp_attempt + 1, len(_agent_msgs), list(_agent_msgs[0].keys()))
                 else:
-                    logger.info("DESPERATION_POLL attempt %d/5: event kinds=%s (no agent MessageEvent at all)",
+                    logger.info("DESPERATION_POLL attempt %d/%d: event kinds=%s (no agent MessageEvent at all)",
                                 dp_attempt + 1, sorted(_kinds_in_poll))
             except Exception as e:
-                logger.warning("DESPERATION_POLL attempt %d/5 error: %s", dp_attempt + 1, e)
+                logger.warning("DESPERATION_POLL attempt %d/%d error: %s", dp_attempt + 1, e)
 
     # --- ZIP FALLBACK with retry ---
     # If both the main poll AND desperation poll failed, try the trajectory
@@ -2426,7 +2427,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     if last_status in ("completed", "finished") and not all_new_msgs:
         import io, re, zipfile
         _zip_exc: Exception | None = None
-        for zip_attempt in range(5):
+        for zip_attempt in range(8):
             try:
                 # Snapshot last_assistant BEFORE the lock check (Phase 3 uses lock)
                 _last_assistant_text: str | None = None
@@ -2453,7 +2454,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                         [n for n in zf.namelist() if "event" in n.lower() and n.endswith(".json")],
                         key=_num_key,
                     )
-                logger.info("ZIP_ATTEMPT %d/5: %d event files, searching for agent MessageEvent",
+                logger.info("ZIP_ATTEMPT %d/8: %d event files, searching for agent MessageEvent",
                             zip_attempt + 1, len(event_files))
                 found = False
                 for fname in reversed(event_files):
@@ -2463,7 +2464,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                         # Skip if already seen via events/search (duplicate event ID)
                         evt_id = evt.get("id", "")
                         if evt_id and evt_id in _seen_event_ids:
-                            logger.info("ZIP_ATTEMPT %d/5: skipping MessageEvent id=%s (already seen via events/search)",
+                            logger.info("ZIP_ATTEMPT %d/8: skipping MessageEvent id=%s (already seen via events/search)",
                                         zip_attempt + 1, evt_id[:20])
                             continue
                         # Use shared helper
@@ -2472,11 +2473,11 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                             continue
                         # CRITICAL: skip if text matches last_assistant (stale from previous turn)
                         if _last_assistant_text and raw.strip() == _last_assistant_text.strip():
-                            logger.warning("ZIP_ATTEMPT %d/5: SKIPPING MessageEvent ts=%s (text matches last_assistant — stale zip)",
+                            logger.warning("ZIP_ATTEMPT %d/8: SKIPPING MessageEvent ts=%s (text matches last_assistant — stale zip)",
                                            zip_attempt + 1, evt.get("timestamp", 0))
                             continue
                         evt_ts = evt.get("timestamp", 0)
-                        logger.info("ZIP_ATTEMPT %d/5: FOUND new agent MessageEvent ts=%s (len=%d)",
+                        logger.info("ZIP_ATTEMPT %d/8: FOUND new agent MessageEvent ts=%s (len=%d)",
                                     zip_attempt + 1, evt_ts, len(raw))
                         all_new_msgs = [raw]
                         _last_response_source = "zip"
@@ -2488,17 +2489,17 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 if found:
                     break
                 else:
-                    logger.warning("ZIP_ATTEMPT %d/5: no NEW assistant MessageEvent in %d files",
+                    logger.warning("ZIP_ATTEMPT %d/8: no NEW assistant MessageEvent in %d files",
                                    zip_attempt + 1, len(event_files))
-                    if zip_attempt < 4:
-                        backoff = min(2 ** (zip_attempt + 1), 16)  # 2s, 4s, 8s, 16s
-                        logger.info("ZIP_ATTEMPT %d/5: retrying in %ds (zip may not be ready yet)", zip_attempt + 1, backoff)
+                    if zip_attempt < 7:
+                        backoff = min(2 ** (zip_attempt + 1), 45)  # 2s, 4s, 8s, 16s
+                        logger.info("ZIP_ATTEMPT %d/8: retrying in %ds (zip may not be ready yet)", zip_attempt + 1, backoff)
                         time.sleep(backoff)
             except Exception as e:
                 _zip_exc = e
-                logger.warning("ZIP_ATTEMPT %d/5 error: %s", zip_attempt + 1, e)
-                if zip_attempt < 4:
-                    backoff = min(2 ** (zip_attempt + 1), 16)
+                logger.warning("ZIP_ATTEMPT %d/8 error: %s", zip_attempt + 1, e)
+                if zip_attempt < 7:
+                    backoff = min(2 ** (zip_attempt + 1), 45)
                     time.sleep(backoff)
 
     if not all_new_msgs:
