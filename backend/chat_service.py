@@ -2423,10 +2423,12 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     # If both the main poll AND desperation poll failed, try the trajectory
     # zip download. The zip may not be immediately available after the
     # conversation finishes (race with Cloud API zip generation), so retry
-    # with backoff (up to 5 attempts, 30s total).
+    # with backoff (up to 8 attempts, ~120s total).
+    _zip_stale_found: bool = False  # track if we had to skip a stale-match MessageEvent
     if last_status in ("completed", "finished") and not all_new_msgs:
         import io, re, zipfile
         _zip_exc: Exception | None = None
+        _zip_last_events_file_count = 0
         for zip_attempt in range(8):
             try:
                 # Snapshot last_assistant BEFORE the lock check (Phase 3 uses lock)
@@ -2454,6 +2456,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                         [n for n in zf.namelist() if "event" in n.lower() and n.endswith(".json")],
                         key=_num_key,
                     )
+                _zip_last_events_file_count = len(event_files)
                 logger.info("ZIP_ATTEMPT %d/8: %d event files, searching for agent MessageEvent",
                             zip_attempt + 1, len(event_files))
                 found = False
@@ -2475,6 +2478,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                         if _last_assistant_text and raw.strip() == _last_assistant_text.strip():
                             logger.warning("ZIP_ATTEMPT %d/8: SKIPPING MessageEvent ts=%s (text matches last_assistant — stale zip)",
                                            zip_attempt + 1, evt.get("timestamp", 0))
+                            _zip_stale_found = True
                             continue
                         evt_ts = evt.get("timestamp", 0)
                         logger.info("ZIP_ATTEMPT %d/8: FOUND new agent MessageEvent ts=%s (len=%d)",
@@ -2492,7 +2496,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                     logger.warning("ZIP_ATTEMPT %d/8: no NEW assistant MessageEvent in %d files",
                                    zip_attempt + 1, len(event_files))
                     if zip_attempt < 7:
-                        backoff = min(2 ** (zip_attempt + 1), 45)  # 2s, 4s, 8s, 16s
+                        backoff = min(2 ** (zip_attempt + 1), 45)  # 2s, 4s, 8s, 16s, 32s, 45s
                         logger.info("ZIP_ATTEMPT %d/8: retrying in %ds (zip may not be ready yet)", zip_attempt + 1, backoff)
                         time.sleep(backoff)
             except Exception as e:
@@ -2501,6 +2505,52 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 if zip_attempt < 7:
                     backoff = min(2 ** (zip_attempt + 1), 45)
                     time.sleep(backoff)
+
+        # --- ZIP NUCLEAR FALLBACK ---
+        # If all 8 zip retries found only stale MessageEvent(s) matching
+        # _last_assistant_text (from a previous turn), do ONE final scan
+        # WITHOUT the stale filter. This catches the case where the Cloud
+        # API never indexed the new MessageEvent in events/search AND the
+        # zip never regenerated — but at least we have the last known
+        # assistant message rather than returning "no response".
+        if not all_new_msgs and _zip_stale_found and _zip_last_events_file_count > 0:
+            try:
+                r_nuke = httpx.get(
+                    f"{CLOUD_API_URL}/api/v1/app-conversations/{_conversation_id}/download",
+                    headers=_headers(),
+                    timeout=30,
+                )
+                r_nuke.raise_for_status()
+                zf_nuke = zipfile.ZipFile(io.BytesIO(r_nuke.content))
+                event_files_nuke = sorted(
+                    [n for n in zf_nuke.namelist() if n.startswith("event_") and n.endswith(".json")],
+                    key=lambda name: [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', name)],
+                )
+                if not event_files_nuke:
+                    event_files_nuke = sorted(
+                        [n for n in zf_nuke.namelist() if "event" in n.lower() and n.endswith(".json")],
+                        key=lambda name: [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', name)],
+                    )
+                logger.warning("ZIP_NUCLEAR: scanning %d event files WITHOUT _last_assistant_text filter",
+                               len(event_files_nuke))
+                for fname in reversed(event_files_nuke):
+                    with zf_nuke.open(fname) as f:
+                        evt = json.loads(f.read())
+                    if evt.get("kind") == "MessageEvent" and evt.get("source") == "agent":
+                        evt_id = evt.get("id", "")
+                        if evt_id and evt_id in _seen_event_ids:
+                            continue
+                        raw = _extract_message_text(evt)
+                        if raw:
+                            logger.warning("ZIP_NUCLEAR: FOUND agent MessageEvent ts=%s (len=%d) — using as last resort",
+                                           evt.get("timestamp", 0), len(raw))
+                            all_new_msgs = [raw]
+                            _last_response_source = "zip_nuclear"
+                            if evt_id:
+                                _seen_event_ids.add(evt_id)
+                            break
+            except Exception as e:
+                logger.warning("ZIP_NUCLEAR error: %s", e)
 
     if not all_new_msgs:
         elapsed = int(time.time() - start)
