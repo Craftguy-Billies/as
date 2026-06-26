@@ -311,14 +311,8 @@ def _restore_from_db() -> None:
                         len(_seen_event_ids), len(_seen_event_hashes),
                         event_count)
             if _batch_running and not _batch_cancelled:
-                # Use globals() lookup so _process_batch_worker is resolved at
-                # runtime (it's defined later in the file, after this function).
-                _fn = globals().get('_process_batch_worker')
-                if _fn:
-                    threading.Thread(target=_fn, daemon=True).start()
-                    logger.info("Auto-resuming batch: %d/%d remaining", _batch_total - _batch_position, _batch_total)
-                else:
-                    logger.error("Cannot resume batch: _process_batch_worker not yet defined")
+                threading.Thread(target=_process_batch_worker, daemon=True).start()
+                logger.info("Auto-resuming batch: %d/%d remaining", _batch_total - _batch_position, _batch_total)
             elif _batch_cancelled:
                 logger.info("Batch was cancelled before restart — not resuming")
     except Exception as e:
@@ -381,9 +375,6 @@ def _persist_to_db() -> None:
             db.commit()
         except Exception as e:
             logger.warning("Failed to persist chat session (kv_store missing): %s", e)
-
-_restore_from_db()
-
 
 def _headers() -> dict:
     return {
@@ -2667,3 +2658,8 @@ def _format_event_preview(evt: dict) -> str | None:
     if evt_str:
         return f"[{kind_label}] {evt_str}"
     return f"[{kind_label}] (raw)"
+
+
+# Restore chat session from DB after ALL functions are defined
+# (some are referenced by name, e.g. _process_batch_worker).
+_restore_from_db()
