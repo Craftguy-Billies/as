@@ -410,6 +410,8 @@ def reset() -> None:
         _conversation_llm_model = ""
         _last_event_index = 0
         _last_event_timestamp = ""
+        _forced_min_timestamp = None
+        _stuck_polls = 0
         _event_kinds.clear()
         _seen_event_ids.clear()
         _seen_event_hashes.clear()
@@ -973,6 +975,8 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
             _current_repo_key = _repo_key(repo)
             _last_event_index = 0
             _last_event_timestamp = ""  # reset min_timestamp for new conversation
+            _forced_min_timestamp = None  # reset deadlock state for new conversation
+            _stuck_polls = 0
             _seen_event_ids.clear()
             _seen_event_hashes.clear()
             logger.info("Phase 1c: stored new conv=%s repo=%s branch=%s mode=%s model=%s seen_ids=0",
@@ -1288,6 +1292,8 @@ def _process_batch_worker() -> None:
                         _conversation_id = None
                         _last_event_index = 0
                         _last_event_timestamp = ""
+                        _forced_min_timestamp = None
+                        _stuck_polls = 0
                         _sandbox_id = None
                         _seen_event_ids.clear()
                         _seen_event_hashes.clear()
@@ -1335,6 +1341,8 @@ def _process_batch_worker() -> None:
                         _conv_id_at_last_assistant = None
                         _last_event_index = 0
                         _last_event_timestamp = ""
+                        _forced_min_timestamp = None
+                        _stuck_polls = 0
                         _sandbox_id = None
                         _seen_event_ids.clear()
                         _seen_event_hashes.clear()
@@ -1998,6 +2006,11 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     last_status = ""
     last_event_count = 0
     _last_completed_no_msg = False
+    # Reset pagination deadlock state for this send() to prevent stale state
+    # from a previous conversation leaking across (e.g. old _forced_min_timestamp
+    # causing the first poll of a new send to skip events unnecessarily).
+    _forced_min_timestamp = None
+    _stuck_polls = 0
 
     # AUDIT: log entry state
     logger.info("AUDIT wait_entry: conv=%s ts=%s seen_ids=%d seen_hashes=%d last_idx=%d timeout=%d msgs_before=%d",
