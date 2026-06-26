@@ -2246,9 +2246,10 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         # timestamp (e.g. agent generated 100+ tool events in <1ms), the
         # min_timestamp filter keeps returning the same 100 events forever
         # because _last_event_timestamp never advances past the batch.
-        # Detect this: if ALL events were dedup-skipped AND total msgs count
-        # didn't increase, we're stuck on the same batch.
-        if all_events and added == 0 and skipped == len(all_events) and processed_count == 0:
+        # Detect this: if ALL events were dedup-skipped (added=0, skipped=len),
+        # we're stuck on the same batch. processed_count is NOT checked because
+        # it counts dedup-skipped events — when all 100 are skipped it's 100, not 0.
+        if all_events and added == 0 and skipped == len(all_events):
             _stuck_polls = (_stuck_polls or 0) + 1
             if _stuck_polls >= 3 and _forced_min_timestamp is None:
                 # Bump min_timestamp by 1 SECOND to skip past the entire
