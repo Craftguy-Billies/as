@@ -2220,6 +2220,11 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                         "tool_name": tool,
                         "timestamp": int(time.time() * 1000),
                     })
+                    # Trim in-memory messages to prevent unbounded growth
+                    # during long-running conversations (e.g. 100+ batch tasks).
+                    # Keeps latest 500, trimmed to 400 to avoid thrashing.
+                    if len(_msgs()) > 500:
+                        _msgs()[:] = _msgs()[-400:]
 
         # Advance the min_timestamp to the last event's timestamp for API-level
         # filtering on the next poll. _last_event_index is tracked for logging
@@ -2231,6 +2236,39 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 _last_event_timestamp = str(last_ts)  # normalize to str for API param
             logger.debug("Events processed: %d new, %d total in this batch, %d seen_ids",
                          processed_count, _last_event_index, len(_seen_event_ids))
+
+        # --- PAGINATION DEADLOCK DETECTION ---
+        # When events/search?limit=100 returns 100 events all with the SAME
+        # timestamp (e.g. agent generated 100+ tool events in <1ms), the
+        # min_timestamp filter keeps returning the same 100 events forever
+        # because _last_event_timestamp never advances past the batch.
+        # Detect this: if ALL events were dedup-skipped and timestamp didn't
+        # change, we're stuck. Artificially bump the timestamp by 1µs to
+        # skip past the current batch and reach the actual new events.
+        if all_events and skipped > 0 and skipped == len(all_events):
+            _same_ts = (_last_event_timestamp == getattr(_wait_for_response, '_prev_ts', ''))
+            if _same_ts:
+                _stuck_count = getattr(_wait_for_response, '_stuck_count', 0) + 1
+                _wait_for_response._stuck_count = _stuck_count
+                if _stuck_count >= 3:
+                    # Bump timestamp by 1µs to break the pagination deadlock
+                    import re as _ts_re
+                    _ts_match = _ts_re.search(r'(\d+)$', _last_event_timestamp)
+                    if _ts_match:
+                        _digits = _ts_match.group(1)
+                        _bumped = str(int(_digits) + 1).zfill(len(_digits))
+                        _old_ts = _last_event_timestamp
+                        _last_event_timestamp = _last_event_timestamp[:_ts_match.start(1)] + _bumped
+                        logger.warning("PAGINATION_DEADLOCK: ts=%s stuck for %d polls — bumping to %s",
+                                       _old_ts, _stuck_count, _last_event_timestamp)
+                        _wait_for_response._stuck_count = 0
+            else:
+                _wait_for_response._stuck_count = 0
+            _wait_for_response._prev_ts = _last_event_timestamp
+        else:
+            _wait_for_response._stuck_count = 0
+            if all_events:
+                _wait_for_response._prev_ts = _last_event_timestamp
 
         # AUDIT: log per-poll stats for event streaming diagnostics
         poll_count += 1
