@@ -1121,7 +1121,7 @@ def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "", mode: st
     Call get_state() to track progress.
     If a batch is already running, appends to it.
     """
-    global _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _batch_running, _batch_cancelled, _batch_skip_prompt
+    global _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_repo, _batch_branch, _batch_mode, _batch_running, _batch_cancelled, _batch_skip_prompt, _batch_started_at
 
     cleaned = [p.strip() for p in prompts if p.strip()]
     if not cleaned:
@@ -1137,11 +1137,43 @@ def enqueue_batch(prompts: list[str], repo: str = "", branch: str = "", mode: st
 
     with _lock:
         if _batch_running:
+            # Stale batch detection: if the batch worker started but hasn't
+            # made progress for > 30 min, auto-clear it. This handles the
+            # case where the worker crashed silently or the backend was
+            # restarted while a batch was "running".
+            _stale_since = ""
+            if _batch_started_at > 0:
+                _elapsed = time.time() - _batch_started_at
+                if _elapsed > 1800:
+                    _stale_since = f" (stale — started {int(_elapsed)}s ago)"
+                    logger.warning("enqueue_batch: auto-clearing stale batch (started %ds ago)", int(_elapsed))
+                    _batch_running = False
+                    _batch_repo = ""
+                    _batch_total = 0
+                    _batch_position = 0
+                    _batch_prompts = []
+                    _batch_prompt_modes = []
+                    _persist_to_db()
+                else:
+                    _stale_since = f" (running for {int(_elapsed)}s)"
+            elif _batch_started_at == 0:
+                _stale_since = " (worker never started — zombie batch)"
+                logger.warning("enqueue_batch: auto-clearing zombie batch (_batch_started_at=0)")
+                _batch_running = False
+                _batch_repo = ""
+                _batch_total = 0
+                _batch_position = 0
+                _batch_prompts = []
+                _batch_prompt_modes = []
+                _persist_to_db()
+
+        if _batch_running:
             # Reject append if repo changed — prevents cross-repo contamination
             if repo != _batch_repo:
                 return {
                     "error": (
-                        f"Batch already running with repo={_batch_repo or '(none)'}. "
+                        f"Batch already running with repo={_batch_repo or '(none)'}"
+                        f"{_stale_since}. "
                         "Wait for it to finish or tap 'New conversation' to start fresh."
                     )
                 }
