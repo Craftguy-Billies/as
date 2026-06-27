@@ -38,6 +38,7 @@ _last_event_index: int = 0
 _last_event_timestamp: str = ""  # timestamp of last seen event for min_timestamp filtering
 _forced_min_timestamp: str | None = None  # set by PAGINATION_DEADLOCK to force-skip same-ts events
 _stuck_polls: int = 0  # consecutive polls where all events were dedup-skipped
+_no_progress_since: float | None = None  # when agent-stuck timer started
 _sandbox_id: str | None = None
 _event_kinds: set[str] = set()  # diagnostic: all event kinds seen in current conversation
 _seen_event_ids: set[str] = set()  # dedup: event IDs already added to chat
@@ -2034,7 +2035,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
     Timeout: VIBECODE_CHAT_TIMEOUT env var (default 7200s = 2 hours).
     """
-    global _last_event_index, _last_event_timestamp, _conversation_status, _sandbox_id, _last_response_source, _forced_min_timestamp, _stuck_polls
+    global _last_event_index, _last_event_timestamp, _conversation_status, _sandbox_id, _last_response_source, _forced_min_timestamp, _stuck_polls, _no_progress_since
     global _conversation_id, _seen_event_ids, _seen_event_hashes, _event_kinds
     global _last_completed_no_msg, _last_cloud_error
 
@@ -2053,6 +2054,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     # causing the first poll of a new send to skip events unnecessarily).
     _forced_min_timestamp = None
     _stuck_polls = 0
+    _no_progress_since: float | None = None  # when agent-stuck timer started
 
     # AUDIT: log entry state
     logger.info("AUDIT wait_entry: conv=%s ts=%s seen_ids=%d seen_hashes=%d last_idx=%d timeout=%d msgs_before=%d",
@@ -2305,6 +2307,8 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         # we're stuck on the same batch. processed_count is NOT checked because
         # it counts dedup-skipped events — when all 100 are skipped it's 100, not 0.
         if all_events and added == 0 and skipped == len(all_events):
+            if _no_progress_since is None:
+                _no_progress_since = time.time()
             _stuck_polls = (_stuck_polls or 0) + 1
             if _stuck_polls >= 3:
                 # Bump min_timestamp by 1 SECOND to skip past the entire
@@ -2325,14 +2329,25 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                                    "forced bump to %s (+1s)",
                                    _last_event_timestamp, _stuck_polls, _forced_min_timestamp)
                     _stuck_polls = 0
+            # If agent is "running" but no progress for 60+ seconds, it's stuck.
+            # The agent finished its tools but Cloud API never produced the final
+            # MessageEvent. Break out and let caller handle it (recovery/retry).
+            if _no_progress_since and (time.time() - _no_progress_since) > 60:
+                logger.warning("AGENT_STUCK: conv=%s status=%s no_progress=%ds "
+                               "all_events=%d skipped=%d — breaking out of wait loop",
+                               _conversation_id, status, int(time.time() - _no_progress_since),
+                               len(all_events), skipped)
+                break
         elif not all_events or len(all_events) == 0:
             # No events at all this poll — clear forced ts if set
             _stuck_polls = 0
+            _no_progress_since = None
             if _forced_min_timestamp is not None:
                 logger.info("PAGINATION_DEADLOCK: no events with forced ts — clearing")
                 _forced_min_timestamp = None
         else:
             _stuck_polls = 0
+            _no_progress_since = None
             # New events found — clear forced timestamp
             if added > 0 and _forced_min_timestamp is not None:
                 logger.info("PAGINATION_DEADLOCK: break through — new events found after forced bump")
