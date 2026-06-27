@@ -2309,12 +2309,22 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 # Bump min_timestamp by 1 SECOND to skip past the entire
                 # same-timestamp batch. 1µs was too small (API may truncate
                 # sub-ms precision).
-                import re as _ts_re
-                _ts_match = _ts_re.search(r'(\d+)$', _last_event_timestamp)
-                if _ts_match:
-                    _digits = _ts_match.group(1)
-                    _bumped = str(int(_digits) + 1000000).zfill(len(_digits))
-                    _forced_min_timestamp = _last_event_timestamp[:_ts_match.start(1)] + _bumped
+                #
+                # IMPORTANT: Parse + add + re-format properly, NOT string
+                # manipulation. The old code did `int(digits) + 1_000_000`
+                # and inserted back, but e.g. 529054 → 1529054 becomes
+                # ".1529054" = 0.15s (EARLIER than 0.53s!). This caused
+                # the forced timestamp to go backwards and never break
+                # the deadlock.
+                try:
+                    import datetime as _dt
+                    _parsed = _dt.datetime.fromisoformat(_last_event_timestamp)
+                    _bumped_dt = _parsed + _dt.timedelta(seconds=1)
+                    _forced_min_timestamp = _bumped_dt.isoformat()
+                except Exception:
+                    # Fallback: just use current time
+                    _forced_min_timestamp = _dt.datetime.now().isoformat()
+                if _forced_min_timestamp:
                     logger.warning("PAGINATION_DEADLOCK: ts=%s stuck for %d polls — "
                                    "forced bump to %s (+1s)",
                                    _last_event_timestamp, _stuck_polls, _forced_min_timestamp)
