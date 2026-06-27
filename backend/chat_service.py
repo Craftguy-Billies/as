@@ -1223,6 +1223,7 @@ def _process_batch_worker() -> None:
     global _conversation_id, _conversation_status, _last_event_index, _last_event_timestamp, _sandbox_id
     global _last_completed_no_msg, _batch_started_at
     global _seen_event_ids, _seen_event_hashes, _event_kinds
+    global _last_cloud_error, _batch_cloud_retries
     _batch_started_at = time.time()
 
     try:
