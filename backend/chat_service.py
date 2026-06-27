@@ -44,10 +44,12 @@ _seen_event_ids: set[str] = set()  # dedup: event IDs already added to chat
 # Content hashes for events without Cloud API IDs (persistent across send() calls)
 _seen_event_hashes: set[int] = set()
 _current_repo_key: str = ""  # current repo — determines which chat history to show
+_last_cloud_error: str | None = None  # set when Cloud API returns error/failed status; None = no error
 _messages_by_repo: dict[str, list[dict]] = {}  # per-repo chat history
 _msg_counter: int = 0  # monotonically increasing message ID
 _lock = threading.Lock()
 _processing_repo: str = ""  # repo currently being processed by a non-batch send()
+_batch_cloud_retries: int = 0  # consecutive Cloud API retries for current batch prompt
 
 def _next_msg_id() -> int:
     global _msg_counter
@@ -1367,12 +1369,50 @@ def _process_batch_worker() -> None:
                             "timestamp": int(time.time() * 1000),
                         })
 
+            # --- Cloud API error retry ---
+            # When send() returns an error AND _last_cloud_error is set, the
+            # Cloud API itself errored (sandbox crash, OOM, timeout). Retry
+            # up to 3 times with a fresh conversation. This is separate from
+            # COMPLETED_NO_MSG (transient index delay — the agent finished OK
+            # but the message wasn't indexed yet).
+            if _last_cloud_error:
+                _batch_cloud_retries += 1
+                if _batch_cloud_retries < 3:
+                    logger.warning("CLOUD_RETRY [%d/%d] attempt %d/3: %s",
+                                   pos, total, _batch_cloud_retries, _last_cloud_error)
+                    _last_cloud_error = None
+                    with _lock:
+                        _conversation_id = None
+                        _conv_id_at_last_assistant = None
+                        _last_event_index = 0
+                        _last_event_timestamp = ""
+                        _forced_min_timestamp = None
+                        _stuck_polls = 0
+                        _sandbox_id = None
+                        _seen_event_ids.clear()
+                        _seen_event_hashes.clear()
+                        _event_kinds.clear()
+                        _persist_to_db()
+                    # Remove the error event we just appended — the user
+                    # shouldn't see a spurious error flash before retry
+                    with _lock:
+                        if _msgs() and _msgs()[-1].get("role") == "error":
+                            _msgs().pop()
+                    time.sleep(3)  # brief cool-off between retries
+                    continue  # retry same prompt without incrementing position
+                else:
+                    # All 3 retries exhausted — reset counter and let it fail
+                    _batch_cloud_retries = 0
+                    logger.error("CLOUD_RETRY [%d/%d] ALL 3 RETRIES EXHAUSTED: %s",
+                                 pos, total, _last_cloud_error)
+
             with _lock:
                 skip_prompt = _batch_skip_prompt
                 if not skip_prompt:
                     _batch_position += 1
                 else:
                     _batch_skip_prompt = False  # reset after consumption
+                _batch_cloud_retries = 0  # reset retry counter for next prompt
                 _persist_to_db()
 
             time.sleep(1)  # brief pause between prompts
@@ -1995,7 +2035,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     """
     global _last_event_index, _last_event_timestamp, _conversation_status, _sandbox_id, _last_response_source, _forced_min_timestamp, _stuck_polls
     global _conversation_id, _seen_event_ids, _seen_event_hashes, _event_kinds
-    global _last_completed_no_msg
+    global _last_completed_no_msg, _last_cloud_error
 
     if timeout is None:
         timeout = _CHAT_TIMEOUT
@@ -2006,6 +2046,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     last_status = ""
     last_event_count = 0
     _last_completed_no_msg = False
+    _last_cloud_error = None  # reset Cloud API error flag for this send
     # Reset pagination deadlock state for this send() to prevent stale state
     # from a previous conversation leaking across (e.g. old _forced_min_timestamp
     # causing the first poll of a new send to skip events unnecessarily).
@@ -2332,7 +2373,9 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             _conversation_status = "idle"
             err_detail = items[0].get("error_message", "unknown error")
             err_type = items[0].get("error_type", "")
-            logger.warning("Conversation %s: type=%s detail=%s", status, err_type, err_detail)
+            logger.error("CLOUD_API_ERROR: conv=%s status=%s type=%s detail=%s elapsed=%ds seen_ids=%d",
+                         _conversation_id, status, err_type, err_detail, int(time.time() - start),
+                         len(_seen_event_ids))
             # Stream the failure as a visible event
             parts = [f"[ERROR] Conversation {status}"]
             if err_type:
@@ -2345,15 +2388,15 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                     "kind": "ErrorEvent",
                     "timestamp": int(time.time() * 1000),
                 })
-            # Return any accumulated messages instead of None — the AI may
-            # have generated a partial response before the error. Discarding
-            # it makes the user see only tool events + error (no AI output).
-            # A non-empty response keeps Phase 3 happy and the user informed.
-            if all_new_msgs:
-                logger.info("Error with %d accumulated msgs — returning them", len(all_new_msgs))
-                return "\n\n".join(all_new_msgs) if len(all_new_msgs) > 1 else all_new_msgs[-1]
-            # No messages — return error detail as response so user knows why
-            return f"Task {status}: {err_detail}"
+            # Set module-level flag so send() can detect and retry with a new
+            # conversation. Unlike COMPLETED_NO_MSG (transient index delay), this
+            # is a genuine Cloud API error (sandbox crash, OOM, timeout) that
+            # requires a fresh conversation to recover from.
+            _last_cloud_error = f"{status}:{err_type}:{err_detail}"
+            # Return None — do NOT return the error message as if it were a
+            # successful agent response. The retry logic in send() checks
+            # _last_cloud_error and retries with a new conversation.
+            return None
 
     # When finished, try trajectory zip to get the COMPLETE last response.
     # events/search may return truncated event lists. Only use zip as a
