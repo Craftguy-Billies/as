@@ -2306,25 +2306,20 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         # it counts dedup-skipped events — when all 100 are skipped it's 100, not 0.
         if all_events and added == 0 and skipped == len(all_events):
             _stuck_polls = (_stuck_polls or 0) + 1
-            if _stuck_polls >= 3 and _forced_min_timestamp is None:
+            if _stuck_polls >= 3:
                 # Bump min_timestamp by 1 SECOND to skip past the entire
-                # same-timestamp batch. 1µs was too small (API may truncate
-                # sub-ms precision).
-                #
-                # IMPORTANT: Parse + add + re-format properly, NOT string
-                # manipulation. The old code did `int(digits) + 1_000_000`
-                # and inserted back, but e.g. 529054 → 1529054 becomes
-                # ".1529054" = 0.15s (EARLIER than 0.53s!). This caused
-                # the forced timestamp to go backwards and never break
-                # the deadlock.
-                try:
-                    import datetime as _dt
-                    _parsed = _dt.datetime.fromisoformat(_last_event_timestamp)
-                    _bumped_dt = _parsed + _dt.timedelta(seconds=1)
-                    _forced_min_timestamp = _bumped_dt.isoformat()
-                except Exception:
-                    # Fallback: just use current time
-                    _forced_min_timestamp = _dt.datetime.now().isoformat()
+                # same-timestamp batch. Works even if _forced_min_timestamp is
+                # already set (previous bump didn't fully escape) — each
+                # recurrence adds another +1s until we break through.
+                _prev_ts = _forced_min_timestamp or _last_event_timestamp
+                if _prev_ts:
+                    try:
+                        import datetime as _dt
+                        _parsed = _dt.datetime.fromisoformat(_prev_ts)
+                        _bumped_dt = _parsed + _dt.timedelta(seconds=1)
+                        _forced_min_timestamp = _bumped_dt.isoformat()
+                    except Exception:
+                        _forced_min_timestamp = _dt.datetime.now().isoformat()
                 if _forced_min_timestamp:
                     logger.warning("PAGINATION_DEADLOCK: ts=%s stuck for %d polls — "
                                    "forced bump to %s (+1s)",
