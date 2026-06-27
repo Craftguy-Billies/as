@@ -38,7 +38,6 @@ _last_event_index: int = 0
 _last_event_timestamp: str = ""  # timestamp of last seen event for min_timestamp filtering
 _forced_min_timestamp: str | None = None  # set by PAGINATION_DEADLOCK to force-skip same-ts events
 _stuck_polls: int = 0  # consecutive polls where all events were dedup-skipped
-_no_progress_since: float | None = None  # when agent-stuck timer started
 _sandbox_id: str | None = None
 _event_kinds: set[str] = set()  # diagnostic: all event kinds seen in current conversation
 _seen_event_ids: set[str] = set()  # dedup: event IDs already added to chat
@@ -2035,7 +2034,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
 
     Timeout: VIBECODE_CHAT_TIMEOUT env var (default 7200s = 2 hours).
     """
-    global _last_event_index, _last_event_timestamp, _conversation_status, _sandbox_id, _last_response_source, _forced_min_timestamp, _stuck_polls, _no_progress_since
+    global _last_event_index, _last_event_timestamp, _conversation_status, _sandbox_id, _last_response_source, _forced_min_timestamp, _stuck_polls
     global _conversation_id, _seen_event_ids, _seen_event_hashes, _event_kinds
     global _last_completed_no_msg, _last_cloud_error
 
@@ -2054,7 +2053,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     # causing the first poll of a new send to skip events unnecessarily).
     _forced_min_timestamp = None
     _stuck_polls = 0
-    _no_progress_since: float | None = None  # when agent-stuck timer started
+    _in_silent_wait = False  # True once we hit 100-event limit and stop polling events
 
     # AUDIT: log entry state
     logger.info("AUDIT wait_entry: conv=%s ts=%s seen_ids=%d seen_hashes=%d last_idx=%d timeout=%d msgs_before=%d",
@@ -2128,44 +2127,122 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                 })
 
         # -- Get events (SAME endpoint as agent_runner) --
-        # Use min_timestamp to get only new events after the last seen one.
-        # IMPORTANT: Cloud API's events/search does NOT support `offset`
-        # (returns 422). Max limit=100 (confirmed by OpenHands API docs).
-        # 100 events per poll is sufficient for real-time streaming.
+        # In silent wait: events/search can't paginate past 100 events,
+        # so skip the API call entirely. Periodically check ZIP trajectory
+        # for completion (Cloud API status endpoint may return stale "running").
         all_events: list = []
-        try:
-            params: dict = {"limit": 100}
-            # Use forced timestamp if set (PAGINATION_DEADLOCK bypass), else normal
-            _ts_to_use = _forced_min_timestamp or _last_event_timestamp
-            if _ts_to_use:
-                params["min_timestamp"] = _ts_to_use
-            r2 = httpx.get(
-                f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
-                headers=_headers(),
-                params=params,
-                timeout=10,
-            )
-            r2.raise_for_status()
-            events_data = r2.json()
-
-            # Robust extraction: try "items", "events", "data", "results", or bare list
-            if isinstance(events_data, list):
-                all_events = events_data
-            elif isinstance(events_data, dict):
-                all_events = (
-                    events_data.get("items")
-                    or events_data.get("events")
-                    or events_data.get("data")
-                    or events_data.get("results")
-                    or []
+        added = 0
+        skipped = 0
+        if _in_silent_wait:
+            elapsed = int(time.time() - start)
+            # Check ZIP every 30s during silent wait to detect completion
+            # (status endpoint may return stale "running").
+            _last_zip_check = getattr(_wait_for_response, '_last_zip_check', 0)
+            if elapsed - _last_zip_check >= 30:
+                _wait_for_response._last_zip_check = elapsed
+                logger.info("SILENT_WAIT ZIP check at %ds: conv=%s", elapsed, _conversation_id)
+                try:
+                    import io, zipfile, re as _re
+                    r_zip = httpx.head(
+                        f"{CLOUD_API_URL}/api/v1/app-conversations/{_conversation_id}/download",
+                        headers=_headers(),
+                        timeout=10,
+                    )
+                    content_length = r_zip.headers.get("content-length", "0")
+                    # Only download ZIP if size changed from last check
+                    _last_size = getattr(_wait_for_response, '_zip_last_size', 0)
+                    new_size = int(content_length) if content_length and content_length != "0" else 0
+                    if new_size == 0 or new_size == _last_size:
+                        logger.debug("SILENT_WAIT ZIP size=%s (unchanged)", content_length)
+                    else:
+                        _wait_for_response._zip_last_size = new_size
+                        r_zip = httpx.get(
+                            f"{CLOUD_API_URL}/api/v1/app-conversations/{_conversation_id}/download",
+                            headers=_headers(),
+                            timeout=30,
+                        )
+                        r_zip.raise_for_status()
+                        zf = zipfile.ZipFile(io.BytesIO(r_zip.content))
+                        def _num_key(name):
+                            return [int(t) if t.isdigit() else t.lower() for t in _re.split(r'(\d+)', name)]
+                        event_files = sorted(
+                            [n for n in zf.namelist() if n.startswith("event_") and n.endswith(".json")],
+                            key=_num_key,
+                        )
+                        logger.info("SILENT_WAIT ZIP: %d event files", len(event_files))
+                        _last_assistant = None
+                        with _lock:
+                            for m in reversed(_msgs()):
+                                if m.get("role") == "assistant":
+                                    _last_assistant = m.get("content", "")
+                                    break
+                        for fname in reversed(event_files):
+                            with zf.open(fname) as f:
+                                evt = json.loads(f.read())
+                            if evt.get("kind") == "MessageEvent" and evt.get("source") == "agent":
+                                evt_id = evt.get("id", "")
+                                if evt_id and evt_id in _seen_event_ids:
+                                    continue
+                                raw = _extract_message_text(evt)
+                                if not raw:
+                                    continue
+                                if _last_assistant and raw.strip() == _last_assistant.strip():
+                                    continue
+                                logger.info("SILENT_WAIT ZIP: FOUND new MessageEvent ts=%s (len=%d)",
+                                            evt.get("timestamp", 0), len(raw))
+                                all_new_msgs = [raw]
+                                _last_response_source = "zip_silent"
+                                if evt_id:
+                                    _seen_event_ids.add(evt_id)
+                                # Break out of inner for loop
+                                break
+                    # If we found a response via ZIP, break out of wait loop
+                    if all_new_msgs:
+                        logger.info("SILENT_WAIT: breaking wait loop — found response via ZIP")
+                        break
+                except Exception as e:
+                    logger.warning("SILENT_WAIT ZIP check error: %s", e)
+            # If ZIP already found a response, break wait loop
+            if all_new_msgs:
+                break
+        else:
+            # Use min_timestamp to get only new events after the last seen one.
+            # IMPORTANT: Cloud API's events/search does NOT support `offset`
+            # (returns 422). Max limit=100 (confirmed by OpenHands API docs).
+            # 100 events per poll is sufficient for real-time streaming.
+            try:
+                params: dict = {"limit": 100}
+                # Use forced timestamp if set (PAGINATION_DEADLOCK bypass), else normal
+                _ts_to_use = _forced_min_timestamp or _last_event_timestamp
+                if _ts_to_use:
+                    params["min_timestamp"] = _ts_to_use
+                r2 = httpx.get(
+                    f"{CLOUD_API_URL}/api/v1/conversation/{_conversation_id}/events/search",
+                    headers=_headers(),
+                    params=params,
+                    timeout=10,
                 )
-            if _last_event_timestamp and all_events:
-                logger.info("Events poll min_ts=%s: got %d events",
-                            _last_event_timestamp[:19], len(all_events))
-        except Exception as e:
-            logger.warning("Events poll error: %s", e)
-            if not all_events:
-                continue
+                r2.raise_for_status()
+                events_data = r2.json()
+
+                # Robust extraction: try "items", "events", "data", "results", or bare list
+                if isinstance(events_data, list):
+                    all_events = events_data
+                elif isinstance(events_data, dict):
+                    all_events = (
+                        events_data.get("items")
+                        or events_data.get("events")
+                        or events_data.get("data")
+                        or events_data.get("results")
+                        or []
+                    )
+                if _last_event_timestamp and all_events:
+                    logger.info("Events poll min_ts=%s: got %d events",
+                                _last_event_timestamp[:19], len(all_events))
+            except Exception as e:
+                logger.warning("Events poll error: %s", e)
+                if not all_events:
+                    continue
 
         # _last_event_index might be stale (from a previous send() call), so
         # use the raw diff for logging only. Negative means events were trimmed
@@ -2299,59 +2376,28 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                          processed_count, _last_event_index, len(_seen_event_ids))
 
         # --- PAGINATION DEADLOCK DETECTION ---
-        # When events/search?limit=100 returns 100 events all with the SAME
-        # timestamp (e.g. agent generated 100+ tool events in <1ms), the
-        # min_timestamp filter keeps returning the same 100 events forever
-        # because _last_event_timestamp never advances past the batch.
-        # Detect this: if ALL events were dedup-skipped (added=0, skipped=len),
-        # we're stuck on the same batch. processed_count is NOT checked because
-        # it counts dedup-skipped events — when all 100 are skipped it's 100, not 0.
+        # Cloud API events/search?limit=100 returns the FIRST 100 events
+        # matching min_timestamp. When the agent generates 100+ events, we
+        # can never paginate past event 100 — every poll returns the same
+        # 100 events, all dedup-skipped.
+        #
+        # Fix: enter "silent wait" mode. Stop polling events/search (which
+        # will never return events 101+). Just poll conversation status every
+        # 10s. When status changes to completed/finished, the code below
+        # runs desperation poll + ZIP fallback to get the final response.
         if all_events and added == 0 and skipped == len(all_events):
-            if _no_progress_since is None:
-                _no_progress_since = time.time()
             _stuck_polls = (_stuck_polls or 0) + 1
             if _stuck_polls >= 3:
-                # Bump min_timestamp by 1 SECOND to skip past the entire
-                # same-timestamp batch. Works even if _forced_min_timestamp is
-                # already set (previous bump didn't fully escape) — each
-                # recurrence adds another +1s until we break through.
-                _prev_ts = _forced_min_timestamp or _last_event_timestamp
-                if _prev_ts:
-                    try:
-                        import datetime as _dt
-                        _parsed = _dt.datetime.fromisoformat(_prev_ts)
-                        _bumped_dt = _parsed + _dt.timedelta(seconds=1)
-                        _forced_min_timestamp = _bumped_dt.isoformat()
-                    except Exception:
-                        _forced_min_timestamp = _dt.datetime.now().isoformat()
-                if _forced_min_timestamp:
-                    logger.warning("PAGINATION_DEADLOCK: ts=%s stuck for %d polls — "
-                                   "forced bump to %s (+1s)",
-                                   _last_event_timestamp, _stuck_polls, _forced_min_timestamp)
-                    _stuck_polls = 0
-            # If agent is "running" but no progress for 60+ seconds, it's stuck.
-            # The agent finished its tools but Cloud API never produced the final
-            # MessageEvent. Break out and let caller handle it (recovery/retry).
-            if _no_progress_since and (time.time() - _no_progress_since) > 60:
-                logger.warning("AGENT_STUCK: conv=%s status=%s no_progress=%ds "
-                               "all_events=%d skipped=%d — breaking out of wait loop",
-                               _conversation_id, status, int(time.time() - _no_progress_since),
-                               len(all_events), skipped)
-                break
+                if not _in_silent_wait:
+                    logger.warning("SILENT_WAIT: conv=%s stuck at %d events (limit=100 can't paginate). "
+                                   "Entering silent wait — polling status only (every 10s).",
+                                   _conversation_id, len(all_events))
+                    _in_silent_wait = True
+                _stuck_polls = 0  # prevent re-logging every 3 polls
         elif not all_events or len(all_events) == 0:
-            # No events at all this poll — clear forced ts if set
             _stuck_polls = 0
-            _no_progress_since = None
-            if _forced_min_timestamp is not None:
-                logger.info("PAGINATION_DEADLOCK: no events with forced ts — clearing")
-                _forced_min_timestamp = None
         else:
             _stuck_polls = 0
-            _no_progress_since = None
-            # New events found — clear forced timestamp
-            if added > 0 and _forced_min_timestamp is not None:
-                logger.info("PAGINATION_DEADLOCK: break through — new events found after forced bump")
-                _forced_min_timestamp = None
 
         # AUDIT: log per-poll stats for event streaming diagnostics
         poll_count += 1
