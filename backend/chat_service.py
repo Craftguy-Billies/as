@@ -2137,7 +2137,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             elapsed = int(time.time() - start)
             _last_zip_check = getattr(_wait_for_response, '_last_zip_check', 0)
             _zip_last_size = getattr(_wait_for_response, '_zip_last_size', 0)
-            if elapsed - _last_zip_check >= 30:
+            if elapsed - _last_zip_check >= 60:
                 _wait_for_response._last_zip_check = elapsed
                 logger.info("SILENT_WAIT ZIP check at %ds: conv=%s", elapsed, _conversation_id)
                 # HEAD first to check if ZIP changed
@@ -2413,7 +2413,7 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
             if _stuck_polls >= 3:
                 if not _in_silent_wait:
                     logger.warning("SILENT_WAIT: conv=%s stuck at %d events (limit=100 can't paginate). "
-                                   "Entering silent wait — polling status only (every 10s).",
+                                   "Entering silent wait — ZIP check every 60s.",
                                    _conversation_id, len(all_events))
                     _in_silent_wait = True
                 _stuck_polls = 0  # prevent re-logging every 3 polls
