@@ -1549,7 +1549,9 @@ def _send_message(conversation_id: str, prompt: str) -> tuple[bool, str | None]:
         "run": True,
     }
 
-    for attempt in range(2):
+    import time as _st
+    max_attempts = 5
+    for attempt in range(max_attempts):
         try:
             resp = httpx.post(
                 f"{CLOUD_API_URL}/api/v1/app-conversations/{conversation_id}/send-message",
@@ -1560,14 +1562,19 @@ def _send_message(conversation_id: str, prompt: str) -> tuple[bool, str | None]:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 409:
-                logger.warning("send-message 409: sandbox not running for %s", conversation_id)
+                logger.warning("send-message 409: sandbox not running for %s (attempt %d/%d)", conversation_id, attempt + 1, max_attempts)
+                # Attempt 0: try resume sandbox first
                 if attempt == 0 and _sandbox_id:
-                    # Try resume sandbox, then retry
                     resume_err = _resume_sandbox(_sandbox_id)
-                    if resume_err:
-                        return False, f"Sandbox not running and resume failed: {resume_err}"
-                    continue  # retry send-message
-                return False, f"Sandbox not running (409). Please wait and try again."
+                    if not resume_err:
+                        logger.info("send-message: sandbox resumed, retrying immediately")
+                        continue
+                    logger.warning("send-message: resume failed (%s), will retry with backoff", resume_err)
+                # Backoff before retry: 3s, 5s, 10s, 15s
+                backoff = [3, 5, 10, 15][min(attempt, 3)]
+                logger.info("send-message: retrying in %ds (attempt %d/%d)", backoff, attempt + 1, max_attempts)
+                _st.sleep(backoff)
+                continue
             raise  # re-raise other HTTP errors
         except httpx.TimeoutException:
             return False, (
