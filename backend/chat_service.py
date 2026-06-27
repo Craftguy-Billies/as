@@ -2467,6 +2467,19 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                                _conversation_id, status, len(_seen_event_ids))
             break
         elif status in ("failed", "error", "stopped"):
+            # Transient error guard: Cloud API may briefly report "error"
+            # while propagating state. Give it 1-2 more polls to stabilize
+            # into "completed" before treating this as fatal.
+            _last_err_status = getattr(_wait_for_response, '_last_err_status', "")
+            _last_err_time = getattr(_wait_for_response, '_last_err_time', 0)
+            if status != _last_err_status or time.time() - _last_err_time > 15:
+                _wait_for_response._last_err_status = status
+                _wait_for_response._last_err_time = time.time()
+                logger.warning("CLOUD_API_ERROR (transient check): conv=%s status=%s elapsed=%ds — "
+                               "waiting 6s before giving up",
+                               _conversation_id, status, int(time.time() - start))
+                time.sleep(6)
+                continue
             _conversation_status = "idle"
             err_detail = items[0].get("error_message", "unknown error")
             err_type = items[0].get("error_type", "")
