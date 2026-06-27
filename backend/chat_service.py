@@ -2129,39 +2129,40 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
         # -- Get events (SAME endpoint as agent_runner) --
         # In silent wait: events/search can't paginate past 100 events,
         # so skip the API call entirely. Periodically check ZIP trajectory
-        # for completion (Cloud API status endpoint may return stale "running").
+        # to stream events 101+ to the UI.
         all_events: list = []
         added = 0
         skipped = 0
         if _in_silent_wait:
             elapsed = int(time.time() - start)
-            # Check ZIP every 30s during silent wait to detect completion
-            # (status endpoint may return stale "running").
             _last_zip_check = getattr(_wait_for_response, '_last_zip_check', 0)
+            _zip_last_size = getattr(_wait_for_response, '_zip_last_size', 0)
             if elapsed - _last_zip_check >= 30:
                 _wait_for_response._last_zip_check = elapsed
                 logger.info("SILENT_WAIT ZIP check at %ds: conv=%s", elapsed, _conversation_id)
+                # HEAD first to check if ZIP changed
+                _should_download = True
                 try:
-                    import io, zipfile, re as _re
-                    r_zip = httpx.head(
+                    r_head = httpx.head(
                         f"{CLOUD_API_URL}/api/v1/app-conversations/{_conversation_id}/download",
                         headers=_headers(),
                         timeout=10,
                     )
-                    content_length = r_zip.headers.get("content-length", "0")
-                    # Only download ZIP if size changed from last check
-                    _last_size = getattr(_wait_for_response, '_zip_last_size', 0)
-                    new_size = int(content_length) if content_length and content_length != "0" else 0
-                    if new_size == 0 or new_size == _last_size:
-                        logger.debug("SILENT_WAIT ZIP size=%s (unchanged)", content_length)
-                    else:
-                        _wait_for_response._zip_last_size = new_size
+                    new_size = int(r_head.headers.get("content-length", "0"))
+                    if new_size > 0 and new_size == _zip_last_size:
+                        _should_download = False
+                except Exception:
+                    pass  # HEAD failed, try GET anyway
+                if _should_download:
+                    try:
+                        import io, zipfile, re as _re
                         r_zip = httpx.get(
                             f"{CLOUD_API_URL}/api/v1/app-conversations/{_conversation_id}/download",
                             headers=_headers(),
                             timeout=30,
                         )
                         r_zip.raise_for_status()
+                        _wait_for_response._zip_last_size = len(r_zip.content)
                         zf = zipfile.ZipFile(io.BytesIO(r_zip.content))
                         def _num_key(name):
                             return [int(t) if t.isdigit() else t.lower() for t in _re.split(r'(\d+)', name)]
@@ -2169,41 +2170,63 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                             [n for n in zf.namelist() if n.startswith("event_") and n.endswith(".json")],
                             key=_num_key,
                         )
-                        logger.info("SILENT_WAIT ZIP: %d event files", len(event_files))
-                        _last_assistant = None
-                        with _lock:
-                            for m in reversed(_msgs()):
-                                if m.get("role") == "assistant":
-                                    _last_assistant = m.get("content", "")
-                                    break
-                        for fname in reversed(event_files):
+                        logger.info("SILENT_WAIT ZIP: %d event files (seen_ids=%d)",
+                                    len(event_files), len(_seen_event_ids))
+                        # Scan ALL events in order: stream new tool events to UI,
+                        # and capture any new agent MessageEvent as final response.
+                        _new_streamed = 0
+                        for fname in event_files:
                             with zf.open(fname) as f:
                                 evt = json.loads(f.read())
-                            if evt.get("kind") == "MessageEvent" and evt.get("source") == "agent":
-                                evt_id = evt.get("id", "")
-                                if evt_id and evt_id in _seen_event_ids:
-                                    continue
-                                raw = _extract_message_text(evt)
-                                if not raw:
-                                    continue
-                                if _last_assistant and raw.strip() == _last_assistant.strip():
-                                    continue
-                                logger.info("SILENT_WAIT ZIP: FOUND new MessageEvent ts=%s (len=%d)",
-                                            evt.get("timestamp", 0), len(raw))
-                                all_new_msgs = [raw]
-                                _last_response_source = "zip_silent"
+                            evt_id = evt.get("id", "")
+                            # Skip events already seen via events/search
+                            if evt_id and evt_id in _seen_event_ids:
+                                continue
+                            kind = evt.get("kind", "")
+                            source = evt.get("source", "")
+                            # Register dedup for non-MessageEvents
+                            if kind != "MessageEvent" or source == "user":
                                 if evt_id:
                                     _seen_event_ids.add(evt_id)
-                                # Break out of inner for loop
-                                break
-                    # If we found a response via ZIP, break out of wait loop
-                    if all_new_msgs:
-                        logger.info("SILENT_WAIT: breaking wait loop — found response via ZIP")
-                        break
-                except Exception as e:
-                    logger.warning("SILENT_WAIT ZIP check error: %s", e)
-            # If ZIP already found a response, break wait loop
+                                # Stream to UI
+                                event_preview = _format_event_preview(evt)
+                                if event_preview:
+                                    with _lock:
+                                        _msgs().append({"id": _next_msg_id(),
+                                            "role": "event",
+                                            "content": event_preview,
+                                            "kind": kind,
+                                            "tool_name": evt.get("tool_name", ""),
+                                            "timestamp": int(time.time() * 1000),
+                                        })
+                                        if len(_msgs()) > 500:
+                                            _msgs()[:] = _msgs()[-400:]
+                                    _new_streamed += 1
+                            else:
+                                # Agent MessageEvent — extract final response
+                                raw = _extract_message_text(evt)
+                                if raw:
+                                    _last_assistant = None
+                                    with _lock:
+                                        for m in reversed(_msgs()):
+                                            if m.get("role") == "assistant":
+                                                _last_assistant = m.get("content", "")
+                                                break
+                                    if _last_assistant and raw.strip() == _last_assistant.strip():
+                                        continue  # stale from previous turn
+                                    logger.info("SILENT_WAIT ZIP: FOUND new MessageEvent ts=%s (len=%d)",
+                                                evt.get("timestamp", 0), len(raw))
+                                    if evt_id:
+                                        _seen_event_ids.add(evt_id)
+                                    all_new_msgs = [raw]
+                                    _last_response_source = "zip_silent"
+                        if _new_streamed > 0:
+                            logger.info("SILENT_WAIT ZIP: streamed %d new events to UI", _new_streamed)
+                    except Exception as e:
+                        logger.warning("SILENT_WAIT ZIP check error: %s", e)
+            # If we found a response via ZIP, break out of wait loop
             if all_new_msgs:
+                logger.info("SILENT_WAIT: breaking wait loop — found response via ZIP")
                 break
         else:
             # Use min_timestamp to get only new events after the last seen one.
