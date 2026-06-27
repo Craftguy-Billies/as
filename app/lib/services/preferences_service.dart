@@ -9,6 +9,8 @@ class PreferencesService {
   static const _implementPromptKey = 'implement_prompt';
   static const _testPromptKey = 'test_prompt';
   static const _testEnabledKey = 'test_enabled';
+  static const _auditPromptKey = 'audit_prompt';
+  static const _auditEnabledKey = 'audit_enabled';
 
   late SharedPreferences _prefs;
 
@@ -23,6 +25,12 @@ class PreferencesService {
     "100 possibilities of sub use cases like: how about if the user pressed cancel before xxx? how about xxx? make sure all the sub use cases are also considered, whole flow zero issues\n"
     "\n"
     "full codebase view and search all potential possibilities is main requirement"
+  );
+  static const defaultAuditPrompt = (
+    "perform a thorough audit of the changes made\n"
+    "verify all edge cases, error handling, and state management\n"
+    "check for regressions, missing imports, and type safety\n"
+    "ensure the implementation is complete and production-ready"
   );
 
   String get serverUrl => _prefs.getString(_serverUrlKey) ?? defaultUrl;
@@ -40,6 +48,9 @@ class PreferencesService {
   /// Default is empty string — user writes their own.
   String get testPrompt => _prefs.getString(_testPromptKey) ?? '';
   bool get testEnabled => _prefs.getBool(_testEnabledKey) ?? false;
+
+  String get auditPrompt => _prefs.getString(_auditPromptKey) ?? defaultAuditPrompt;
+  bool get auditEnabled => _prefs.getBool(_auditEnabledKey) ?? false;
 
   Future<void> setServerUrl(String url) async {
     await _prefs.setString(_serverUrlKey, url);
@@ -71,6 +82,14 @@ class PreferencesService {
 
   Future<void> setTestEnabled(bool enabled) async {
     await _prefs.setBool(_testEnabledKey, enabled);
+  }
+
+  Future<void> setAuditPrompt(String prompt) async {
+    await _prefs.setString(_auditPromptKey, prompt);
+  }
+
+  Future<void> setAuditEnabled(bool enabled) async {
+    await _prefs.setBool(_auditEnabledKey, enabled);
   }
 
   bool get hasServerUrl => _prefs.getString(_serverUrlKey)?.isNotEmpty == true;

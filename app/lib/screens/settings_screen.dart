@@ -17,6 +17,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _gitEmailCtrl = TextEditingController();
   final _implementCtrl = TextEditingController();
   final _testCtrl = TextEditingController();
+  final _auditCtrl = TextEditingController();
   String _selectedModel = 'deepseek/deepseek-v4-flash';
   Timer? _urlDebounce;
 
@@ -28,6 +29,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _gitEmailCtrl.dispose();
     _implementCtrl.dispose();
     _testCtrl.dispose();
+    _auditCtrl.dispose();
     super.dispose();
   }
 
@@ -61,6 +63,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // Pre-populate test prompt from local prefs (default empty)
     if (_testCtrl.text.isEmpty) {
       _testCtrl.text = context.read<PreferencesService>().testPrompt;
+    }
+    // Pre-populate audit prompt from local prefs
+    if (_auditCtrl.text.isEmpty) {
+      _auditCtrl.text = context.read<PreferencesService>().auditPrompt;
     }
 
     // Pre-populate model selection from server state (only when default = first build)
@@ -304,6 +310,54 @@ class _SettingsScreenState extends State<SettingsScreen> {
             },
             icon: const Icon(Icons.save),
             label: const Text('Save Test Prompt'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF7C3AED),
+              foregroundColor: Colors.white,
+            ),
+          ),
+
+          const SizedBox(height: 32),
+
+          // Audit Prompt
+          _SectionTitle(title: 'Audit Prompt'),
+          const SizedBox(height: 8),
+          Text(
+            'When the "Audit" checkbox is checked, this prompt is appended '
+            'to each message. Customize per-device.',
+            style: TextStyle(color: Colors.grey[600], fontSize: 12),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _auditCtrl,
+            maxLines: 6,
+            style: const TextStyle(color: Colors.white, fontSize: 13),
+            decoration: InputDecoration(
+              hintText: 'Enter audit instructions…',
+              hintStyle: TextStyle(color: Colors.grey[700], fontSize: 13),
+              filled: true,
+              fillColor: const Color(0xFF1A1A2E),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide.none,
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          ElevatedButton.icon(
+            onPressed: () async {
+              final prefs = context.read<PreferencesService>();
+              await prefs.setAuditPrompt(_auditCtrl.text.trim());
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Audit prompt saved'),
+                    backgroundColor: Colors.green,
+                  ),
+                );
+              }
+            },
+            icon: const Icon(Icons.save),
+            label: const Text('Save Audit Prompt'),
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFF7C3AED),
               foregroundColor: Colors.white,

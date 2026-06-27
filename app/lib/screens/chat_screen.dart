@@ -31,6 +31,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _showScrollToBottom = false;  // FAB visible when scrolled up
   bool _implementChecked = false;  // "Implement" checkbox — appends audit guard paragraph
   bool _testChecked = false;       // "Test & Debug" checkbox — appends test prompt
+  bool _auditChecked = false;      // "Audit" checkbox — appends audit prompt
 
   String _lastRepo = '';  // track repo changes to auto-clear branch
 
@@ -235,6 +236,13 @@ class _ChatScreenState extends State<ChatScreen> {
         text += "\n\n===============================================================\n"
             "$testPrompt";
       }
+    }
+    // Append "Audit" prompt when checkbox is checked.
+    // Reads from PreferencesService (user-editable in settings, per-device).
+    if (_auditChecked) {
+      final auditPrompt = context.read<PreferencesService>().auditPrompt;
+      text += "\n\n===============================================================\n"
+          "$auditPrompt";
     }
 
     final repo = _repoCtrl.text.trim();
@@ -877,6 +885,39 @@ class _ChatScreenState extends State<ChatScreen> {
                     'Test',
                     style: TextStyle(
                       color: _testChecked ? const Color(0xFFA78BFA) : Colors.grey[500],
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                // "Audit" checkbox — appends audit prompt
+                SizedBox(
+                  height: 20,
+                  width: 20,
+                  child: Checkbox(
+                    value: _auditChecked,
+                    onChanged: (v) {
+                      setState(() => _auditChecked = v ?? false);
+                      context.read<PreferencesService>().setAuditEnabled(v ?? false);
+                    },
+                    activeColor: const Color(0xFF7C3AED),
+                    checkColor: Colors.white,
+                    side: const BorderSide(color: Color(0xFF4A4A5E), width: 1.5),
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                GestureDetector(
+                  onTap: () {
+                    final newVal = !_auditChecked;
+                    setState(() => _auditChecked = newVal);
+                    context.read<PreferencesService>().setAuditEnabled(newVal);
+                  },
+                  child: Text(
+                    'Audit',
+                    style: TextStyle(
+                      color: _auditChecked ? const Color(0xFFA78BFA) : Colors.grey[500],
                       fontSize: 12,
                       fontWeight: FontWeight.w500,
                     ),
