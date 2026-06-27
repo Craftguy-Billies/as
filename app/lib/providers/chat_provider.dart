@@ -79,10 +79,10 @@ class ChatProvider extends ChangeNotifier {
   bool get branchesAttempted => _branchesAttempted;
   bool _branchesAttempted = false;  // differentiate "loading" from "empty"
 
-  // Lazy message loading: show latest N first, "load earlier" button at top
-  // Set high because each user turn spawns ~10-15 internal events ([MSG], [START],
-  // [TOOL], etc.) which all count as separate items in _messages.
-  final _pageSize = 200;
+  // Lazy message loading: show latest N first, "load earlier" button at top.
+  // Set high (2000) so a single user turn with 500+ ZIP-streamed events shows
+  // fully. "Load earlier" only appears for multi-turn conversation history.
+  final _pageSize = 2000;
   int _showFromIndex = 0;  // index into _messages to start displaying from
   int get showFromIndex => _showFromIndex;
   bool get hasMoreMessages => _showFromIndex > 0;
