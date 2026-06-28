@@ -82,6 +82,9 @@ async function writeState(env, repo, state) {
   if (state._extracted_hashes && Object.keys(state._extracted_hashes).length > 100) {
     state._extracted_hashes = {};
   }
+  if (state.seen_event_ids && state.seen_event_ids.length > 2000) {
+    state.seen_event_ids = state.seen_event_ids.slice(-1500);
+  }
   await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
 }
 
