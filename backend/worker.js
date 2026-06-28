@@ -1371,11 +1371,7 @@ async function route(method, path, url, request, env) {
       convStatus = pollResult.status;
       if (pollResult.sandbox_id) state.sandbox_id = pollResult.sandbox_id;
 
-      // Process events again (new events may have appeared since the direct call).
-      await processCloudEvents(env, state.conversation_id, state);
-
-      // Both paths below (completed, failed, error, idle, running) are
-      // identical to the original 90da2c6 code.
+      // events already processed above (line ~1344) — no need to call again.
       if (pollResult.status === 'completed') {
         let responseText = pollResult.response || state._pending_response;
         state._pending_response = undefined;
