@@ -1197,8 +1197,36 @@ async function route(method, path, url, request, env) {
         await writeState(env, repo, state);
       } catch (e) {
         console.error(`Create conv error: ${e.message}`);
-        q.cancelled = true;
-        state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] Failed to start agent. Please try again.`, kind: 'ErrorEvent', timestamp: now() });
+        // Don't cancel the queue — let the next poll retry.
+        // Track failures — after 3, skip this prompt to keep queue draining.
+        const maxCrash = 3;
+        const crashKey = `crash:${repo}:${q.position}`;
+        let crashCount = 0;
+        try {
+          const raw = await env.VIBECODE.get(crashKey);
+          if (raw) crashCount = parseInt(raw, 10) || 0;
+        } catch (_) {}
+        crashCount++;
+        if (crashCount >= maxCrash) {
+          // Skip this prompt — move to next
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] Skipping prompt #${q.position + 1}: agent stopped responding.`, kind: 'ErrorEvent', timestamp: now() });
+          state.messages.push({ id: nextMsgId(state), role: 'assistant', content: `[Skipped: agent failed to start]`, timestamp: now() });
+          q.position++;
+          q.done = Math.min(q.position, q.total);
+          state.conversation_id = null;
+          state.sandbox_id = null;
+          state.last_sent_position = -1;
+          state._run_started_at = undefined;
+          // Clean up crash counter
+          try { await env.VIBECODE.delete(crashKey); } catch (_) {}
+        } else {
+          try { await env.VIBECODE.put(crashKey, String(crashCount), { expirationTtl: 120 }); } catch (_) {}
+          // Only push error once per batch to avoid spamming
+          const lastMsg = state.messages[state.messages.length - 1];
+          if (!lastMsg || !lastMsg.content?.includes('starting agent')) {
+            state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] Failed to start agent (attempt ${crashCount}/${maxCrash}).`, kind: 'ErrorEvent', timestamp: now() });
+          }
+        }
         await writeState(env, repo, state);
       }
     }
