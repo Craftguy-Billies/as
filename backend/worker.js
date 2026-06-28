@@ -841,6 +841,7 @@ async function route(method, path, url, request, env) {
     try { body = await request.json(); } catch {
       return error('Invalid JSON body', 400);
     }
+    if (typeof body !== 'object' || body === null) return error('Invalid request body', 400);
     const prompt = (body.prompt || '').trim();
     const repo = (body.repo || '').trim();
     const branch = (body.branch || '').trim();
