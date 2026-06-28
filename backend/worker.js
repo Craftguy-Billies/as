@@ -29,6 +29,24 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key',
 };
 
+function simpleHash(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) - h) + s.charCodeAt(i);
+    h |= 0;
+  }
+  return 'h' + h;
+}
+
+function safeStr(v, maxLen) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v.slice(0, maxLen || 200);
+  if (typeof v === 'object') {
+    try { return JSON.stringify(v).slice(0, maxLen || 200); } catch { return String(v).slice(0, maxLen || 200); }
+  }
+  return String(v).slice(0, maxLen || 200);
+}
+
 function cloudHeaders(env) {
   return { 'Authorization': `Bearer ${env.OPENHANDS_CLOUD_API_KEY}`, 'Content-Type': 'application/json', 'Accept': 'application/json' };
 }
@@ -58,9 +76,11 @@ async function writeState(env, repo, state) {
   if (state.messages && state.messages.length > 500) {
     state.messages = state.messages.slice(-400);
   }
-  // Trim event_kinds to prevent unbounded growth
   if (state.event_kinds && Object.keys(state.event_kinds).length > 1000) {
     state.event_kinds = {};
+  }
+  if (state._extracted_hashes && Object.keys(state._extracted_hashes).length > 100) {
+    state._extracted_hashes = {};
   }
   await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
 }
@@ -356,17 +376,14 @@ async function fetchResponse(env, convId, state) {
 
     for (const evt of list) {
       const eid = String(evt.id || evt.event_id || '');
-      if (eid && seen.has(eid)) continue;
-      if (eid) seen.add(eid);
-
       const kind = evt.kind || evt.type || evt.event || '';
       const source = evt.source || '';
       const tool = evt.tool_name || evt.tool || evt.name || '';
       const ts = evt.timestamp || evt.created_at || now();
 
-      // --- MessageEvent (assistant response) ---
+      // --- MessageEvent (assistant response) — NEVER skip via seen check ---
+      // MessageEvents are tracked by whether their text was already extracted
       if (kind === 'MessageEvent' && source !== 'user') {
-        foundNewAssistant = true;
         const llmMsg = evt.llm_message || evt.message || null;
         if (!llmMsg) continue;
         let text = '';
@@ -386,13 +403,25 @@ async function fetchResponse(env, convId, state) {
           }
         }
         if (text) {
-          if (allText) allText += '\n\n';
-          allText += text;
+          // Dedup by hash: don't re-extract same text
+          const hash = simpleHash(text);
+          if (!state._extracted_hashes) state._extracted_hashes = {};
+          if (!state._extracted_hashes[hash]) {
+            state._extracted_hashes[hash] = true;
+            foundNewAssistant = true;
+            if (allText) allText += '\n\n';
+            allText += text;
+          }
         }
+        if (eid) seen.add(eid);
         continue;
       }
 
-      // Dedup tracking for non-MessageEvents
+      // For non-MessageEvents: skip via seen check
+      if (eid && seen.has(eid)) continue;
+      if (eid) seen.add(eid);
+
+      // Dedup tracking
       if (state.event_kinds?.[eid]) continue;
       if (!state.event_kinds) state.event_kinds = {};
       state.event_kinds[eid] = true;
@@ -453,15 +482,14 @@ async function fetchResponse(env, convId, state) {
         if (typeof obs === 'string') {
           try { obs = JSON.parse(obs); } catch { obs = { output: obs }; }
         }
-        const stdout = obs.stdout || obs.output || obs.content || '';
-        const stderr = obs.stderr || '';
+        const stdout = safeStr(obs.stdout || obs.output || obs.content || '', 200);
+        const stderr = safeStr(obs.stderr || '', 200);
 
         if (tool.includes('bash') || tool.includes('terminal') || tool.includes('execute')) {
           const out = stdout || stderr;
           if (out) {
-            const short = String(out).slice(0, 200).replace(/\n/g, ' ').trim();
             const tag = stderr ? '[WARN]' : '[OUT]';
-            state.messages.push({ id: nextMsgId(state), role: 'event', content: `${tag} ${short}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+            state.messages.push({ id: nextMsgId(state), role: 'event', content: `${tag} ${out}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
           }
         } else if (tool.includes('file_editor') || tool.includes('str_replace')) {
           const diff = obs.diff || '';
@@ -520,6 +548,7 @@ function emptyState(repo, branch, mode) {
     queue: { position: 0, total: 0, done: 0, prompts: [], modes: [], cancelled: false },
     seen_event_ids: [],
     event_kinds: {},
+    _extracted_hashes: {},
     last_event_index: 0,
     last_event_timestamp: '',
     last_sent_position: -1,
