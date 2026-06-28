@@ -821,7 +821,28 @@ async function route(method, path, url, request, env) {
   if (path === '/api/hello' && method === 'GET') {
     return json({ message: 'VibeCode Worker' });
   }
-  // Clear queue — full reset (same as DELETE /api/chat without repo)
+  // Cancel batch for a repo — clears queue/pending, keeps chat history.
+  // POST /api/chat/cancel?repo=owner/repo
+  if (path === '/api/chat/cancel' && method === 'POST') {
+    const repo = url.searchParams.get('repo') || '';
+    if (!repo) return error('repo required', 400);
+    const state = await readState(env, repo);
+    if (state) {
+      state.queue.prompts = [];
+      state.queue.modes = [];
+      state.queue.position = 0;
+      state.queue.total = 0;
+      state.queue.done = 0;
+      state.queue.cancelled = false;
+      state.last_sent_position = -1;
+      state._batch_skip = undefined;
+      state._run_started_at = undefined;
+      await writeState(env, repo, state);
+    }
+    return json({ ok: true, message: `Batch cancelled for ${repo}. Chat history preserved.` });
+  }
+
+  // Clear queue — full reset (kept for backwards compat, but per-repo cancel above is better)
   if (path === '/api/chat/clear-queue' && method === 'POST') {
     try {
       const list = await env.VIBECODE.list({ prefix: 'state:' });
