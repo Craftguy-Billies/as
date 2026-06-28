@@ -876,6 +876,22 @@ async function route(method, path, url, request, env) {
 
     const q = state.queue;
     const hasPending = q.position < q.total && !q.cancelled;
+
+    // Queue naturally completed — reset to clean idle state so the app
+    // doesn't show stale "1/1 done" after the task finishes.
+    if (!hasPending && q.total > 0) {
+      q.position = 0;
+      q.total = 0;
+      q.done = 0;
+      q.prompts = [];
+      q.modes = [];
+      q.cancelled = false;
+      state._batch_skip = undefined;
+      // Reset timer too; next task will set its own.
+      state._run_started_at = undefined;
+      // Persist so next poll sees clean state.
+      await writeState(env, repo, state);
+    }
     let convStatus = 'idle';
 
     // --- Phase: resolve start_task to conversation_id ---
