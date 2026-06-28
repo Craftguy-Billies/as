@@ -496,6 +496,11 @@ async function fetchResponse(env, convId, state) {
   // skipped when _last_event_ts is set, preventing the sliding-message issue.
   try {
     let minTs = '';
+    // Build a Set of already-seen event IDs so we can skip old MessageEvents
+    // from previous conversation turns. Without this, reusing a conversation
+    // returns the previous turn's response instead of waiting for the new one.
+    const seenIds = new Set((state.seen_event_ids || []).map(String));
+
     for (let page = 0; page < 10; page++) {  // max 10 pages = 1000 events
       const url = minTs
         ? `/api/v1/conversation/${convId}/events/search?limit=100&min_timestamp=${encodeURIComponent(minTs)}`
@@ -509,6 +514,11 @@ async function fetchResponse(env, convId, state) {
         const evt = list[i];
         const kind = evt.kind || evt.type || evt.event || '';
         const source = evt.source || '';
+
+        // Skip events already processed by processCloudEvents on a previous poll
+        const eid = String(evt.id || evt.event_id || '');
+        if (eid && seenIds.has(eid)) continue;
+
         if (kind === 'MessageEvent' && source !== 'user') {
           const msg = evt.llm_message || evt.message || evt.content || {};
           let text = '';
@@ -604,11 +614,15 @@ async function processCloudEvents(env, convId, state) {
       const tool = evt.tool_name || evt.tool || evt.name || '';
       const ts = evt.timestamp || evt.created_at || now();
 
-      // Skip MessageEvents immediately (before dedup registration) to prevent
-      // dedup poisoning. Response text extraction is handled by fetchResponse()
-      // which does its own fresh API call — it never reads seen_event_ids.
-      // Matching the reference pattern: deferred dedup for MessageEvents.
-      if (kind === 'MessageEvent') continue;
+      // Register dedup for MessageEvents too (so fetchResponse can skip old
+      // ones when looking for the current turn's response). Without this, when
+      // a new prompt is sent to an existing conversation, fetchResponse finds
+      // the previous turn's MessageEvent and returns it — skipping the new one.
+      if (kind === 'MessageEvent') {
+        if (eid && seen.has(eid)) continue;  // skip already-seen
+        if (eid) seen.add(eid);  // register for future dedup
+        continue;  // don't process as UI event
+      }
 
       // Track already-seen events by ID (registered AFTER MessageEvent skip)
       if (eid && seen.has(eid)) continue;
@@ -1036,6 +1050,7 @@ async function route(method, path, url, request, env) {
       state.queue.done = 0;
       state.last_sent_position = -1;
       state._run_started_at = undefined;
+      state._completed_position = undefined;  // prevents stale check match on next poll
       if (state.conversation_id) {
         try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
       }
@@ -1068,6 +1083,7 @@ async function route(method, path, url, request, env) {
       state.queue.done = 0;
       state.last_sent_position = -1;
       state._run_started_at = undefined;  // reset timer for new batch
+      state._completed_position = undefined;  // prevents stale check match on next poll
       // Stale retry state from previous batch (same conversation_id) would cause
       // the poll handler to find an old MessageEvent and advance the queue
       // prematurely. Delete it so the retry starts fresh.
