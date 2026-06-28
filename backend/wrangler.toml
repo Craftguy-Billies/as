@@ -3,10 +3,9 @@ main = "worker.js"
 compatibility_date = "2025-03-01"
 
 # KV namespace for state persistence
-# Create it with: npx wrangler kv:namespace create "VIBECODE"
-# Then paste the ID below and in preview_id
+# Created 2026-06-23
 kv_namespaces = [
-  { binding = "VIBECODE", id = "YOUR_KV_ID", preview_id = "YOUR_KV_PREVIEW_ID" }
+  { binding = "VIBECODE", id = "e390ae1b20e84e24aeb686efbb7791b7", preview_id = "e390ae1b20e84e24aeb686efbb7791b7" }
 ]
 
 # Environment variables (secrets should use wrangler secret put instead)
