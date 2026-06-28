@@ -608,10 +608,22 @@ async function processCloudEvents(env, convId, state) {
       : `/api/v1/conversation/${convId}/events/search?limit=100`;
     const data = await cloudGet(env, url);
     const list = Array.isArray(data) ? data : (data.events || data.items || []);
-    // Update _last_event_ts for next poll's pagination (persisted via writeState)
+    // Update _last_event_ts for next poll's pagination (persisted via writeState).
+    // Skip trailing MessageEvents: they're the final response for the CURRENT turn.
+    // If _last_event_ts includes the MessageEvent's timestamp, the snapshot on the
+    // next poll equals it, and the strict-after filter in fetchResponse kills it.
+    // Advance only to the last NON-MessageEvent timestamp (tool events, etc.).
     if (list.length) {
-      const lastTs = list[list.length - 1].timestamp || list[list.length - 1].created_at || '';
+      let lastTs = '';
+      for (let i = list.length - 1; i >= 0; i--) {
+        const kind = list[i].kind || list[i].type || list[i].event || '';
+        if (kind !== 'MessageEvent') {
+          lastTs = list[i].timestamp || list[i].created_at || '';
+          break;
+        }
+      }
       if (lastTs) state._last_event_ts = String(lastTs);
+      // If ALL events in the batch were MessageEvents (unlikely), don't advance.
     }
     for (const evt of list) {
       const eid = String(evt.id || evt.event_id || '');
