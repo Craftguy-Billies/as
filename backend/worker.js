@@ -442,6 +442,7 @@ async function pollConversation(env, convId, state) {
   if (!items || !items.length) return { status: 'error', error: 'conversation not found' };
 
   const conv = items[0];
+  if (!conv) return { status: 'error', error: 'conversation entry is null' };
   const execStatus = conv.execution_status || '';
   const sandboxId = conv.sandbox_id || state.sandbox_id || '';
 
