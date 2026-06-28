@@ -99,8 +99,20 @@ async function writeState(env, repo, state) {
 }
 
 function buildStateResponse(state, q, hasPending, repo, mode, convStatus) {
+  // Dedup messages: skip consecutive event messages with identical content
+  // (cold start can reprocess events, creating duplicates in memory)
+  const msgs = state.messages || [];
+  const messages = [];
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (m.role === 'event' && i > 0) {
+      const prev = msgs[i - 1];
+      if (prev.role === 'event' && prev.content === m.content) continue;
+    }
+    messages.push(m);
+  }
   return json({
-    messages: state.messages || [],
+    messages,
     conversation_id: state.conversation_id,
     sandbox_id: state.sandbox_id || null,
     repo,
@@ -970,12 +982,12 @@ async function route(method, path, url, request, env) {
       completed_at: null, error_message: null, mcp_config: null,
     };
     await env.VIBECODE.put(`task:${taskId}`, JSON.stringify(task));
-    // Append to task index
-    const idxRaw = await env.VIBECODE.get('task:index');
-    const idx = idxRaw ? JSON.parse(idxRaw) : [];
-    idx.unshift(taskId);
-    if (idx.length > 200) idx.length = 200;
-    await env.VIBECODE.put('task:index', JSON.stringify(idx));
+    // Update task:list (1 KV op for listing all tasks)
+    const listRaw = await env.VIBECODE.get('task:list');
+    const list = listRaw ? JSON.parse(listRaw) : [];
+    list.unshift(task);
+    if (list.length > 200) list.length = 200;
+    await env.VIBECODE.put('task:list', JSON.stringify(list));
     // Also put into the batch queue (matching POST /api/chat behavior)
     const repo = body.repo || '';
     if (repo) {
@@ -989,38 +1001,27 @@ async function route(method, path, url, request, env) {
     return json(task, 201);
   }
 
-  // GET /api/tasks — list from KV
+  // GET /api/tasks — list from KV (1 read for all tasks, not N reads)
   if (path === '/api/tasks' && method === 'GET') {
-    const idxRaw = await env.VIBECODE.get('task:index');
-    const ids = idxRaw ? JSON.parse(idxRaw) : [];
-    const tasks = [];
-    for (const id of ids) {
-      const raw = await env.VIBECODE.get(`task:${id}`);
-      if (raw) { try { tasks.push(JSON.parse(raw)); } catch {} }
-    }
+    const listRaw = await env.VIBECODE.get('task:list');
+    const tasks = listRaw ? JSON.parse(listRaw) : [];
     return json({ tasks });
   }
 
   // DELETE /api/tasks — delete all non-running tasks
   if (path === '/api/tasks' && method === 'DELETE') {
-    const idxRaw = await env.VIBECODE.get('task:index');
-    const ids = idxRaw ? JSON.parse(idxRaw) : [];
+    const listRaw = await env.VIBECODE.get('task:list');
+    const tasks = listRaw ? JSON.parse(listRaw) : [];
     const kept = [];
-    for (const id of ids) {
-      const raw = await env.VIBECODE.get(`task:${id}`);
-      if (raw) {
-        try {
-          const t = JSON.parse(raw);
-          if (t.status === 'running' || t.status === 'starting') { kept.push(id); continue; }
-        } catch {}
-      }
-      await env.VIBECODE.delete(`task:${id}`).catch(() => {});
+    for (const t of tasks) {
+      if (t.status === 'running' || t.status === 'starting') { kept.push(t); continue; }
+      await env.VIBECODE.delete(`task:${t.id}`).catch(() => {});
     }
-    await env.VIBECODE.put('task:index', JSON.stringify(kept));
+    await env.VIBECODE.put('task:list', JSON.stringify(kept));
     return json({ ok: true });
   }
 
-  // GET /api/tasks/{id} — single task lookup
+  // GET /api/tasks/{id} — single task lookup (1 KV read)
   if (path.startsWith('/api/tasks/') && method === 'GET' && !path.includes('/events')) {
     const taskId = path.split('/').pop();
     const raw = await env.VIBECODE.get(`task:${taskId}`);
@@ -1039,16 +1040,16 @@ async function route(method, path, url, request, env) {
       return error(`Cannot delete task with status '${task.status}'`, 400);
     }
     await env.VIBECODE.delete(`task:${taskId}`).catch(() => {});
-    // Remove from index
-    const idxRaw = await env.VIBECODE.get('task:index');
-    if (idxRaw) {
-      const idx = JSON.parse(idxRaw).filter(id => id !== taskId);
-      await env.VIBECODE.put('task:index', JSON.stringify(idx));
+    // Remove from list
+    const listRaw = await env.VIBECODE.get('task:list');
+    if (listRaw) {
+      const list = JSON.parse(listRaw).filter(t => t.id !== taskId);
+      await env.VIBECODE.put('task:list', JSON.stringify(list));
     }
     return json({ status: 'deleted', task_id: taskId });
   }
 
-  // POST /api/tasks/{id}/retry — reset failed task to queued
+  // POST /api/tasks/{id}/retry — reset failed task to queued (2 KV ops)
   if (path.includes('/retry') && method === 'POST') {
     const parts = path.split('/');
     const taskId = parts[parts.indexOf('tasks') + 1];
@@ -1060,17 +1061,25 @@ async function route(method, path, url, request, env) {
     task.error_message = null;
     task.completed_at = null;
     await env.VIBECODE.put(`task:${taskId}`, JSON.stringify(task));
+    // Also update in list
+    const listRaw = await env.VIBECODE.get('task:list');
+    if (listRaw) {
+      const list = JSON.parse(listRaw);
+      for (let i = 0; i < list.length; i++) {
+        if (list[i].id === taskId) { list[i] = {...list[i], status: 'queued', error_message: null, completed_at: null}; break; }
+      }
+      await env.VIBECODE.put('task:list', JSON.stringify(list));
+    }
     return json({ status: 'queued', task_id: taskId });
   }
 
-  // GET /api/tasks/{id}/events — return events from task state
+  // GET /api/tasks/{id}/events — return events from task state (1 KV read + 1 state read)
   if (path.includes('/events') && method === 'GET') {
     const parts = path.split('/');
     const taskId = parts[parts.indexOf('tasks') + 1];
     const raw = await env.VIBECODE.get(`task:${taskId}`);
     if (!raw) return error('Task not found', 404);
     const task = JSON.parse(raw);
-    // Find events from the state messages for this task's repo
     let events = [];
     if (task.repo) {
       const state = await readState(env, task.repo);
