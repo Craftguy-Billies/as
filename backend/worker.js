@@ -573,11 +573,9 @@ async function processCloudEvents(env, convId, state) {
   return newEventCount;
 }
 
-/** Fallback: download trajectory ZIP and extract response text.
- *  Only used when events/search fails (eventual consistency issue). */
-async function fetchResponseFromZip(env, convId, state) {
+
 // Minimal: finds events.json in a ZIP by scanning the central directory.
-function zipFindEntry(buf, name) {
+const zipFindEntry = (buf, name) => {
   const dv = new DataView(buf);
   // Search for End of Central Directory (EOCD) signature: 0x06054b50
   let eocdOffset = -1;
@@ -610,7 +608,7 @@ function zipFindEntry(buf, name) {
   return null;
 }
 
-async function zipInflate(data, usize) {
+const zipInflate = async (data, usize) => {
   // Cloudflare Workers support DecompressionStream
   const ds = new DecompressionStream('deflate-raw');
   const writer = ds.writable.getWriter();
@@ -631,6 +629,7 @@ async function zipInflate(data, usize) {
   return result;
 }
 
+
 async function fetchResponseFromZip(env, convId, state) {
   try {
     const resp = await fetch(`${CLOUD_API}/api/v1/app-conversations/${convId}/download`, { headers: cloudHeaders(env) });
@@ -649,9 +648,10 @@ async function fetchResponseFromZip(env, convId, state) {
           if (fname.endsWith('.json') && !fname.startsWith('.')) {
             const method = dv.getUint16(i + 10, true);  // 0=stored, 8=deflate
             const csize = dv.getUint32(i + 18, true);
+            const usize = dv.getUint32(i + 22, true);
             const dataOff = i + 30 + fnameLen + extraLen;
             const data = new Uint8Array(buf, dataOff, csize);
-            entry = { data, method, csize };
+            entry = { data, method, csize, usize };
             break;
           }
         }
@@ -747,6 +747,12 @@ export default {
 };
 
 async function route(method, path, url, request, env) {
+  // --- CORS helper for routes that need it ---
+
+  // GET / — status page
+  if (path === '/' && method === 'GET') {
+    return json({ status: 'ok', worker: 'vibecode-proxy', version: '1.0.0' });
+  }
   // Health
   if (path === '/api/health' && method === 'GET') {
     return json({ status: 'ok', timestamp: now() });
