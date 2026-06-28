@@ -440,13 +440,16 @@ async function pollConversation(env, convId, state) {
   try {
     data = await cloudGet(env, `/api/v1/app-conversations?ids=${convId}`);
   } catch (e) {
-    return { status: 'error', error: e.message };
+    // Transient API error — retry next poll (matches reference: continue on error)
+    return { status: 'pending', sandbox_id: state.sandbox_id || '' };
   }
   const items = Array.isArray(data) ? data : (data.items || []);
-  if (!items || !items.length) return { status: 'error', error: 'conversation not found' };
-
+  // Empty or null items = conversation not ready yet. Don't error out
+  // (matches reference: `if not items: continue`). Return pending so the
+  // caller doesn't clear conversation_id — next poll retries with same ID.
+  if (!items || !items.length) return { status: 'pending', sandbox_id: state.sandbox_id || '' };
   const conv = items[0];
-  if (!conv) return { status: 'error', error: 'conversation entry is null' };
+  if (!conv) return { status: 'pending', sandbox_id: state.sandbox_id || '' };
   const execStatus = conv.execution_status || '';
   const sandboxId = conv.sandbox_id || state.sandbox_id || '';
 
@@ -470,11 +473,11 @@ async function pollConversation(env, convId, state) {
 
 async function fetchResponse(env, convId, state) {
   // Matches GCP Python backend (agent_runner.py run_conversation_sync):
-  //   events/search?limit=200 → reverse → find last MessageEvent (source != 'user')
+  //   events/search?limit=100 → reverse → find last MessageEvent (source != 'user')
   //   → extract llm_message | message (string → str, dict → content[].text)
   try {
-    // Single call with limit=200, no pagination (matches GCP Python)
-    const data = await cloudGet(env, `/api/v1/conversation/${convId}/events/search?limit=200`);
+    // Single call with limit=100, no pagination (matches GCP Python)
+    const data = await cloudGet(env, `/api/v1/conversation/${convId}/events/search?limit=100`);
     const list = Array.isArray(data) ? data : (data.events || data.items || []);
     for (let i = list.length - 1; i >= 0; i--) {
       const evt = list[i];
@@ -514,7 +517,7 @@ async function fetchResponse(env, convId, state) {
 async function processCloudEvents(env, convId, state) {
   const seen = new Set((state.seen_event_ids || []).map(String));
   try {
-    const data = await cloudGet(env, `/api/v1/conversation/${convId}/events/search?limit=200`);
+    const data = await cloudGet(env, `/api/v1/conversation/${convId}/events/search?limit=100`);
     const list = Array.isArray(data) ? data : (data.events || data.items || []);
     for (const evt of list) {
       const eid = String(evt.id || evt.event_id || '');
@@ -523,12 +526,15 @@ async function processCloudEvents(env, convId, state) {
       const tool = evt.tool_name || evt.tool || evt.name || '';
       const ts = evt.timestamp || evt.created_at || now();
 
-      // Track already-seen events by ID
+      // Skip MessageEvents immediately (before dedup registration) to prevent
+      // dedup poisoning. Response text extraction is handled by fetchResponse()
+      // which does its own fresh API call — it never reads seen_event_ids.
+      // Matching the reference pattern: deferred dedup for MessageEvents.
+      if (kind === 'MessageEvent') continue;
+
+      // Track already-seen events by ID (registered AFTER MessageEvent skip)
       if (eid && seen.has(eid)) continue;
       if (eid) seen.add(eid);
-
-      // Skip MessageEvents (agent responses are handled by fetchResponse).
-      if (kind === 'MessageEvent') continue;
 
       // AgentStateChangeEvent
       if (kind === 'AgentStateChangeEvent') {
@@ -1553,7 +1559,7 @@ async function route(method, path, url, request, env) {
         await writeState(env, repo, state);
         const fp2 = q.position < q.total && !q.cancelled;
         return buildStateResponse(state, q, fp2, repo, mode, 'idle');
-      } else if (['idle', 'pending'].includes(pollResult.status) || (pollResult.status === 'completed' && !pollResult.response)) {
+      } else if (pollResult.status === 'idle' || (pollResult.status === 'completed' && !pollResult.response)) {
         // Conversation is idle/completed but queue has work and no response.
         // This means either:
         // 1. send-message was never called
