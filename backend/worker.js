@@ -788,8 +788,10 @@ export default {
     try {
       return await route(method, path, url, request, env);
     } catch (e) {
-      console.error(`${method} ${path}:`, e.message, e.stack?.slice(0, 500));
-      return json({ error: 'Something went wrong. Please try again.' }, 500);
+      const msg = `${e.message || e}`.slice(0, 300);
+      const stack = (e.stack || '').slice(0, 400);
+      console.error(`${method} ${path}:`, msg, stack);
+      return json({ error: msg, detail: stack }, 500);
     }
   },
 };
