@@ -1260,15 +1260,36 @@ async function route(method, path, url, request, env) {
         }
 
         // No response text found — retry across polls (stateful, non-blocking)
+        // Retry state stored in SEPARATE KV key so it survives main state write failures.
         // Each poll does ONE attempt so we never block >30s on free tier.
         // Retry window extends up to ~5min as long as the app keeps polling.
         let retryResponse = null;
-        const retryCount = state._retry_count || 0;
+        let rState = { count: 0, started_at: 0 };
+        try {
+          const rRaw = await env.VIBECODE.get(`retry:${state.conversation_id}`);
+          if (rRaw) rState = JSON.parse(rRaw);
+        } catch (_) {}
+        const retryCount = rState.count || 0;
+
+        // Detect repeated completion for same prompt (writeState failed on prev poll)
+        if (state._completed_position === q.position) {
+          // writeState failed on previous poll — retry state is lost.
+          // Don't loop forever: advance queue and move on.
+          console.error(`Retry state lost for conv ${state.conversation_id} (position ${q.position}) — advancing`);
+          q.position++;
+          q.done = Math.min(q.position, q.total);
+          skipFutureCancelled(q);
+          const stillPending = q.position < q.total && !q.cancelled;
+          await writeState(env, repo, state);
+          return buildStateResponse(state, q, stillPending, repo, mode, 'idle');
+        }
+        state._completed_position = q.position;
+
         if (retryCount < 12) {
           // Increasing delay per attempt: 5s, 10s, 15s, 20s, 30s... up to 60s
           const delays = [5, 10, 15, 20, 30, 30, 40, 40, 50, 50, 60, 60];
           const waitSec = delays[retryCount] || 60;
-          const elapsed = state._retry_started_at ? (Date.now() - state._retry_started_at) / 1000 : 0;
+          const elapsed = rState.started_at ? (Date.now() - rState.started_at) / 1000 : 0;
 
           if (elapsed >= waitSec) {
             // Time to do this attempt — try both events/search AND ZIP
@@ -1292,28 +1313,24 @@ async function route(method, path, url, request, env) {
                 }
               } catch (_) {}
             }
-            state._retry_count = retryCount + 1;
+            rState.count = retryCount + 1;
             if (!retryResponse) {
-              // Will retry again on next poll — return 'pending' so app keeps polling
               convStatus = 'pending';
             }
           } else {
-            // Not yet time for this attempt — keep waiting
             convStatus = 'pending';
           }
         } else {
           // 12+ attempts over ~5min — give up
-          state._retry_count = undefined;
-          state._retry_started_at = undefined;
+          rState = { count: 0, started_at: 0 };
         }
-        if (!state._retry_started_at) state._retry_started_at = Date.now();
-        // Persist retry state for next poll — write immediately so count is saved
-        await writeState(env, repo, state);
+        if (!rState.started_at) rState.started_at = Date.now();
+        // Persist retry state to SEPARATE key (survives main state write failure)
+        try { await env.VIBECODE.put(`retry:${state.conversation_id}`, JSON.stringify(rState)); } catch (_) {}
 
         if (retryResponse) {
           // Clean up retry state
-          state._retry_count = undefined;
-          state._retry_started_at = undefined;
+          try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
           state.messages.push({ id: nextMsgId(state), role: 'assistant', content: retryResponse, timestamp: now() });
 
           // Advance queue
@@ -1339,6 +1356,8 @@ async function route(method, path, url, request, env) {
           return buildStateResponse(state, q, stillPending);
         } else if (convStatus === 'pending') {
           // Still waiting for ZIP to generate — return current state, retry next poll
+          // Write main state too so _completed_position is saved
+          await writeState(env, repo, state);
           return buildStateResponse(state, q, true, repo, mode, 'pending');
         } else {
           // All retries exhausted — give up
