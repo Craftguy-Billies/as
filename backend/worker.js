@@ -474,10 +474,11 @@ async function pollConversation(env, convId, state) {
   }
 
   if (execStatus === 'completed' || execStatus === 'finished') {
-    const responseText = await fetchResponse(env, convId, state);
-    // Save response text in state for crash recovery
-    if (responseText) state._pending_response = responseText;
-    return { status: 'completed', response: responseText, sandbox_id: sandboxId };
+    // NOTE: fetchResponse is NOT called here — it can't check _last_event_ts
+    // for dedup, so it would return stale MessageEvents from previous turns.
+    // The caller (poll handler) handles response extraction via the retry loop,
+    // which calls fetchResponse after processCloudEvents has updated _last_event_ts.
+    return { status: 'completed', response: null, sandbox_id: sandboxId };
   }
 
   if (['failed', 'error', 'stopped'].includes(execStatus)) {
@@ -487,19 +488,19 @@ async function pollConversation(env, convId, state) {
   return { status: execStatus || 'pending', sandbox_id: sandboxId };
 }
 
-async function fetchResponse(env, convId, state) {
+async function fetchResponse(env, convId, state, minTimestamp) {
   // Paginate events/search to handle 100+ events.
   // events/search does NOT support offset (returns 422), max limit=100.
   //
-  // NOTE: Always fetches from the beginning (no min_timestamp). Old MessageEvents
-  // from previous conversation turns are handled by the caller: directResponse is
-  // skipped when _last_event_ts is set, preventing the sliding-message issue.
+  // minTimestamp is set by the caller to the snapshot of _last_event_ts taken
+  // BEFORE processCloudEvents runs. Events with timestamp <= minTimestamp are
+  // from previous conversation turns and are skipped. Only events AFTER the
+  // cutoff are candidates — this is the dedup mechanism for reused conversations.
+  //
+  // Without this, fetchResponse returns the previous turn's MessageEvent instead
+  // of waiting for the current turn to finish.
   try {
-    let minTs = '';
-    // Build a Set of already-seen event IDs so we can skip old MessageEvents
-    // from previous conversation turns. Without this, reusing a conversation
-    // returns the previous turn's response instead of waiting for the new one.
-    const seenIds = new Set((state.seen_event_ids || []).map(String));
+    let minTs = String(minTimestamp || '');
 
     for (let page = 0; page < 10; page++) {  // max 10 pages = 1000 events
       const url = minTs
@@ -514,10 +515,6 @@ async function fetchResponse(env, convId, state) {
         const evt = list[i];
         const kind = evt.kind || evt.type || evt.event || '';
         const source = evt.source || '';
-
-        // Skip events already processed by processCloudEvents on a previous poll
-        const eid = String(evt.id || evt.event_id || '');
-        if (eid && seenIds.has(eid)) continue;
 
         if (kind === 'MessageEvent' && source !== 'user') {
           const msg = evt.llm_message || evt.message || evt.content || {};
@@ -1483,6 +1480,11 @@ async function route(method, path, url, request, env) {
         directResponse = await fetchResponse(env, state.conversation_id, state);
       }
 
+      // Snapshot _last_event_ts BEFORE processCloudEvents updates it, so
+      // fetchResponse (called later in the retry handler) can exclude events
+      // already seen on previous polls — only events AFTER this cut are new.
+      const _lastEventTs = state._last_event_ts;
+
       // Process events for UI enrichment (tool calls, status changes).
       await processCloudEvents(env, state.conversation_id, state);
 
@@ -1601,7 +1603,9 @@ async function route(method, path, url, request, env) {
 
           if (elapsed >= waitSec) {
             // Time to do this attempt — try both events/search AND ZIP
-            retryResponse = await fetchResponse(env, state.conversation_id, state);
+            // Pass _lastEventTs (snapshot before processCloudEvents) so only
+            // genuinely new events (after the cutoff) are considered.
+            retryResponse = await fetchResponse(env, state.conversation_id, state, _lastEventTs);
             if (!retryResponse) {
               retryResponse = await fetchResponseFromZip(env, state.conversation_id, state);
             }
