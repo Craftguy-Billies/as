@@ -503,7 +503,7 @@ async function fetchResponse(env, convId, state) {
       // Check each event in this batch (reversed = most recent first)
       for (let i = list.length - 1; i >= 0; i--) {
         const evt = list[i];
-        const kind = evt.kind || evt.type || '';
+        const kind = evt.kind || evt.type || evt.event || '';
         const source = evt.source || '';
         if (kind === 'MessageEvent' && source !== 'user') {
           const msg = evt.llm_message || evt.message || {};
@@ -779,7 +779,7 @@ async function fetchResponseFromZip(env, convId, state) {
     // Find the last assistant MessageEvent
     let responseText = '';
     for (const evt of list) {
-      const kind = evt.kind || evt.type || '';
+      const kind = evt.kind || evt.type || evt.event || '';
       const source = evt.source || '';
       if (kind === 'MessageEvent' && source !== 'user') {
         const msg = evt.message || evt.llm_message || evt.content || '';
@@ -1471,17 +1471,28 @@ async function route(method, path, url, request, env) {
         } catch (_) {}
         const retryCount = rState.count || 0;
 
-        // Detect repeated completion for same prompt (writeState failed on prev poll)
+        // Detect repeated completion for same prompt (writeState failed on prev poll).
+        // Only advance if retry key is genuinely gone — if it still exists, the retry
+        // is still in progress and we should keep waiting.
         if (state._completed_position === q.position) {
-          // writeState failed on previous poll — retry state is lost.
-          // Don't loop forever: advance queue and move on.
-          console.error(`Retry state lost for conv ${state.conversation_id} (position ${q.position}) — advancing`);
-          q.position++;
-          q.done = Math.min(q.position, q.total);
-          skipFutureCancelled(q);
-          const stillPending = q.position < q.total && !q.cancelled;
-          await writeState(env, repo, state);
-          return buildStateResponse(state, q, stillPending, repo, mode, 'idle');
+          let retryKeyExists = false;
+          try {
+            const rRaw = await env.VIBECODE.get(`retry:${state.conversation_id}`);
+            retryKeyExists = !!rRaw;
+          } catch (_) {}
+          if (!retryKeyExists) {
+            // writeState failed on previous poll — retry state is lost.
+            // Don't loop forever: advance queue and move on.
+            console.error(`Retry state lost for conv ${state.conversation_id} (position ${q.position}) — advancing`);
+            q.position++;
+            q.done = Math.min(q.position, q.total);
+            skipFutureCancelled(q);
+            const stillPending = q.position < q.total && !q.cancelled;
+            await writeState(env, repo, state);
+            return buildStateResponse(state, q, stillPending, repo, mode, 'idle');
+          }
+          // Retry key exists — retry is still active, keep waiting.
+          // Fall through to retry logic below.
         }
         state._completed_position = q.position;
 
