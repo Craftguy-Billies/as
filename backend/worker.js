@@ -399,21 +399,54 @@ async function pollConversation(env, convId, state) {
 }
 
 async function fetchResponse(env, convId, state) {
+  // Matches GCP Python backend (agent_runner.py run_conversation_sync):
+  //   events/search?limit=200 → reverse → find last MessageEvent (source != 'user')
+  //   → extract llm_message | message (string → str, dict → content[].text)
+  try {
+    // Single call with limit=200, no pagination (matches GCP Python)
+    const data = await cloudGet(env, `/api/v1/conversation/${convId}/events/search?limit=200`);
+    const list = Array.isArray(data) ? data : (data.events || data.items || []);
+    for (let i = list.length - 1; i >= 0; i--) {
+      const evt = list[i];
+      const kind = evt.kind || evt.type || '';
+      const source = evt.source || '';
+      if (kind === 'MessageEvent' && source !== 'user') {
+        const msg = evt.llm_message || evt.message || {};
+        let text = '';
+        if (typeof msg === 'string' && msg.trim()) {
+          text = msg.trim();
+        } else if (typeof msg === 'object') {
+          const content = msg.content || [];
+          if (Array.isArray(content)) {
+            const parts = [];
+            for (const block of content) {
+              if (block?.type === 'text' && block.text?.trim()) {
+                parts.push(block.text.trim());
+              }
+            }
+            if (parts.length) text = parts.join('\n');
+          } else if (typeof content === 'string' && content.trim()) {
+            text = content.trim();
+          }
+        }
+        if (text) return text;
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+/**
+ * Process conversation events into state.messages for UI display.
+ * Matches GCP Python backend's _serialize_cloud_event + event_callback.
+ * Called from the poll handler on each cycle for ALL events.
+ */
+async function processCloudEvents(env, convId, state) {
   const seen = new Set((state.seen_event_ids || []).map(String));
-  let allText = '';
-  let offset = 0;
-  const limit = 100;
-  const maxPages = 20;
-  let foundNewAssistant = false;
-
-  for (let page = 0; page < maxPages; page++) {
-    let events;
-    try {
-      events = await cloudGet(env, `/api/v1/conversation/${convId}/events/search?limit=${limit}&offset=${offset}`);
-    } catch (_) { break; }
-    const list = Array.isArray(events) ? events : (events.events || events.items || []);
-    if (!list.length) break;
-
+  let newEventCount = 0;
+  try {
+    const data = await cloudGet(env, `/api/v1/conversation/${convId}/events/search?limit=200`);
+    const list = Array.isArray(data) ? data : (data.events || data.items || []);
     for (const evt of list) {
       const eid = String(evt.id || evt.event_id || '');
       const kind = evt.kind || evt.type || evt.event || '';
@@ -421,52 +454,14 @@ async function fetchResponse(env, convId, state) {
       const tool = evt.tool_name || evt.tool || evt.name || '';
       const ts = evt.timestamp || evt.created_at || now();
 
-      // --- MessageEvent (assistant response) — NEVER skip via seen check ---
-      // MessageEvents are tracked by whether their text was already extracted
-      if (kind === 'MessageEvent' && source !== 'user') {
-        const llmMsg = evt.llm_message || evt.message || null;
-        if (!llmMsg) continue;
-        let text = '';
-        if (typeof llmMsg === 'string' && llmMsg.trim()) {
-          text = llmMsg.trim();
-        } else if (typeof llmMsg === 'object') {
-          const content = llmMsg.content || [];
-          if (Array.isArray(content)) {
-            for (const block of content) {
-              if (block && block.type === 'text' && block.text && block.text.trim()) {
-                if (text) text += '\n';
-                text += block.text.trim();
-              }
-            }
-          } else if (typeof content === 'string' && content.trim()) {
-            text = content.trim();
-          }
-        }
-        if (text) {
-          // Dedup by hash: don't re-extract same text
-          const hash = simpleHash(text);
-          if (!state._extracted_hashes) state._extracted_hashes = {};
-          if (!state._extracted_hashes[hash]) {
-            state._extracted_hashes[hash] = true;
-            foundNewAssistant = true;
-            if (allText) allText += '\n\n';
-            allText += text;
-          }
-        }
-        if (eid) seen.add(eid);
-        continue;
-      }
-
-      // For non-MessageEvents: skip via seen check
+      // Skip already-seen events (except MessageEvent — handled by fetchResponse)
+      if (kind === 'MessageEvent') continue;
       if (eid && seen.has(eid)) continue;
       if (eid) seen.add(eid);
 
-      // Dedup tracking
-      if (state.event_kinds?.[eid]) continue;
-      if (!state.event_kinds) state.event_kinds = {};
-      state.event_kinds[eid] = true;
+      newEventCount++;
 
-      // --- AgentStateChangeEvent ---
+      // AgentStateChangeEvent
       if (kind === 'AgentStateChangeEvent') {
         const agentState = evt.agent_state || evt.state || '';
         if (agentState) {
@@ -483,7 +478,7 @@ async function fetchResponse(env, convId, state) {
         continue;
       }
 
-      // --- ActionEvent (tool invocations) ---
+      // ActionEvent (tool invocations)
       if (kind === 'ActionEvent') {
         let action = evt.action || evt.content || evt.message || {};
         if (typeof action === 'string') {
@@ -493,17 +488,15 @@ async function fetchResponse(env, convId, state) {
         const path = action.path || action.file || '';
         const query = action.query || '';
 
-        let eventText = '';
         if (tool.includes('bash') || tool.includes('terminal') || tool.includes('execute')) {
           const snippet = cmd.slice(0, 200).replace(/\n/g, ' ').trim();
-          eventText = `$ ${snippet}`;
           state.messages.push({ id: nextMsgId(state), role: 'event', content: `[TERMINAL] ${snippet}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
         } else if (tool.includes('file_editor') || tool.includes('str_replace')) {
+          let eventText = '';
           if (cmd === 'view') eventText = `Reading ${path}`;
           else if (cmd === 'create') eventText = `Creating ${path}`;
           else if (cmd === 'undo_edit') eventText = `Undoing ${path}`;
           else eventText = `Editing ${path}`;
-          // Use [READ] for view and [EDIT] for mutations so the app shows correct icon
           const prefix = cmd === 'view' ? '[READ]' : '[EDIT]';
           state.messages.push({ id: nextMsgId(state), role: 'event', content: `${prefix} ${eventText}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
         } else if (tool.includes('tavily') || tool.includes('search')) {
@@ -518,7 +511,7 @@ async function fetchResponse(env, convId, state) {
         continue;
       }
 
-      // --- ObservationEvent (tool results) ---
+      // ObservationEvent (tool results)
       if (kind === 'ObservationEvent') {
         let obs = evt.observation || evt.output || evt.content || {};
         if (typeof obs === 'string') {
@@ -526,7 +519,6 @@ async function fetchResponse(env, convId, state) {
         }
         const stdout = safeStr(obs.stdout || obs.output || obs.content || '', 200);
         const stderr = safeStr(obs.stderr || '', 200);
-
         if (tool.includes('bash') || tool.includes('terminal') || tool.includes('execute')) {
           const out = stdout || stderr;
           if (out) {
@@ -542,14 +534,13 @@ async function fetchResponse(env, convId, state) {
         continue;
       }
 
-      // --- ToolEvent / GenericEvent fallback ---
+      // ToolEvent / GenericEvent fallback
       if (kind === 'ToolEvent' || kind === 'tool') {
         const input = evt.input || evt.arguments || evt.text || '';
         const summary = input ? (typeof input === 'string' ? input.slice(0, 100) : JSON.stringify(input).slice(0, 100)) : '';
         state.messages.push({ id: nextMsgId(state), role: 'event', content: `[TOOL] ${tool}: ${summary}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
         continue;
       }
-
       if (kind === 'GenericEvent' || kind === 'generic') {
         const text = evt.text || evt.message || evt.content || '';
         if (text && text.trim()) {
@@ -558,25 +549,15 @@ async function fetchResponse(env, convId, state) {
         continue;
       }
     }
-    if (list.length < limit) break;
-    offset += limit;
-  }
+  } catch (_) {}
 
   state.seen_event_ids = Array.from(seen);
-  // Save response text in state for crash recovery
-  if (allText) state._pending_response = allText;
-
-  // Silence detection: if conversation is completed but no MessageEvent found,
-  // try to force /run on the ACP server (bug #14698 mitigation)
-  if (!foundNewAssistant && allText) {
-    // We have text from a previous collection — that's fine
-    return allText;
-  }
-
-  return allText || null;
+  return newEventCount;
 }
 
-// ZIP reader helpers for Cloud API trajectory download fallback.
+/** Fallback: download trajectory ZIP and extract response text.
+ *  Only used when events/search fails (eventual consistency issue). */
+async function fetchResponseFromZip(env, convId, state) {
 // Minimal: finds events.json in a ZIP by scanning the central directory.
 function zipFindEntry(buf, name) {
   const dv = new DataView(buf);
@@ -1111,23 +1092,20 @@ async function route(method, path, url, request, env) {
       // Update sandbox_id
       if (pollResult.sandbox_id) state.sandbox_id = pollResult.sandbox_id;
 
-      // Crash protection: save state immediately after fetchResponse so
-      // seen_event_ids + _pending_response survive a Worker crash.
-      if (['completed', 'failed', 'error', 'stopped'].includes(pollResult.status)) {
-        await writeState(env, repo, state);
+      // Match GCP Python backend: fetch + process events on every poll cycle
+      // BEFORE checking completed status, so events are ready when needed.
+      let processedEvents = 0;
+      if (state.conversation_id) {
+        processedEvents = await processCloudEvents(env, state.conversation_id, state);
       }
 
+      // Match GCP Python backend behavior: check agent status.
       if (pollResult.status === 'completed') {
-        // Use _pending_response as fallback if Worker crashed after fetchResponse
-        // (response was saved in state but pollResult.response may be stale on retry)
-        const responseText = pollResult.response || state._pending_response;
+        // First attempt: fetchResponse (may fail if events not yet propagated)
+        let responseText = pollResult.response || state._pending_response;
         state._pending_response = undefined;
 
         if (responseText) {
-          state.messages.push({ id: nextMsgId(state), role: 'assistant', content: responseText, timestamp: now() });
-          // No [DONE] event — assistant response IS the completion signal.
-          // (App groups consecutive events + assistant into one bubble;
-          //  a trailing event would create a spurious second bubble.)
           // Advance queue
           q.position++;
           q.done = Math.min(q.position, q.total);
