@@ -501,6 +501,7 @@ async function fetchResponse(env, convId, state, minTimestamp) {
   // of waiting for the current turn to finish.
   try {
     let minTs = String(minTimestamp || '');
+    console.log(`[FETCH] conv=${convId}: calling fetchResponse (minTimestamp=${JSON.stringify(minTimestamp)}, minTs=${minTs}, _last_event_ts=${state._last_event_ts})`);
 
     for (let page = 0; page < 10; page++) {  // max 10 pages = 1000 events
       const url = minTs
@@ -522,7 +523,13 @@ async function fetchResponse(env, convId, state, minTimestamp) {
         // are genuinely new from the current turn.
         if (minTimestamp && kind === 'MessageEvent' && source !== 'user') {
           const msgTs = evt.timestamp || evt.created_at || '';
-          if (msgTs && String(msgTs) <= String(minTimestamp)) continue;
+          const strMsgTs = String(msgTs);
+          const strMinTs = String(minTimestamp);
+          if (msgTs && strMsgTs <= strMinTs) {
+            console.log(`[FETCH] conv=${convId}: strict-after SKIPPING MessageEvent at ts=${strMsgTs} (cutoff=${strMinTs})`);
+            continue;
+          }
+          console.log(`[FETCH] conv=${convId}: strict-after PASSED MessageEvent at ts=${strMsgTs} (cutoff=${strMinTs})`);
         }
 
         if (kind === 'MessageEvent' && source !== 'user') {
@@ -622,8 +629,12 @@ async function processCloudEvents(env, convId, state) {
           break;
         }
       }
-      if (lastTs) state._last_event_ts = String(lastTs);
-      // If ALL events in the batch were MessageEvents (unlikely), don't advance.
+      if (lastTs) {
+        console.log(`[CLOUD] conv=${convId}: advancing _last_event_ts: ${state._last_event_ts} → ${String(lastTs)} (${list.length} events)`);
+        state._last_event_ts = String(lastTs);
+      } else {
+        console.log(`[CLOUD] conv=${convId}: _last_event_ts NOT advanced (${list.length} events, all MessageEvents)`);
+      }
     }
     for (const evt of list) {
       const eid = String(evt.id || evt.event_id || '');
@@ -1505,9 +1516,11 @@ async function route(method, path, url, request, env) {
       // fetchResponse (called later in the retry handler) can exclude events
       // already seen on previous polls — only events AFTER this cut are new.
       const _lastEventTs = state._last_event_ts;
+      console.log(`[POLL] conv=${state.conversation_id}: snapshot _lastEventTs=${_lastEventTs} BEFORE processCloudEvents`);
 
       // Process events for UI enrichment (tool calls, status changes).
       await processCloudEvents(env, state.conversation_id, state);
+      console.log(`[POLL] conv=${state.conversation_id}: AFTER processCloudEvents _last_event_ts=${state._last_event_ts}`);
 
       if (directResponse) {
         // Agent message found via events — skip status API entirely.
@@ -1569,7 +1582,7 @@ async function route(method, path, url, request, env) {
         // Retry state stored in SEPARATE KV key so it survives main state write failures.
         // Each poll does ONE attempt so we never block >30s on free tier.
         // Retry window extends up to ~5min as long as the app keeps polling.
-        console.log(`[RETRY] conv=${state.conversation_id}: completed with no msg (pos=${q.position}) — starting retry`);
+        console.log(`[RETRY] conv=${state.conversation_id}: completed with no msg (pos=${q.position}, _completed_position=${state._completed_position}) — starting retry`);
         let retryResponse = null;
         let rState = { count: 0, started_at: 0 };
         try {
@@ -1623,6 +1636,7 @@ async function route(method, path, url, request, env) {
           const elapsed = rState.started_at ? (Date.now() - rState.started_at) / 1000 : 0;
 
           if (elapsed >= waitSec) {
+            console.log(`[RETRY] conv=${state.conversation_id}: attempt ${retryCount} firing (elapsed=${elapsed.toFixed(1)}s, waitSec=${waitSec}s, _lastEventTs=${_lastEventTs})`);
             // Time to do this attempt — try both events/search AND ZIP
             // Pass _lastEventTs (snapshot before processCloudEvents) so only
             // genuinely new events (after the cutoff) are considered.
@@ -1655,6 +1669,7 @@ async function route(method, path, url, request, env) {
           }
         } else {
           // 12+ attempts over ~5min — give up
+          console.log(`[RETRY] conv=${state.conversation_id}: all 12 attempts exhausted (retryCount=${retryCount}) — giving up`);
           rState = { count: 0, started_at: 0 };
         }
         if (!rState.started_at) rState.started_at = Date.now();
