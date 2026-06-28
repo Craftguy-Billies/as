@@ -1356,15 +1356,16 @@ async function route(method, path, url, request, env) {
       }
 
       // Match GCP Python backend behavior: check agent status.
-      // Also treat as completed if events prove the agent replied but execution_status
-      // hasn't flipped yet (Cloud API propagation delay).
-      if (pollResult.status === 'completed' || (pollResult.status === 'running' && cloudAgentReplied)) {
+      // Also treat as completed if events prove the agent replied, regardless of
+      // what execution_status says (Cloud API may return items:[null] or lag).
+      const agentDone = cloudAgentReplied;
+      if (pollResult.status === 'completed' || agentDone) {
         // First attempt: fetchResponse (may fail if events not yet propagated).
-        // When we entered via 'running'+cloudAgentReplied, pollResult has no response,
-        // so try fetchResponse immediately.
+        // When we entered via agentDone, pollResult has no response (status wasn't
+        // 'completed'), so try fetchResponse immediately.
         let responseText = pollResult.response || state._pending_response;
         state._pending_response = undefined;
-        if (!responseText && cloudAgentReplied) {
+        if (!responseText && agentDone) {
           responseText = await fetchResponse(env, state.conversation_id, state);
         }
 
@@ -1519,6 +1520,15 @@ async function route(method, path, url, request, env) {
       } else if (pollResult.status === 'failed') {
         const errMsg = pollResult.error || 'unknown error';
         state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] Agent failed: ${errMsg.slice(0, 200)}`, kind: 'ErrorEvent', timestamp: now() });
+        q.position++;
+        q.done = Math.min(q.position, q.total);
+        skipFutureCancelled(q);
+        await writeState(env, repo, state);
+      } else if (pollResult.status === 'error' && !agentDone) {
+        // Cloud API returned error (e.g., items:[null]) and no agent reply found.
+        // Show error instead of pretending it's still running.
+        const errMsg = pollResult.error || 'unknown error';
+        state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] ${errMsg.slice(0, 200)}`, kind: 'ErrorEvent', timestamp: now() });
         q.position++;
         q.done = Math.min(q.position, q.total);
         skipFutureCancelled(q);
