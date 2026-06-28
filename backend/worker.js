@@ -332,10 +332,34 @@ async function fetchResponse(env, convId, state) {
       if (eid) seen.add(eid);
 
       const kind = evt.kind || evt.type || evt.event || '';
-      const text = evt.text || evt.message || evt.content || '';
-      if ((kind === 'MessageEvent' || kind === 'message') && text && text.trim()) {
+      const source = evt.source || '';
+      if (kind !== 'MessageEvent' || source === 'user') continue;
+
+      // Extract from llm_message or message object
+      // Structure: { llm_message: { content: [{ type: "text", text: "..." }] } }
+      const llmMsg = evt.llm_message || evt.message || null;
+      if (!llmMsg) continue;
+
+      let text = '';
+      if (typeof llmMsg === 'string' && llmMsg.trim()) {
+        text = llmMsg.trim();
+      } else if (typeof llmMsg === 'object') {
+        const content = llmMsg.content || [];
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if (block && block.type === 'text' && block.text && block.text.trim()) {
+              if (text) text += '\n';
+              text += block.text.trim();
+            }
+          }
+        } else if (typeof content === 'string' && content.trim()) {
+          text = content.trim();
+        }
+      }
+
+      if (text) {
         if (allText) allText += '\n\n';
-        allText += text.trim();
+        allText += text;
       }
     }
     if (list.length < limit) break;
@@ -669,10 +693,13 @@ async function route(method, path, url, request, env) {
       // Update sandbox_id
       if (pollResult.sandbox_id) state.sandbox_id = pollResult.sandbox_id;
 
-      if (pollResult.status === 'completed' && pollResult.response) {
-        // Save assistant response
-        state.messages.push({ id: nextMsgId(state), role: 'assistant', content: pollResult.response, timestamp: now() });
-        state.messages.push({ id: nextMsgId(state), role: 'event', content: '[DONE] Task completed', kind: 'SystemEvent', timestamp: now() });
+      if (pollResult.status === 'completed') {
+        if (pollResult.response) {
+          state.messages.push({ id: nextMsgId(state), role: 'assistant', content: pollResult.response, timestamp: now() });
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: '[DONE] Task completed', kind: 'SystemEvent', timestamp: now() });
+        } else {
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: '[DONE] Task completed (no text extracted)', kind: 'SystemEvent', timestamp: now() });
+        }
 
         // Advance queue
         q.position++;
@@ -681,10 +708,8 @@ async function route(method, path, url, request, env) {
         // If more prompts, send next one
         if (q.position < q.total && !q.cancelled) {
           const nextPrompt = q.prompts[q.position];
-          const nextMode = q.modes[q.position] || mode;
-          // Don't await — fire-and-forget. Next /state poll will check status.
-          sendMessage(env, state.conversation_id, nextPrompt, state.sandbox_id)
-            .catch(e => console.error(`sendMessage error: ${e}`));
+          const sendErr = await sendMessage(env, state.conversation_id, nextPrompt, state.sandbox_id);
+          if (sendErr) console.error(`sendMessage error at pos ${q.position}: ${sendErr}`);
         }
 
         await writeState(env, repo, state);
