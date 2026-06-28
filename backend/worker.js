@@ -95,7 +95,11 @@ async function writeState(env, repo, state) {
   if (state._batch_skip && Object.keys(state._batch_skip).length > 100) {
     state._batch_skip = undefined;
   }
-  await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
+  try {
+    await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
+  } catch (_) {
+    // KV write limit exceeded — worker stays functional in-memory, next poll retries.
+  }
 }
 
 function buildStateResponse(state, q, hasPending, repo, mode, convStatus) {
