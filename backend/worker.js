@@ -791,7 +791,11 @@ async function route(method, path, url, request, env) {
         if (!state._batch_skip) state._batch_skip = {};
         state._batch_skip[index] = true;
       }
+    } else if (index >= state.queue.total) {
+      // Out of range — no-op (app has its own bounds check, but be defensive)
+      return json({ ok: true });
     } else {
+      // index < 0 (no index = POST /api/chat/batch/cancel) → cancel all
       state.queue.cancelled = true;
       state.queue.position = state.queue.total;
       state.queue.done = state.queue.total;
@@ -955,8 +959,10 @@ async function route(method, path, url, request, env) {
           q.position++;
           q.done = Math.min(q.position, q.total);
           skipFutureCancelled(q);
+          // Recompute hasPending after queue advance for accurate batch.running
+          const stillPending = q.position < q.total && !q.cancelled;
           // If more prompts, send next one
-          if (q.position < q.total && !q.cancelled) {
+          if (stillPending) {
             const nextPrompt = q.prompts[q.position];
             const sendErr = await sendMessage(env, state.conversation_id, nextPrompt, state.sandbox_id);
             if (sendErr) {
@@ -968,7 +974,7 @@ async function route(method, path, url, request, env) {
             }
           }
           await writeState(env, repo, state);
-          return buildStateResponse(state, q, hasPending);
+          return buildStateResponse(state, q, stillPending);
         }
 
         // No response text found — retry with delays + force /run (matches Python backend behavior)
@@ -1010,9 +1016,10 @@ async function route(method, path, url, request, env) {
         q.position++;
         q.done = Math.min(q.position, q.total);
         skipFutureCancelled(q);
+        const stillPending = q.position < q.total && !q.cancelled;
 
         // If more prompts, send next one
-        if (q.position < q.total && !q.cancelled) {
+        if (stillPending) {
           const nextPrompt = q.prompts[q.position];
           const sendErr = await sendMessage(env, state.conversation_id, nextPrompt, state.sandbox_id);
           if (sendErr) {
