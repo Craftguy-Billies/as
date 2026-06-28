@@ -956,48 +956,136 @@ async function route(method, path, url, request, env) {
     return json({ ok: true });
   }
 
-  // --- Task endpoints (stubs for app_shell + task_provider compatibility) ---
+  // --- Task endpoints (KV-backed — matching main.py) ---
 
-  // POST /api/prompts — create a reusable prompt (system prompt template)
+  // POST /api/prompts — create a task, store in KV
   if (path === '/api/prompts' && method === 'POST') {
     const body = await request.json();
-    return json({
-      id: `prompt_${now()}`,
-      prompt: body.prompt || '',
-      repo: body.repo || '',
-      branch: body.branch || '',
-      mode: body.mode || 'code',
-      status: 'pending',
-      created_at: new Date().toISOString(),
-    }, 201);
+    const taskId = crypto.randomUUID ? crypto.randomUUID() : `task_${now()}_${Math.random().toString(36).slice(2, 10)}`;
+    const created = new Date().toISOString();
+    const task = {
+      id: taskId, prompt: body.prompt || '', repo: body.repo || '',
+      branch: body.branch || '', mode: body.mode || 'code', status: 'queued',
+      conversation_id: null, sandbox_id: null, created_at: created,
+      completed_at: null, error_message: null, mcp_config: null,
+    };
+    await env.VIBECODE.put(`task:${taskId}`, JSON.stringify(task));
+    // Append to task index
+    const idxRaw = await env.VIBECODE.get('task:index');
+    const idx = idxRaw ? JSON.parse(idxRaw) : [];
+    idx.unshift(taskId);
+    if (idx.length > 200) idx.length = 200;
+    await env.VIBECODE.put('task:index', JSON.stringify(idx));
+    // Also put into the batch queue (matching POST /api/chat behavior)
+    const repo = body.repo || '';
+    if (repo) {
+      const state = (await readState(env, repo)) || emptyState(repo, body.branch || '', body.mode || 'code');
+      state.queue.prompts.push(body.prompt || '');
+      state.queue.modes.push(body.mode || 'code');
+      state.queue.total = state.queue.prompts.length;
+      if (state.queue.position >= state.queue.total) { state.queue.position = 0; state.queue.done = 0; }
+      await writeState(env, repo, state);
+    }
+    return json(task, 201);
   }
 
-  // GET /api/tasks — list saved prompts/tasks
+  // GET /api/tasks — list from KV
   if (path === '/api/tasks' && method === 'GET') {
-    return json({ tasks: [] });
+    const idxRaw = await env.VIBECODE.get('task:index');
+    const ids = idxRaw ? JSON.parse(idxRaw) : [];
+    const tasks = [];
+    for (const id of ids) {
+      const raw = await env.VIBECODE.get(`task:${id}`);
+      if (raw) { try { tasks.push(JSON.parse(raw)); } catch {} }
+    }
+    return json({ tasks });
   }
 
-  // DELETE /api/tasks — delete all tasks
+  // DELETE /api/tasks — delete all non-running tasks
   if (path === '/api/tasks' && method === 'DELETE') {
+    const idxRaw = await env.VIBECODE.get('task:index');
+    const ids = idxRaw ? JSON.parse(idxRaw) : [];
+    const kept = [];
+    for (const id of ids) {
+      const raw = await env.VIBECODE.get(`task:${id}`);
+      if (raw) {
+        try {
+          const t = JSON.parse(raw);
+          if (t.status === 'running' || t.status === 'starting') { kept.push(id); continue; }
+        } catch {}
+      }
+      await env.VIBECODE.delete(`task:${id}`).catch(() => {});
+    }
+    await env.VIBECODE.put('task:index', JSON.stringify(kept));
     return json({ ok: true });
   }
 
-  // /api/tasks/{id}... — individual task operations
-  if (path.startsWith('/api/tasks/') && method === 'GET') {
-    // GET /api/tasks/{id}
-    return json({ id: path.split('/').pop(), status: 'completed', events: [] });
+  // GET /api/tasks/{id} — single task lookup
+  if (path.startsWith('/api/tasks/') && method === 'GET' && !path.includes('/events')) {
+    const taskId = path.split('/').pop();
+    const raw = await env.VIBECODE.get(`task:${taskId}`);
+    if (!raw) return error('Task not found', 404);
+    return json(JSON.parse(raw));
   }
-  if (path.startsWith('/api/tasks/') && method === 'DELETE') {
-    // DELETE /api/tasks/{id}
-    return json({ ok: true });
+
+  // DELETE /api/tasks/{id} — delete single task
+  if (path.startsWith('/api/tasks/') && method === 'DELETE' && !path.endsWith('/tasks')) {
+    const parts = path.split('/');
+    const taskId = parts[parts.indexOf('tasks') + 1];
+    const raw = await env.VIBECODE.get(`task:${taskId}`);
+    if (!raw) return error('Task not found', 404);
+    const task = JSON.parse(raw);
+    if (task.status !== 'queued' && task.status !== 'failed' && task.status !== 'completed') {
+      return error(`Cannot delete task with status '${task.status}'`, 400);
+    }
+    await env.VIBECODE.delete(`task:${taskId}`).catch(() => {});
+    // Remove from index
+    const idxRaw = await env.VIBECODE.get('task:index');
+    if (idxRaw) {
+      const idx = JSON.parse(idxRaw).filter(id => id !== taskId);
+      await env.VIBECODE.put('task:index', JSON.stringify(idx));
+    }
+    return json({ status: 'deleted', task_id: taskId });
   }
+
+  // POST /api/tasks/{id}/retry — reset failed task to queued
   if (path.includes('/retry') && method === 'POST') {
-    // POST /api/tasks/{id}/retry
-    return json({ ok: true });
+    const parts = path.split('/');
+    const taskId = parts[parts.indexOf('tasks') + 1];
+    const raw = await env.VIBECODE.get(`task:${taskId}`);
+    if (!raw) return error('Task not found', 404);
+    const task = JSON.parse(raw);
+    if (task.status !== 'failed') return error(`Cannot retry task with status '${task.status}'`, 400);
+    task.status = 'queued';
+    task.error_message = null;
+    task.completed_at = null;
+    await env.VIBECODE.put(`task:${taskId}`, JSON.stringify(task));
+    return json({ status: 'queued', task_id: taskId });
   }
+
+  // GET /api/tasks/{id}/events — return events from task state
   if (path.includes('/events') && method === 'GET') {
-    // GET /api/tasks/{id}/events
-    return json({ events: [] });
+    const parts = path.split('/');
+    const taskId = parts[parts.indexOf('tasks') + 1];
+    const raw = await env.VIBECODE.get(`task:${taskId}`);
+    if (!raw) return error('Task not found', 404);
+    const task = JSON.parse(raw);
+    // Find events from the state messages for this task's repo
+    let events = [];
+    if (task.repo) {
+      const state = await readState(env, task.repo);
+      if (state && state.messages) {
+        events = state.messages
+          .filter(m => m.role === 'event')
+          .map((m, i) => ({
+            event_index: i,
+            type: 'message', timestamp: m.timestamp || now(),
+            sender: m.sender || 'agent', content: m.content || '',
+            agent_state: null,
+          }));
+      }
+    }
+    return json({ events });
   }
 
   // GET /api/chat — state + poll Cloud API
@@ -1303,8 +1391,13 @@ async function route(method, path, url, request, env) {
     return buildStateResponse(state, q, hasPending, repo, mode, convStatus);
   }
 
-  // GET /api/logs — server log viewer (stub: returns empty for Worker, no local logs)
+  // GET /api/logs — server log viewer
   if (path === '/api/logs' && method === 'GET') {
+    return json({ lines: [] });
+  }
+
+  // GET /api/logs/stream — SSE log stream (not applicable to Workers; return empty)
+  if (path === '/api/logs/stream' && method === 'GET') {
     return json({ lines: [] });
   }
 
