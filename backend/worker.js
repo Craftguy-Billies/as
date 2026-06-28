@@ -1255,18 +1255,21 @@ async function route(method, path, url, request, env) {
           return buildStateResponse(state, q, stillPending);
         }
 
-        // No response text found — retry with delays + force /run (matches Python backend behavior)
+        // No response text found — retry with delays + ZIP fallback
         let retryResponse = null;
         for (let attempt = 0; attempt < 3; attempt++) {
-          // Wait before retry (3s, 5s, 8s)
-          await sleep(attempt === 0 ? 3000 : attempt === 1 ? 5000 : 8000);
+          // Increasing delays: 5s, 10s, 15s
+          await sleep(attempt === 0 ? 5000 : attempt === 1 ? 10000 : 15000);
 
-          // Fetch events again (new ones may have arrived)
+          // Try both events/search AND ZIP download on every attempt
           retryResponse = await fetchResponse(env, state.conversation_id, state);
           if (retryResponse) break;
 
-          // On second retry, try force /run (agent might be stuck)
-          if (attempt === 1) {
+          retryResponse = await fetchResponseFromZip(env, state.conversation_id, state);
+          if (retryResponse) break;
+
+          // Force /run via ACP on first retry (agent might be stuck)
+          if (attempt === 0) {
             try {
               const convData = await cloudGet(env, `/api/v1/app-conversations?ids=${state.conversation_id}`);
               const items = Array.isArray(convData) ? convData : (convData.items || []);
@@ -1276,16 +1279,11 @@ async function route(method, path, url, request, env) {
                 if (acp && sk) {
                   await fetch(`${acp}/api/conversations/${state.conversation_id}/run`, {
                     method: 'POST', headers: { 'X-Session-API-Key': sk },
-                  });
+                  }).catch(() => {});
                 }
               }
             } catch (_) {}
           }
-        }
-
-        // ZIP download fallback: more reliable than events/search (same approach as GCP Python backend)
-        if (!retryResponse) {
-          retryResponse = await fetchResponseFromZip(env, state.conversation_id, state);
         }
 
         if (retryResponse) {
