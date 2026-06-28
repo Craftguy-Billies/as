@@ -1328,10 +1328,11 @@ async function route(method, path, url, request, env) {
       const sendErr = await sendMessage(env, state.conversation_id, prompt, state.sandbox_id);
       if (sendErr) {
         console.error(`sendMessage follow-up error: ${sendErr}`);
-        if (sendErr.startsWith('409')) {
-          state.conversation_id = null;
-          state.sandbox_id = null;
-        }
+        // Any send error means the conversation is dead — clear it
+        // so the next batch creates a fresh one.
+        state.conversation_id = null;
+        state.sandbox_id = null;
+        await writeState(env, repo, state);
       } else {
         state.last_sent_position = q.position;
         // Add user message
@@ -1553,12 +1554,17 @@ async function route(method, path, url, request, env) {
         await writeState(env, repo, state);
       } else if (pollResult.status === 'error') {
         // Cloud API returned error (e.g., items:[null]) and no agent reply found.
-        // Show error instead of pretending it's still running.
+        // Clear conversation — it's dead; next batch must create a new one.
         const errMsg = pollResult.error || 'unknown error';
         state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] ${errMsg.slice(0, 200)}`, kind: 'ErrorEvent', timestamp: now() });
         q.position++;
         q.done = Math.min(q.position, q.total);
         skipFutureCancelled(q);
+        state.conversation_id = null;
+        state.sandbox_id = null;
+        state.last_sent_position = -1;
+        state.start_task_id = null;
+        state._run_started_at = undefined;
         await writeState(env, repo, state);
       } else if (['idle', 'pending'].includes(pollResult.status) || (pollResult.status === 'completed' && !pollResult.response)) {
         // Conversation is idle/completed but queue has work and no response.
