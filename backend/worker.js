@@ -544,6 +544,22 @@ async function fetchResponse(env, convId, state) {
             return text;
           }
         }
+
+        // Case 2: FinishAction — agent finished with message (no MessageEvent emitted).
+        // Format: kind="FinishAction" or ActionEvent with action/tool_name="finish".
+        const isFinish =
+          kind === 'FinishAction' ||
+          (kind === 'ActionEvent' && (evt.action === 'finish' || evt.tool_name === 'finish' || evt.name === 'finish'));
+        if (isFinish) {
+          const text =
+            (typeof evt.message === 'string' && evt.message.trim() ? evt.message.trim() : '') ||
+            (evt.args?.outputs?.content || '') ||
+            (evt.content || '');
+          if (text) {
+            console.log(`[FETCH] conv=${convId}: found FinishAction (${text.length} chars) after ${page} pages`);
+            return text;
+          }
+        }
       }
 
       // Advance to next page using the last event's timestamp
@@ -784,12 +800,15 @@ async function fetchResponseFromZip(env, convId, state) {
     const text = new TextDecoder().decode(raw);
     const events = JSON.parse(text);
     const list = Array.isArray(events) ? events : (events.events || events.items || []);
-    // Find the last assistant MessageEvent
+    // Find the last assistant MessageEvent or FinishAction
     let responseText = '';
     for (const evt of list) {
       const kind = evt.kind || evt.type || evt.event || '';
       const source = evt.source || '';
-      if (kind === 'MessageEvent' && source !== 'user') {
+      if (source === 'user') continue;
+
+      // Check for MessageEvent
+      if (kind === 'MessageEvent') {
         const msg = evt.message || evt.llm_message || evt.content || '';
         let text = '';
         if (typeof msg === 'string' && msg.trim()) {
@@ -805,6 +824,18 @@ async function fetchResponseFromZip(env, convId, state) {
             }
           }
         }
+        if (text) responseText = text;
+      }
+
+      // Check for FinishAction (no MessageEvent emitted)
+      const isFinish =
+        kind === 'FinishAction' ||
+        (kind === 'ActionEvent' && (evt.action === 'finish' || evt.tool_name === 'finish' || evt.name === 'finish'));
+      if (isFinish) {
+        const text =
+          (typeof evt.message === 'string' && evt.message.trim() ? evt.message.trim() : '') ||
+          (evt.args?.outputs?.content || '') ||
+          (evt.content || '');
         if (text) responseText = text;
       }
     }
