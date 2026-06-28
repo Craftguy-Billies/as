@@ -380,6 +380,8 @@ async function pollConversation(env, convId, state) {
 
   if (execStatus === 'completed' || execStatus === 'finished') {
     const responseText = await fetchResponse(env, convId, state);
+    // Save response text in state for crash recovery
+    if (responseText) state._pending_response = responseText;
     return { status: 'completed', response: responseText, sandbox_id: sandboxId };
   }
 
@@ -553,6 +555,8 @@ async function fetchResponse(env, convId, state) {
   }
 
   state.seen_event_ids = Array.from(seen);
+  // Save response text in state for crash recovery
+  if (allText) state._pending_response = allText;
 
   // Silence detection: if conversation is completed but no MessageEvent found,
   // try to force /run on the ACP server (bug #14698 mitigation)
@@ -951,9 +955,20 @@ async function route(method, path, url, request, env) {
       // Update sandbox_id
       if (pollResult.sandbox_id) state.sandbox_id = pollResult.sandbox_id;
 
+      // Crash protection: save state immediately after fetchResponse so
+      // seen_event_ids + _pending_response survive a Worker crash.
+      if (['completed', 'failed', 'error', 'stopped'].includes(pollResult.status)) {
+        await writeState(env, repo, state);
+      }
+
       if (pollResult.status === 'completed') {
-        if (pollResult.response) {
-          state.messages.push({ id: nextMsgId(state), role: 'assistant', content: pollResult.response, timestamp: now() });
+        // Use _pending_response as fallback if Worker crashed after fetchResponse
+        // (response was saved in state but pollResult.response may be stale on retry)
+        const responseText = pollResult.response || state._pending_response;
+        state._pending_response = undefined;
+
+        if (responseText) {
+          state.messages.push({ id: nextMsgId(state), role: 'assistant', content: responseText, timestamp: now() });
           state.messages.push({ id: nextMsgId(state), role: 'event', content: '[DONE] Task completed', kind: 'SystemEvent', timestamp: now() });
           // Advance queue
           q.position++;
