@@ -1255,65 +1255,112 @@ async function route(method, path, url, request, env) {
           return buildStateResponse(state, q, stillPending);
         }
 
-        // No response text found — retry with delays + ZIP fallback
+        // No response text found — retry across polls (stateful, non-blocking)
+        // Each poll does ONE attempt so we never block >30s on free tier.
+        // Retry window extends up to ~5min as long as the app keeps polling.
         let retryResponse = null;
-        for (let attempt = 0; attempt < 3; attempt++) {
-          // Increasing delays: 5s, 10s, 15s
-          await sleep(attempt === 0 ? 5000 : attempt === 1 ? 10000 : 15000);
+        const retryCount = state._retry_count || 0;
+        if (retryCount < 12) {
+          // Increasing delay per attempt: 5s, 10s, 15s, 20s, 30s... up to 60s
+          const delays = [5, 10, 15, 20, 30, 30, 40, 40, 50, 50, 60, 60];
+          const waitSec = delays[retryCount] || 60;
+          const elapsed = state._retry_started_at ? (Date.now() - state._retry_started_at) / 1000 : 0;
 
-          // Try both events/search AND ZIP download on every attempt
-          retryResponse = await fetchResponse(env, state.conversation_id, state);
-          if (retryResponse) break;
-
-          retryResponse = await fetchResponseFromZip(env, state.conversation_id, state);
-          if (retryResponse) break;
-
-          // Force /run via ACP on first retry (agent might be stuck)
-          if (attempt === 0) {
-            try {
-              const convData = await cloudGet(env, `/api/v1/app-conversations?ids=${state.conversation_id}`);
-              const items = Array.isArray(convData) ? convData : (convData.items || []);
-              if (items.length) {
-                const acp = items[0].acp_server || '';
-                const sk = items[0].session_api_key || '';
-                if (acp && sk) {
-                  await fetch(`${acp}/api/conversations/${state.conversation_id}/run`, {
-                    method: 'POST', headers: { 'X-Session-API-Key': sk },
-                  }).catch(() => {});
+          if (elapsed >= waitSec) {
+            // Time to do this attempt — try both events/search AND ZIP
+            retryResponse = await fetchResponse(env, state.conversation_id, state);
+            if (!retryResponse) {
+              retryResponse = await fetchResponseFromZip(env, state.conversation_id, state);
+            }
+            // Force /run on early attempts (agent might be stuck)
+            if (!retryResponse && retryCount < 3) {
+              try {
+                const convData = await cloudGet(env, `/api/v1/app-conversations?ids=${state.conversation_id}`);
+                const items = Array.isArray(convData) ? convData : (convData.items || []);
+                if (items.length) {
+                  const acp = items[0].acp_server || '';
+                  const sk = items[0].session_api_key || '';
+                  if (acp && sk) {
+                    await fetch(`${acp}/api/conversations/${state.conversation_id}/run`, {
+                      method: 'POST', headers: { 'X-Session-API-Key': sk },
+                    }).catch(() => {});
+                  }
                 }
-              }
-            } catch (_) {}
+              } catch (_) {}
+            }
+            state._retry_count = retryCount + 1;
+            if (!retryResponse) {
+              // Will retry again on next poll — return 'pending' so app keeps polling
+              convStatus = 'pending';
+            }
+          } else {
+            // Not yet time for this attempt — keep waiting
+            convStatus = 'pending';
           }
+        } else {
+          // 12+ attempts over ~5min — give up
+          state._retry_count = undefined;
+          state._retry_started_at = undefined;
         }
+        if (!state._retry_started_at) state._retry_started_at = Date.now();
+        // Persist retry state for next poll — write immediately so count is saved
+        await writeState(env, repo, state);
 
         if (retryResponse) {
+          // Clean up retry state
+          state._retry_count = undefined;
+          state._retry_started_at = undefined;
           state.messages.push({ id: nextMsgId(state), role: 'assistant', content: retryResponse, timestamp: now() });
-        } else {
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: '[ERROR] Task finished but no response text found', kind: 'ErrorEvent', timestamp: now() });
-        }
 
-        // Advance queue
-        q.position++;
-        q.done = Math.min(q.position, q.total);
-        skipFutureCancelled(q);
-        const stillPending = q.position < q.total && !q.cancelled;
+          // Advance queue
+          q.position++;
+          q.done = Math.min(q.position, q.total);
+          skipFutureCancelled(q);
+          const stillPending = q.position < q.total && !q.cancelled;
 
-        // If more prompts, send next one
-        if (stillPending) {
-          const nextPrompt = q.prompts[q.position];
-          const sendErr = await sendMessage(env, state.conversation_id, nextPrompt, state.sandbox_id);
-          if (sendErr) {
-            console.error(`sendMessage error at pos ${q.position}: ${sendErr}`);
-          } else {
-            state.last_sent_position = q.position;
-            state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
-            state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+          // If more prompts, send next one
+          if (stillPending) {
+            const nextPrompt = q.prompts[q.position];
+            const sendErr = await sendMessage(env, state.conversation_id, nextPrompt, state.sandbox_id);
+            if (sendErr) {
+              console.error(`sendMessage error at pos ${q.position}: ${sendErr}`);
+            } else {
+              state.last_sent_position = q.position;
+              state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
+              state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+            }
           }
-        }
 
-        await writeState(env, repo, state);
-        // Must return here so we don't fall through to the idle/running handlers
-        return buildStateResponse(state, q, stillPending);
+          await writeState(env, repo, state);
+          return buildStateResponse(state, q, stillPending);
+        } else if (convStatus === 'pending') {
+          // Still waiting for ZIP to generate — return current state, retry next poll
+          return buildStateResponse(state, q, true, repo, mode, 'pending');
+        } else {
+          // All retries exhausted — give up
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: '[ERROR] Task finished but no response text found', kind: 'ErrorEvent', timestamp: now() });
+
+          // Advance queue
+          q.position++;
+          q.done = Math.min(q.position, q.total);
+          skipFutureCancelled(q);
+          const stillPending = q.position < q.total && !q.cancelled;
+
+          if (stillPending) {
+            const nextPrompt = q.prompts[q.position];
+            const sendErr = await sendMessage(env, state.conversation_id, nextPrompt, state.sandbox_id);
+            if (sendErr) {
+              console.error(`sendMessage error at pos ${q.position}: ${sendErr}`);
+            } else {
+              state.last_sent_position = q.position;
+              state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
+              state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+            }
+          }
+
+          await writeState(env, repo, state);
+          return buildStateResponse(state, q, stillPending);
+        }
       } else if (pollResult.status === 'failed') {
         const errMsg = pollResult.error || 'unknown error';
         state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] Agent failed: ${errMsg.slice(0, 200)}`, kind: 'ErrorEvent', timestamp: now() });
