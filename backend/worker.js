@@ -153,11 +153,14 @@ function nextMsgId(state) {
 // Cloud API calls
 // ---------------------------------------------------------------------------
 
-const FETCH_TIMEOUT = 25000; // 25s max per Cloud API call (within 30s worker limit)
+// Cloud API timeouts: short for interactive calls, long for ZIP export (takes 1-3min)
+const CLOUD_API_TIMEOUT = 25000;
+const CLOUD_ZIP_TIMEOUT = 300000; // 5min — ZIP generation is slow
 
-async function fetchWithTimeout(url, opts = {}) {
+async function fetchWithTimeout(url, opts = {}, timeout = CLOUD_API_TIMEOUT) {
+  if (timeout <= 0) return fetch(url, opts);
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT);
+  const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
     return await fetch(url, { ...opts, signal: ctrl.signal });
   } finally {
@@ -660,7 +663,8 @@ const zipInflate = async (data, usize) => {
 
 async function fetchResponseFromZip(env, convId, state) {
   try {
-    const resp = await fetchWithTimeout(`${CLOUD_API}/api/v1/app-conversations/${convId}/download`, { headers: cloudHeaders(env) });
+    // ZIP export takes 1-3min — use long timeout
+    const resp = await fetchWithTimeout(`${CLOUD_API}/api/v1/app-conversations/${convId}/download`, { headers: cloudHeaders(env) }, CLOUD_ZIP_TIMEOUT);
     if (!resp.ok) return null;
     const buf = await resp.arrayBuffer();
     // Try events.json first (standard OpenHands trajectory format)
