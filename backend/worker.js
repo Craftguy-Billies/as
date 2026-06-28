@@ -488,8 +488,12 @@ async function pollConversation(env, convId, state) {
 }
 
 async function fetchResponse(env, convId, state) {
-  // Paginate events/search with min_timestamp to handle 100+ events.
+  // Paginate events/search to handle 100+ events.
   // events/search does NOT support offset (returns 422), max limit=100.
+  //
+  // NOTE: Always fetches from the beginning (no min_timestamp). Old MessageEvents
+  // from previous conversation turns are handled by the caller: directResponse is
+  // skipped when _last_event_ts is set, preventing the sliding-message issue.
   try {
     let minTs = '';
     for (let page = 0; page < 10; page++) {  // max 10 pages = 1000 events
@@ -1402,7 +1406,16 @@ async function route(method, path, url, request, env) {
       // fetchResponse hits events/search directly — it's the most reliable
       // indicator of completion and stays available even after the status
       // endpoint starts returning items:[null].
-      const directResponse = await fetchResponse(env, state.conversation_id, state);
+      //
+      // When _last_event_ts is set, we're in an existing conversation with
+      // prior events. Skip directResponse to prevent returning an old
+      // MessageEvent from a previous turn (sliding message issue). The
+      // response will be found via pollConversation's fetchResponse call
+      // which uses unfiltered events/search.
+      let directResponse = null;
+      if (!state._last_event_ts) {
+        directResponse = await fetchResponse(env, state.conversation_id, state);
+      }
 
       // Process events for UI enrichment (tool calls, status changes).
       await processCloudEvents(env, state.conversation_id, state);
