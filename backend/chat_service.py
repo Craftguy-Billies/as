@@ -1302,7 +1302,28 @@ def _process_batch_worker() -> None:
                 # resume → retry → same COMPLETED_NO_MSG → infinite loop =
                 # "cascade swallowing". The first retry is allowed to reuse
                 # the conv (cache preserved). Consecutive failures trigger reset.
-                if _last_completed_no_msg and _conversation_id is not None:
+                # 409 guard: if send-message failed (sandbox unavailable), reset
+                # the broken conversation so the NEXT prompt creates a fresh one.
+                # Without this, every subsequent prompt reuses the same broken conv
+                # → 409 resume → retry → same failure → infinite loop.
+                err_str = (result.get("error") or "").lower()
+                if ("409" in err_str or "sandbox" in err_str) and _conversation_id is not None:
+                    logger.warning("BATCH 409 [%d/%d]: resetting broken conv=%s "
+                                   "to prevent cascade of remaining %d prompts",
+                                   pos, total, _conversation_id, total - pos)
+                    with _lock:
+                        _conversation_id = None
+                        _conv_id_at_last_assistant = None
+                        _last_event_index = 0
+                        _last_event_timestamp = ""
+                        _forced_min_timestamp = None
+                        _stuck_polls = 0
+                        _sandbox_id = None
+                        _seen_event_ids.clear()
+                        _seen_event_hashes.clear()
+                        _event_kinds.clear()
+                        _persist_to_db()
+                elif _last_completed_no_msg and _conversation_id is not None:
                     logger.warning("BATCH COMPLETED_NO_MSG [%d/%d]: resetting stale conv=%s "
                                    "to prevent cascade swallowing of remaining prompts",
                                    pos, total, _conversation_id)

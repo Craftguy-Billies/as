@@ -18,7 +18,7 @@ class PreferencesService {
     _prefs = await SharedPreferences.getInstance();
   }
 
-  static const defaultUrl = 'http://34.44.82.227:8080';
+  static const defaultUrl = 'https://vibecode-proxy.kwantszlong1555.workers.dev';
   static const defaultImplementPrompt = (
     "a full codebase audit, comprehensive enough\n"
     "robust catch all debug logging without any missing cases no matter how edge it was\n"
