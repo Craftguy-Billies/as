@@ -85,6 +85,31 @@ async function writeState(env, repo, state) {
   await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
 }
 
+function buildStateResponse(state, q, hasPending, repo, mode, convStatus) {
+  return json({
+    messages: state.messages || [],
+    conversation_id: state.conversation_id,
+    sandbox_id: state.sandbox_id || null,
+    repo,
+    branch: state.branch || '',
+    mode: state.mode || mode || 'code',
+    current_repo_key: repo,
+    conversation_status: convStatus,
+    llm_model: state.llm_model || '',
+    configured_model: state.configured_model || '',
+    batch: {
+      running: hasPending && !!state.conversation_id,
+      cancelled: !!q.cancelled,
+      position: q.position || 0,
+      total: q.total || 0,
+      done: q.done || 0,
+      repo,
+      prompts: q.prompts || [],
+      modes: q.modes || [],
+    },
+  });
+}
+
 function nextMsgId(state) {
   let max = 0;
   if (state.messages) {
@@ -886,6 +911,56 @@ async function route(method, path, url, request, env) {
         if (pollResult.response) {
           state.messages.push({ id: nextMsgId(state), role: 'assistant', content: pollResult.response, timestamp: now() });
           state.messages.push({ id: nextMsgId(state), role: 'event', content: '[DONE] Task completed', kind: 'SystemEvent', timestamp: now() });
+          // Advance queue
+          q.position++;
+          q.done = Math.min(q.position, q.total);
+          // If more prompts, send next one
+          if (q.position < q.total && !q.cancelled) {
+            const nextPrompt = q.prompts[q.position];
+            const sendErr = await sendMessage(env, state.conversation_id, nextPrompt, state.sandbox_id);
+            if (sendErr) {
+              console.error(`sendMessage error at pos ${q.position}: ${sendErr}`);
+            } else {
+              state.last_sent_position = q.position;
+              state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
+              state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+            }
+          }
+          await writeState(env, repo, state);
+          return buildStateResponse(state, q, hasPending);
+        }
+
+        // No response text found — retry with delays + force /run (matches Python backend behavior)
+        let retryResponse = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          // Wait before retry (3s, 5s, 8s)
+          await sleep(attempt === 0 ? 3000 : attempt === 1 ? 5000 : 8000);
+
+          // Fetch events again (new ones may have arrived)
+          retryResponse = await fetchResponse(env, state.conversation_id, state);
+          if (retryResponse) break;
+
+          // On second retry, try force /run (agent might be stuck)
+          if (attempt === 1) {
+            try {
+              const convData = await cloudGet(env, `/api/v1/app-conversations?ids=${state.conversation_id}`);
+              const items = Array.isArray(convData) ? convData : (convData.items || []);
+              if (items.length) {
+                const acp = items[0].acp_server || '';
+                const sk = items[0].session_api_key || '';
+                if (acp && sk) {
+                  await fetch(`${acp}/api/conversations/${state.conversation_id}/run`, {
+                    method: 'POST', headers: { 'X-Session-API-Key': sk },
+                  });
+                }
+              }
+            } catch (_) {}
+          }
+        }
+
+        if (retryResponse) {
+          state.messages.push({ id: nextMsgId(state), role: 'assistant', content: retryResponse, timestamp: now() });
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: '[DONE] Task completed', kind: 'SystemEvent', timestamp: now() });
         } else {
           state.messages.push({ id: nextMsgId(state), role: 'event', content: '[DONE] Task completed (no text extracted)', kind: 'SystemEvent', timestamp: now() });
         }
@@ -962,28 +1037,7 @@ async function route(method, path, url, request, env) {
     }
 
     // Build response
-    return json({
-      messages: state.messages || [],
-      conversation_id: state.conversation_id,
-      sandbox_id: state.sandbox_id || null,
-      repo,
-      branch: state.branch || '',
-      mode: state.mode || mode || 'code',
-      current_repo_key: repo,
-      conversation_status: convStatus,
-      llm_model: state.llm_model || '',
-      configured_model: state.configured_model || '',
-      batch: {
-        running: hasPending && !!state.conversation_id,
-        cancelled: !!q.cancelled,
-        position: q.position || 0,
-        total: q.total || 0,
-        done: q.done || 0,
-        repo,
-        prompts: q.prompts || [],
-        modes: q.modes || [],
-      },
-    });
+    return buildStateResponse(state, q, hasPending, repo, mode, convStatus);
   }
 
   // GET /api/logs — server log viewer (stub: returns empty for Worker, no local logs)
