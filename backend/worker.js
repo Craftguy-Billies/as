@@ -503,7 +503,9 @@ async function fetchResponse(env, convId, state) {
           else if (cmd === 'create') eventText = `Creating ${path}`;
           else if (cmd === 'undo_edit') eventText = `Undoing ${path}`;
           else eventText = `Editing ${path}`;
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[EDIT] ${eventText}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+          // Use [READ] for view and [EDIT] for mutations so the app shows correct icon
+          const prefix = cmd === 'view' ? '[READ]' : '[EDIT]';
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: `${prefix} ${eventText}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
         } else if (tool.includes('tavily') || tool.includes('search')) {
           const q = query || cmd || '';
           state.messages.push({ id: nextMsgId(state), role: 'event', content: `[SEARCH] Searching: ${q.slice(0, 150)}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
@@ -572,6 +574,130 @@ async function fetchResponse(env, convId, state) {
   }
 
   return allText || null;
+}
+
+// ZIP reader helpers for Cloud API trajectory download fallback.
+// Minimal: finds events.json in a ZIP by scanning the central directory.
+function zipFindEntry(buf, name) {
+  const dv = new DataView(buf);
+  // Search for End of Central Directory (EOCD) signature: 0x06054b50
+  let eocdOffset = -1;
+  for (let i = buf.byteLength - 22; i >= 0; i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocdOffset = i; break; }
+  }
+  if (eocdOffset < 0) return null;
+  const cdOffset = dv.getUint32(eocdOffset + 16, true);
+  const cdEntries = dv.getUint16(eocdOffset + 10, true);
+  // Search central directory for the target file
+  let ptr = cdOffset;
+  for (let i = 0; i < cdEntries; i++) {
+    if (dv.getUint32(ptr, true) !== 0x02014b50) break;
+    const fnameLen = dv.getUint16(ptr + 28, true);
+    const extraLen = dv.getUint16(ptr + 30, true);
+    const commentLen = dv.getUint16(ptr + 32, true);
+    const fname = new TextDecoder().decode(new Uint8Array(buf, ptr + 46, fnameLen));
+    if (fname === name) {
+      const method = dv.getUint16(ptr + 10, true);  // 0=stored, 8=deflate
+      const csize = dv.getUint32(ptr + 20, true);
+      const usize = dv.getUint32(ptr + 24, true);
+      const localOffset = dv.getUint32(ptr + 42, true);
+      // Read local file header to get actual data offset
+      const lhdr = localOffset + 30 + dv.getUint16(localOffset + 26, true) + dv.getUint16(localOffset + 28, true);
+      const data = new Uint8Array(buf, lhdr, csize);
+      return { data, method, csize, usize };
+    }
+    ptr += 46 + fnameLen + extraLen + commentLen;
+  }
+  return null;
+}
+
+async function zipInflate(data, usize) {
+  // Cloudflare Workers support DecompressionStream
+  const ds = new DecompressionStream('deflate-raw');
+  const writer = ds.writable.getWriter();
+  writer.write(data);
+  writer.close();
+  const reader = ds.readable.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    total += value.length;
+  }
+  const result = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { result.set(c, off); off += c.length; }
+  return result;
+}
+
+async function fetchResponseFromZip(env, convId, state) {
+  try {
+    const resp = await fetch(`${CLOUD_API}/api/v1/app-conversations/${convId}/download`, { headers: cloudHeaders(env) });
+    if (!resp.ok) return null;
+    const buf = await resp.arrayBuffer();
+    // Try events.json first (standard OpenHands trajectory format)
+    let entry = zipFindEntry(buf, 'events.json');
+    if (!entry) {
+      // Try event_*.json by finding any .json file in the ZIP (first file)
+      const dv = new DataView(buf);
+      for (let i = 0; i < buf.byteLength - 30; i++) {
+        if (dv.getUint32(i, true) === 0x04034b50) {
+          const fnameLen = dv.getUint16(i + 26, true);
+          const extraLen = dv.getUint16(i + 28, true);
+          const fname = new TextDecoder().decode(new Uint8Array(buf, i + 30, fnameLen));
+          if (fname.endsWith('.json') && !fname.startsWith('.')) {
+            const method = dv.getUint16(i + 10, true);  // 0=stored, 8=deflate
+            const csize = dv.getUint32(i + 18, true);
+            const dataOff = i + 30 + fnameLen + extraLen;
+            const data = new Uint8Array(buf, dataOff, csize);
+            entry = { data, method, csize };
+            break;
+          }
+        }
+      }
+    }
+    if (!entry) return null;
+    let raw;
+    if (entry.method === 0) {
+      raw = entry.data;
+    } else if (entry.method === 8) {
+      raw = await zipInflate(entry.data, entry.usize || entry.data.length * 3);
+    } else {
+      return null;
+    }
+    const text = new TextDecoder().decode(raw);
+    const events = JSON.parse(text);
+    const list = Array.isArray(events) ? events : (events.events || events.items || []);
+    // Find the last assistant MessageEvent
+    let responseText = '';
+    for (const evt of list) {
+      const kind = evt.kind || evt.type || '';
+      const source = evt.source || '';
+      if (kind === 'MessageEvent' && source !== 'user') {
+        const msg = evt.message || evt.llm_message || evt.content || '';
+        let text = '';
+        if (typeof msg === 'string' && msg.trim()) {
+          text = msg.trim();
+        } else if (typeof msg === 'object') {
+          const content = msg.content || [];
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block?.type === 'text' && block.text?.trim()) {
+                if (text) text += '\n';
+                text += block.text.trim();
+              }
+            }
+          }
+        }
+        if (text) responseText = text;
+      }
+    }
+    return responseText || null;
+  } catch (_) {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1050,6 +1176,11 @@ async function route(method, path, url, request, env) {
               }
             } catch (_) {}
           }
+        }
+
+        // ZIP download fallback: more reliable than events/search (same approach as GCP Python backend)
+        if (!retryResponse) {
+          retryResponse = await fetchResponseFromZip(env, state.conversation_id, state);
         }
 
         if (retryResponse) {
