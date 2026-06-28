@@ -516,6 +516,15 @@ async function fetchResponse(env, convId, state, minTimestamp) {
         const kind = evt.kind || evt.type || evt.event || '';
         const source = evt.source || '';
 
+        // Skip old MessageEvents: the API's min_timestamp uses inclusive (>=),
+        // so events at the boundary (previous turn's response) are still returned.
+        // We need a strict-after check here: only events timestamp > minTimestamp
+        // are genuinely new from the current turn.
+        if (minTimestamp && kind === 'MessageEvent' && source !== 'user') {
+          const msgTs = evt.timestamp || evt.created_at || '';
+          if (msgTs && String(msgTs) <= String(minTimestamp)) continue;
+        }
+
         if (kind === 'MessageEvent' && source !== 'user') {
           const msg = evt.llm_message || evt.message || evt.content || {};
           let text = '';
