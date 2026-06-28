@@ -126,6 +126,7 @@ function buildStateResponse(state, q, hasPending, repo, mode, convStatus) {
     conversation_status: convStatus,
     llm_model: state.llm_model || '',
     configured_model: state.configured_model || '',
+    run_started_at: state._run_started_at || null,
     batch: {
       running: hasPending && !!state.conversation_id,
       cancelled: !!q.cancelled,
@@ -1520,14 +1521,17 @@ async function route(method, path, url, request, env) {
         }
         await writeState(env, repo, state);
       } else {
-        // Still running — show elapsed timer, update in-place (no repeated spam).
-        // Uses _run_started_at as epoch for elapsed calculation.
+        // Still running — show elapsed timer, updated in-memory every poll.
+        // _run_started_at is persisted ONCE when first set; no heartbeat writes.
         const nowMs = Date.now();
-        if (!state._run_started_at) state._run_started_at = nowMs;
+        if (!state._run_started_at) {
+          state._run_started_at = nowMs;
+          await writeState(env, repo, state);  // persist the start timestamp once
+        }
         const elapsed = Math.floor((nowMs - state._run_started_at) / 1000);
         const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m${elapsed % 60}s`;
 
-        // Find the last "Working" heartbeat and update in-place
+        // Find the last "Working" heartbeat and update in-place (memory only)
         let foundHb = false;
         if (state.messages) {
           for (let i = state.messages.length - 1; i >= 0; i--) {
@@ -1545,13 +1549,7 @@ async function route(method, path, url, request, env) {
         if (!foundHb) {
           state.messages.push({ id: nextMsgId(state), role: 'event', content: `[STATUS] Working... (${elapsedStr})`, kind: 'SystemEvent', timestamp: now() });
         }
-
-        // Persist timer every 30s (not every poll — saves KV writes)
-        const lastHb = state._last_heartbeat || 0;
-        if (!lastHb || (nowMs - lastHb) > 28000) {
-          state._last_heartbeat = nowMs;
-          await writeState(env, repo, state);
-        }
+        // No KV write for heartbeat — elapsed is computed per-poll from _run_started_at.
         // fetchResponse NOT called — all events fetched atomically at completion.
       }
     }
