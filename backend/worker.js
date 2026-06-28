@@ -837,7 +837,10 @@ async function route(method, path, url, request, env) {
 
   // POST /api/chat — backwards compat (single message, non-blocking)
   if (path === '/api/chat' && method === 'POST') {
-    const body = await request.json();
+    let body;
+    try { body = await request.json(); } catch {
+      return error('Invalid JSON body', 400);
+    }
     const prompt = (body.prompt || '').trim();
     const repo = (body.repo || '').trim();
     const branch = (body.branch || '').trim();
