@@ -337,11 +337,10 @@ async function createConversation(env, prompt, repo, branch, mode) {
   }
   const data = await resp.json();
 
-  // Direct response — may have conversation ID or start-task ID.
-  // The Cloud API response format has evolved: check multiple field names.
-  const directId = data.app_conversation_id || data.conversation_id || data.id || '';
-  // Only look for a start-task ID if we DON'T already have a direct conversation ID
-  const taskId = directId ? '' : (data.start_task_id || data.id || '');
+  // Match agent_runner.py exactly: 'app_conversation_id' is the real conversation ID.
+  // 'id' is the START TASK ID — never use it as a conversation_id.
+  const directId = data.app_conversation_id || data.conversation_id || '';
+  const taskId = data.id || data.start_task_id || '';
   const sboxId = data.sandbox_id || '';
   return {
     conversation_id: directId,
@@ -362,8 +361,8 @@ async function pollForConvId(env, startTaskId) {
     const items = Array.isArray(data) ? data : (data.items || []);
     if (items.length) {
       const item = items[0];
-      // The API may return app_conversation_id, conversation_id, or id
-      const convId = item.app_conversation_id || item.conversation_id || item.id || '';
+      // app_conversation_id is the real conversation ID; 'id' is the start-task itself.
+      const convId = item.app_conversation_id || item.conversation_id || '';
       if (convId) {
         return { conversation_id: convId, sandbox_id: item.sandbox_id || '' };
       }
