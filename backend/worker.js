@@ -743,11 +743,6 @@ async function route(method, path, url, request, env) {
       state.queue.done = 0;
       state.last_sent_position = -1;
       state._run_started_at = undefined;  // reset timer for new batch
-      // Force new conversation for new batch: stale context from previous batch
-      // ruins DeepSeek's input token cache (old tokens reprocessed = waste).
-      state.conversation_id = null;
-      state.sandbox_id = null;
-      state.start_task_id = null;
     }
     state.queue.prompts.push(...prompts);
     state.queue.modes.push(...Array(prompts.length).fill(mode));
