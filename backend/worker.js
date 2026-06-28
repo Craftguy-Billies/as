@@ -83,12 +83,7 @@ async function readState(env, repo) {
 }
 
 async function writeState(env, repo, state) {
-  try {
-    await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
-  } catch (_) {
-    // KV write limit exceeded — log and continue.
-    // Worker stays functional in-memory; next poll may retry.
-  }
+  // Trim state before writing to KV to stay under limits.
   if (state.messages && state.messages.length > 500) {
     state.messages = state.messages.slice(-400);
   }
@@ -101,7 +96,6 @@ async function writeState(env, repo, state) {
   if (state.seen_event_ids && state.seen_event_ids.length > 2000) {
     state.seen_event_ids = state.seen_event_ids.slice(-1500);
   }
-  // Trim _batch_skip if too many cancelled prompts piled up (unlikely but safe)
   if (state._batch_skip && Object.keys(state._batch_skip).length > 100) {
     state._batch_skip = undefined;
   }
@@ -520,8 +514,6 @@ async function fetchResponse(env, convId, state) {
  */
 async function processCloudEvents(env, convId, state) {
   const seen = new Set((state.seen_event_ids || []).map(String));
-  let newEventCount = 0;
-  state._agent_replied = false;  // reset; set to true if MessageEvent from agent found
   try {
     const data = await cloudGet(env, `/api/v1/conversation/${convId}/events/search?limit=200`);
     const list = Array.isArray(data) ? data : (data.events || data.items || []);
@@ -536,15 +528,7 @@ async function processCloudEvents(env, convId, state) {
       if (eid && seen.has(eid)) continue;
       if (eid) seen.add(eid);
 
-      newEventCount++;
-
-      // Track MessageEvent from the agent (source != 'user') as proof of completion.
-      // This handles the case where execution_status is still 'running' even though
-      // the agent already produced output (Cloud API propagation delay).
-      if (kind === 'MessageEvent' && source !== 'user') {
-        state._agent_replied = true;
-        continue;
-      }
+      // Skip MessageEvents (agent responses are handled by fetchResponse).
       if (kind === 'MessageEvent') continue;
 
       // AgentStateChangeEvent
@@ -638,7 +622,6 @@ async function processCloudEvents(env, convId, state) {
   } catch (_) {}
 
   state.seen_event_ids = Array.from(seen);
-  return !!(state._agent_replied);  // true if agent produced a MessageEvent (source != user)
 }
 
 
@@ -1546,15 +1529,22 @@ async function route(method, path, url, request, env) {
           return buildStateResponse(state, q, stillPending);
         }
       } else if (pollResult.status === 'failed') {
+        // Agent execution failed — conversation is dead.
         const errMsg = pollResult.error || 'unknown error';
         state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] Agent failed: ${errMsg.slice(0, 200)}`, kind: 'ErrorEvent', timestamp: now() });
         q.position++;
         q.done = Math.min(q.position, q.total);
         skipFutureCancelled(q);
+        state.conversation_id = null;
+        state.sandbox_id = null;
+        state.last_sent_position = -1;
+        state.start_task_id = null;
+        state._run_started_at = undefined;
         await writeState(env, repo, state);
+        const fp = q.position < q.total && !q.cancelled;
+        return buildStateResponse(state, q, fp, repo, mode, 'idle');
       } else if (pollResult.status === 'error') {
-        // Cloud API returned error (e.g., items:[null]) and no agent reply found.
-        // Clear conversation — it's dead; next batch must create a new one.
+        // Cloud API returned error (e.g., items:[null]) — conversation is dead.
         const errMsg = pollResult.error || 'unknown error';
         state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] ${errMsg.slice(0, 200)}`, kind: 'ErrorEvent', timestamp: now() });
         q.position++;
@@ -1566,6 +1556,8 @@ async function route(method, path, url, request, env) {
         state.start_task_id = null;
         state._run_started_at = undefined;
         await writeState(env, repo, state);
+        const fp2 = q.position < q.total && !q.cancelled;
+        return buildStateResponse(state, q, fp2, repo, mode, 'idle');
       } else if (['idle', 'pending'].includes(pollResult.status) || (pollResult.status === 'completed' && !pollResult.response)) {
         // Conversation is idle/completed but queue has work and no response.
         // This means either:
@@ -1602,6 +1594,7 @@ async function route(method, path, url, request, env) {
           } catch (_) {}
         }
         await writeState(env, repo, state);
+        return buildStateResponse(state, q, hasPending, repo, mode, convStatus);
       } else {
         // Still running — show elapsed timer, updated in-memory every poll.
         // _run_started_at is persisted ONCE when first set; no heartbeat writes.
@@ -1633,10 +1626,10 @@ async function route(method, path, url, request, env) {
         }
         // No KV write for heartbeat — elapsed is computed per-poll from _run_started_at.
         // fetchResponse NOT called — all events fetched atomically at completion.
+        return buildStateResponse(state, q, hasPending, repo, mode, convStatus);
       }
     }
-
-    // Build response
+    // No poll phase ran (no conversation_id or no pending work). Return current state.
     return buildStateResponse(state, q, hasPending, repo, mode, convStatus);
   }
 
