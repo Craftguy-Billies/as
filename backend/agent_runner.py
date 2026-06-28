@@ -330,14 +330,9 @@ def run_conversation_sync(
             "selected_branch": branch,
             "title": prompt[:80],
         }
-        # Include LLM config if user provided custom settings
-        if cfg.api_key:
-            body["llm_config"] = {
-                "model": cfg.model,
-                "api_key": cfg.api_key,
-            }
-            if cfg.base_url:
-                body["llm_config"]["base_url"] = cfg.base_url
+        # Include LLM model if configured (Cloud API field: "llm_model" — string)
+        if cfg.model:
+            body["llm_model"] = cfg.model
 
         # Include MCP servers (defaults: fetch + Tavily from env)
         mcp_config = _build_default_mcp_config(mcp_servers)

@@ -1923,16 +1923,13 @@ def _create_conversation(prompt: str, repo: str, branch: str, mode: str) -> str:
         body["selected_repository"] = repo
         body["selected_branch"] = effective_branch
 
-    # Apply custom LLM config if set (same as agent_runner)
+    # Apply custom LLM model if set (Cloud API field: "llm_model" — string, not "llm_config").
+    # NOTE: The API key is managed at the Cloud API session/account level; we do NOT
+    # send it here. Sending an unknown "llm_config" field is silently ignored,
+    # causing the Cloud API to default to pro.
     try:
         cfg = get_llm_config()
-        if cfg.api_key:
-            body["llm_config"] = {
-                "model": cfg.model,
-                "api_key": cfg.api_key,
-            }
-            if cfg.base_url:
-                body["llm_config"]["base_url"] = cfg.base_url
+        body["llm_model"] = cfg.model
     except Exception:
         pass
 
