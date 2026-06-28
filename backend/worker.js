@@ -806,11 +806,6 @@ async function route(method, path, url, request, env) {
       state.queue.done = state.queue.total;
       state.queue.prompts = [];
       state.queue.modes = [];
-      // Clear conversation references so any in-flight poll can't
-      // accidentally resume processing after we cancel.
-      state.conversation_id = null;
-      state.sandbox_id = null;
-      state.start_task_id = null;
       state.last_sent_position = -1;
       state._run_started_at = undefined;
     }
