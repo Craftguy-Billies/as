@@ -511,6 +511,7 @@ async function fetchResponse(env, convId, state) {
 async function processCloudEvents(env, convId, state) {
   const seen = new Set((state.seen_event_ids || []).map(String));
   let newEventCount = 0;
+  state._agent_replied = false;  // reset; set to true if MessageEvent from agent found
   try {
     const data = await cloudGet(env, `/api/v1/conversation/${convId}/events/search?limit=200`);
     const list = Array.isArray(data) ? data : (data.events || data.items || []);
@@ -521,12 +522,20 @@ async function processCloudEvents(env, convId, state) {
       const tool = evt.tool_name || evt.tool || evt.name || '';
       const ts = evt.timestamp || evt.created_at || now();
 
-      // Skip already-seen events (except MessageEvent — handled by fetchResponse)
-      if (kind === 'MessageEvent') continue;
+      // Track already-seen events by ID
       if (eid && seen.has(eid)) continue;
       if (eid) seen.add(eid);
 
       newEventCount++;
+
+      // Track MessageEvent from the agent (source != 'user') as proof of completion.
+      // This handles the case where execution_status is still 'running' even though
+      // the agent already produced output (Cloud API propagation delay).
+      if (kind === 'MessageEvent' && source !== 'user') {
+        state._agent_replied = true;
+        continue;
+      }
+      if (kind === 'MessageEvent') continue;
 
       // AgentStateChangeEvent
       if (kind === 'AgentStateChangeEvent') {
@@ -619,7 +628,7 @@ async function processCloudEvents(env, convId, state) {
   } catch (_) {}
 
   state.seen_event_ids = Array.from(seen);
-  return newEventCount;
+  return !!(state._agent_replied);  // true if agent produced a MessageEvent (source != user)
 }
 
 
@@ -1316,18 +1325,27 @@ async function route(method, path, url, request, env) {
       // Update sandbox_id
       if (pollResult.sandbox_id) state.sandbox_id = pollResult.sandbox_id;
 
-      // Match GCP Python backend: fetch + process events on every poll cycle
-      // BEFORE checking completed status, so events are ready when needed.
-      let processedEvents = 0;
+      // Fetch + process events on every poll cycle.
+      // processCloudEvents tracks whether a MessageEvent from the agent was found
+      // (cloud_agent_replied = true), so we can detect completion even when the
+      // Cloud API's execution_status still shows 'running'.
+      let cloudAgentReplied = false;
       if (state.conversation_id) {
-        processedEvents = await processCloudEvents(env, state.conversation_id, state);
+        cloudAgentReplied = await processCloudEvents(env, state.conversation_id, state);
       }
 
       // Match GCP Python backend behavior: check agent status.
-      if (pollResult.status === 'completed') {
-        // First attempt: fetchResponse (may fail if events not yet propagated)
+      // Also treat as completed if events prove the agent replied but execution_status
+      // hasn't flipped yet (Cloud API propagation delay).
+      if (pollResult.status === 'completed' || (pollResult.status === 'running' && cloudAgentReplied)) {
+        // First attempt: fetchResponse (may fail if events not yet propagated).
+        // When we entered via 'running'+cloudAgentReplied, pollResult has no response,
+        // so try fetchResponse immediately.
         let responseText = pollResult.response || state._pending_response;
         state._pending_response = undefined;
+        if (!responseText && cloudAgentReplied) {
+          responseText = await fetchResponse(env, state.conversation_id, state);
+        }
 
         if (responseText) {
           // Advance queue
