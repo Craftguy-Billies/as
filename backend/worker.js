@@ -510,7 +510,7 @@ async function fetchResponse(env, convId, state) {
         const kind = evt.kind || evt.type || evt.event || '';
         const source = evt.source || '';
         if (kind === 'MessageEvent' && source !== 'user') {
-          const msg = evt.llm_message || evt.message || {};
+          const msg = evt.llm_message || evt.message || evt.content || {};
           let text = '';
           if (typeof msg === 'string' && msg.trim()) {
             text = msg.trim();
@@ -554,7 +554,11 @@ async function fetchResponse(env, convId, state) {
           const text =
             (typeof evt.message === 'string' && evt.message.trim() ? evt.message.trim() : '') ||
             (evt.args?.outputs?.content || '') ||
-            (evt.content || '');
+            (evt.args?.outputs?.response || '') ||
+            (evt.args?.outputs?.text || '') ||
+            (evt.content || '') ||
+            (evt.text || '') ||
+            (evt.output || '');
           if (text) {
             console.log(`[FETCH] conv=${convId}: found FinishAction (${text.length} chars) after ${page} pages`);
             return text;
@@ -835,7 +839,11 @@ async function fetchResponseFromZip(env, convId, state) {
         const text =
           (typeof evt.message === 'string' && evt.message.trim() ? evt.message.trim() : '') ||
           (evt.args?.outputs?.content || '') ||
-          (evt.content || '');
+          (evt.args?.outputs?.response || '') ||
+          (evt.args?.outputs?.text || '') ||
+          (evt.content || '') ||
+          (evt.text || '') ||
+          (evt.output || '');
         if (text) responseText = text;
       }
     }
