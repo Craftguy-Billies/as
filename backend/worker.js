@@ -1340,34 +1340,51 @@ async function route(method, path, url, request, env) {
 
     // --- Phase: poll Cloud API for agent status ---
     if (state.conversation_id && hasPending) {
-      const pollResult = await pollConversation(env, state.conversation_id, state);
-      convStatus = pollResult.status;
+      // Try to read the agent's response from events FIRST.
+      // fetchResponse hits events/search directly — it's the most reliable
+      // indicator of completion and stays available even after the status
+      // endpoint starts returning items:[null].
+      const directResponse = await fetchResponse(env, state.conversation_id, state);
 
-      // Update sandbox_id
-      if (pollResult.sandbox_id) state.sandbox_id = pollResult.sandbox_id;
+      // Process events for UI enrichment (tool calls, status changes).
+      await processCloudEvents(env, state.conversation_id, state);
 
-      // Fetch + process events on every poll cycle.
-      // processCloudEvents tracks whether a MessageEvent from the agent was found
-      // (cloud_agent_replied = true), so we can detect completion even when the
-      // Cloud API's execution_status still shows 'running'.
-      let cloudAgentReplied = false;
-      if (state.conversation_id) {
-        cloudAgentReplied = await processCloudEvents(env, state.conversation_id, state);
+      if (directResponse) {
+        // Agent message found via events — skip status API entirely.
+        convStatus = 'completed';
+        state.messages.push({ id: nextMsgId(state), role: 'assistant', content: directResponse, timestamp: now() });
+        q.position++;
+        q.done = Math.min(q.position, q.total);
+        skipFutureCancelled(q);
+        const stillPending = q.position < q.total && !q.cancelled;
+        if (stillPending) {
+          const nextPrompt = q.prompts[q.position];
+          const sendErr = await sendMessage(env, state.conversation_id, nextPrompt, state.sandbox_id);
+          if (sendErr) {
+            console.error(`sendMessage follow-up error: ${sendErr}`);
+          } else {
+            state.last_sent_position = q.position;
+            state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
+            state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+          }
+        }
+        await writeState(env, repo, state);
+        return buildStateResponse(state, q, stillPending);
       }
 
-      // Match GCP Python backend behavior: check agent status.
-      // Also treat as completed if events prove the agent replied, regardless of
-      // what execution_status says (Cloud API may return items:[null] or lag).
-      const agentDone = cloudAgentReplied;
-      if (pollResult.status === 'completed' || agentDone) {
-        // First attempt: fetchResponse (may fail if events not yet propagated).
-        // When we entered via agentDone, pollResult has no response (status wasn't
-        // 'completed'), so try fetchResponse immediately.
+      // No events found — fall back to status-based polling.
+      const pollResult = await pollConversation(env, state.conversation_id, state);
+      convStatus = pollResult.status;
+      if (pollResult.sandbox_id) state.sandbox_id = pollResult.sandbox_id;
+
+      // Process events again (new events may have appeared since the direct call).
+      await processCloudEvents(env, state.conversation_id, state);
+
+      // Both paths below (completed, failed, error, idle, running) are
+      // identical to the original 90da2c6 code.
+      if (pollResult.status === 'completed') {
         let responseText = pollResult.response || state._pending_response;
         state._pending_response = undefined;
-        if (!responseText && agentDone) {
-          responseText = await fetchResponse(env, state.conversation_id, state);
-        }
 
         if (responseText) {
           // Advance queue
@@ -1524,7 +1541,7 @@ async function route(method, path, url, request, env) {
         q.done = Math.min(q.position, q.total);
         skipFutureCancelled(q);
         await writeState(env, repo, state);
-      } else if (pollResult.status === 'error' && !agentDone) {
+      } else if (pollResult.status === 'error') {
         // Cloud API returned error (e.g., items:[null]) and no agent reply found.
         // Show error instead of pretending it's still running.
         const errMsg = pollResult.error || 'unknown error';
