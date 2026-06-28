@@ -516,12 +516,29 @@ async function route(method, path, url, request, env) {
   if (path.startsWith('/api/chat/batch/cancel') && method === 'POST') {
     const indexStr = path.replace('/api/chat/batch/cancel', '').replace(/^\//, '');
     const index = indexStr ? parseInt(indexStr, 10) : -1;
-    const repo = url.searchParams.get('repo') || '';
-    if (!repo) return error('repo required', 400);
+    let repo = url.searchParams.get('repo') || '';
+
+    // If no repo specified, find the repo with a running batch
+    if (!repo) {
+      try {
+        const list = await env.VIBECODE.list({ prefix: 'state:' });
+        for (const key of list.keys) {
+          const rk = key.name.slice(6);
+          const s = await readState(env, rk);
+          if (s && s.queue && s.queue.position < s.queue.total) {
+            repo = rk;
+            break;
+          }
+        }
+      } catch (_) {}
+    }
+    if (!repo) return json({ ok: true });
+
     const state = await readState(env, repo);
     if (!state) return json({ ok: true });
 
     if (index >= 0 && index < state.queue.total) {
+      // Cancel specific prompt — advance past it if it's current
       if (index === state.queue.position) {
         state.queue.position++;
         state.queue.done++;
@@ -529,9 +546,54 @@ async function route(method, path, url, request, env) {
     } else {
       state.queue.cancelled = true;
       state.queue.position = state.queue.total;
+      state.queue.done = state.queue.total;
     }
     await writeState(env, repo, state);
     return json({ ok: true });
+  }
+
+  // --- Task endpoints (stubs for app_shell + task_provider compatibility) ---
+
+  // POST /api/prompts — create a reusable prompt (system prompt template)
+  if (path === '/api/prompts' && method === 'POST') {
+    const body = await request.json();
+    return json({
+      id: `prompt_${now()}`,
+      prompt: body.prompt || '',
+      repo: body.repo || '',
+      branch: body.branch || '',
+      mode: body.mode || 'code',
+      status: 'pending',
+      created_at: new Date().toISOString(),
+    }, 201);
+  }
+
+  // GET /api/tasks — list saved prompts/tasks
+  if (path === '/api/tasks' && method === 'GET') {
+    return json({ tasks: [] });
+  }
+
+  // DELETE /api/tasks — delete all tasks
+  if (path === '/api/tasks' && method === 'DELETE') {
+    return json({ ok: true });
+  }
+
+  // /api/tasks/{id}... — individual task operations
+  if (path.startsWith('/api/tasks/') && method === 'GET') {
+    // GET /api/tasks/{id}
+    return json({ id: path.split('/').pop(), status: 'completed', events: [] });
+  }
+  if (path.startsWith('/api/tasks/') && method === 'DELETE') {
+    // DELETE /api/tasks/{id}
+    return json({ ok: true });
+  }
+  if (path.includes('/retry') && method === 'POST') {
+    // POST /api/tasks/{id}/retry
+    return json({ ok: true });
+  }
+  if (path.includes('/events') && method === 'GET') {
+    // GET /api/tasks/{id}/events
+    return json({ events: [] });
   }
 
   // GET /api/chat — state + poll Cloud API
@@ -676,6 +738,22 @@ async function route(method, path, url, request, env) {
         modes: q.modes || [],
       },
     });
+  }
+
+  // --- Misc stubs ---
+
+  // POST /api/fcm-token — Firebase push notification token (stub)
+  if (path === '/api/fcm-token' && method === 'POST') {
+    return json({ ok: true });
+  }
+
+  // PUT /api/config/git — git user config (stub, git not used in Worker)
+  if (path === '/api/config/git' && method === 'PUT') {
+    return json({ ok: true, name: '', email: '' });
+  }
+  // GET /api/config/git
+  if (path === '/api/config/git' && method === 'GET') {
+    return json({ name: '', email: '' });
   }
 
   return json({ error: `Not found: ${method} ${path}` }, 404);
