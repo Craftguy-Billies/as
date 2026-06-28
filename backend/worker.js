@@ -390,12 +390,28 @@ async function sendMessage(env, convId, prompt, sandboxId) {
   };
   let lastErr = null;
   for (let attempt = 0; attempt < 2; attempt++) {
-    const resp = await fetchWithTimeout(`${CLOUD_API}/api/v1/app-conversations/${convId}/send-message`, {
-      method: 'POST',
-      headers: await cloudHeaders(env),
-      body: JSON.stringify(body),
-    });
+    let resp;
+    try {
+      resp = await fetchWithTimeout(`${CLOUD_API}/api/v1/app-conversations/${convId}/send-message`, {
+        method: 'POST',
+        headers: await cloudHeaders(env),
+        body: JSON.stringify(body),
+      }, 120000);  // send-message needs longer timeout (reference uses 120s)
+    } catch (e) {
+      // Timeout or network error — return error string, don't throw
+      lastErr = e.name === 'AbortError' ? 'send-message timed out' : `send-message failed: ${e.message}`;
+      break;
+    }
     if (resp.ok) {
+      // Match reference: check success field in response body
+      try {
+        const data = await resp.json();
+        if (data.success === false) {
+          const sbStatus = data.sandbox_status || 'unknown';
+          lastErr = `send-message rejected (sandbox=${sbStatus})`;
+          break;
+        }
+      } catch (_) {}
       // Bug #14698 mitigation: trigger /run if agent stuck idle
       try {
         const convData = await cloudGet(env, `/api/v1/app-conversations?ids=${convId}`);
@@ -488,6 +504,18 @@ async function fetchResponse(env, convId, state) {
         let text = '';
         if (typeof msg === 'string' && msg.trim()) {
           text = msg.trim();
+        } else if (Array.isArray(msg)) {
+          // Reference handles llm_msg as a list of blocks
+          const parts = [];
+          for (const block of msg) {
+            if (block && typeof block === 'object') {
+              const t = block.text || block.content || '';
+              if (t && String(t).trim()) parts.push(String(t).trim());
+            } else if (typeof block === 'string' && block.trim()) {
+              parts.push(block.trim());
+            }
+          }
+          if (parts.length) text = parts.join('\n');
         } else if (typeof msg === 'object') {
           const content = msg.content || [];
           if (Array.isArray(content)) {
