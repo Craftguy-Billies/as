@@ -488,50 +488,61 @@ async function pollConversation(env, convId, state) {
 }
 
 async function fetchResponse(env, convId, state) {
-  // Matches GCP Python backend (agent_runner.py run_conversation_sync):
-  //   events/search?limit=100 → reverse → find last MessageEvent (source != 'user')
-  //   → extract llm_message | message (string → str, dict → content[].text)
+  // Paginate events/search with min_timestamp to handle 100+ events.
+  // events/search does NOT support offset (returns 422), max limit=100.
   try {
-    // Single call with limit=100, no pagination (matches GCP Python)
-    const data = await cloudGet(env, `/api/v1/conversation/${convId}/events/search?limit=100`);
-    const list = Array.isArray(data) ? data : (data.events || data.items || []);
-    for (let i = list.length - 1; i >= 0; i--) {
-      const evt = list[i];
-      const kind = evt.kind || evt.type || '';
-      const source = evt.source || '';
-      if (kind === 'MessageEvent' && source !== 'user') {
-        const msg = evt.llm_message || evt.message || {};
-        let text = '';
-        if (typeof msg === 'string' && msg.trim()) {
-          text = msg.trim();
-        } else if (Array.isArray(msg)) {
-          // Reference handles llm_msg as a list of blocks
-          const parts = [];
-          for (const block of msg) {
-            if (block && typeof block === 'object') {
-              const t = block.text || block.content || '';
-              if (t && String(t).trim()) parts.push(String(t).trim());
-            } else if (typeof block === 'string' && block.trim()) {
-              parts.push(block.trim());
-            }
-          }
-          if (parts.length) text = parts.join('\n');
-        } else if (typeof msg === 'object') {
-          const content = msg.content || [];
-          if (Array.isArray(content)) {
+    let minTs = '';
+    for (let page = 0; page < 10; page++) {  // max 10 pages = 1000 events
+      const url = minTs
+        ? `/api/v1/conversation/${convId}/events/search?limit=100&min_timestamp=${encodeURIComponent(minTs)}`
+        : `/api/v1/conversation/${convId}/events/search?limit=100`;
+      const data = await cloudGet(env, url);
+      const list = Array.isArray(data) ? data : (data.events || data.items || []);
+      if (!list.length) break;
+
+      // Check each event in this batch (reversed = most recent first)
+      for (let i = list.length - 1; i >= 0; i--) {
+        const evt = list[i];
+        const kind = evt.kind || evt.type || '';
+        const source = evt.source || '';
+        if (kind === 'MessageEvent' && source !== 'user') {
+          const msg = evt.llm_message || evt.message || {};
+          let text = '';
+          if (typeof msg === 'string' && msg.trim()) {
+            text = msg.trim();
+          } else if (Array.isArray(msg)) {
             const parts = [];
-            for (const block of content) {
-              if (block?.type === 'text' && block.text?.trim()) {
-                parts.push(block.text.trim());
+            for (const block of msg) {
+              if (block && typeof block === 'object') {
+                const t = block.text || block.content || '';
+                if (t && String(t).trim()) parts.push(String(t).trim());
+              } else if (typeof block === 'string' && block.trim()) {
+                parts.push(block.trim());
               }
             }
             if (parts.length) text = parts.join('\n');
-          } else if (typeof content === 'string' && content.trim()) {
-            text = content.trim();
+          } else if (typeof msg === 'object') {
+            const content = msg.content || [];
+            if (Array.isArray(content)) {
+              const parts = [];
+              for (const block of content) {
+                if (block?.type === 'text' && block.text?.trim()) {
+                  parts.push(block.text.trim());
+                }
+              }
+              if (parts.length) text = parts.join('\n');
+            } else if (typeof content === 'string' && content.trim()) {
+              text = content.trim();
+            }
           }
+          if (text) return text;
         }
-        if (text) return text;
       }
+
+      // Advance to next page using the last event's timestamp
+      const lastTs = list[list.length - 1].timestamp || list[list.length - 1].created_at || '';
+      if (!lastTs || String(lastTs) === minTs) break;  // no more events or stuck
+      minTs = String(lastTs);
     }
   } catch (_) {}
   return null;
@@ -545,8 +556,19 @@ async function fetchResponse(env, convId, state) {
 async function processCloudEvents(env, convId, state) {
   const seen = new Set((state.seen_event_ids || []).map(String));
   try {
-    const data = await cloudGet(env, `/api/v1/conversation/${convId}/events/search?limit=100`);
+    // Use min_timestamp pagination so events 101+ stream to UI over multiple polls.
+    // events/search max limit=100, no offset support — paginate via timestamps.
+    const minTs = state._last_event_ts || '';
+    const url = minTs
+      ? `/api/v1/conversation/${convId}/events/search?limit=100&min_timestamp=${encodeURIComponent(minTs)}`
+      : `/api/v1/conversation/${convId}/events/search?limit=100`;
+    const data = await cloudGet(env, url);
     const list = Array.isArray(data) ? data : (data.events || data.items || []);
+    // Update _last_event_ts for next poll's pagination (persisted via writeState)
+    if (list.length) {
+      const lastTs = list[list.length - 1].timestamp || list[list.length - 1].created_at || '';
+      if (lastTs) state._last_event_ts = String(lastTs);
+    }
     for (const evt of list) {
       const eid = String(evt.id || evt.event_id || '');
       const kind = evt.kind || evt.type || evt.event || '';
@@ -1249,6 +1271,7 @@ async function route(method, path, url, request, env) {
         const result = await pollForConvId(env, state.start_task_id);
         if (result) {
           state.conversation_id = result.conversation_id;
+          state._last_event_ts = '';  // reset event pagination for new conversation
           if (result.sandbox_id) state.sandbox_id = result.sandbox_id;
           state.start_task_id = null;
           try { await env.VIBECODE.delete(stKey); } catch (_) {}
@@ -1278,11 +1301,13 @@ async function route(method, path, url, request, env) {
         const result = await createConversation(env, prompt, repo, state.branch, promptMode);
         if (result.conversation_id) {
           state.conversation_id = result.conversation_id;
+          state._last_event_ts = '';  // reset event pagination for new conversation
           if (result.sandbox_id) state.sandbox_id = result.sandbox_id;
           state.last_sent_position = q.position;  // sent via initial_message
           convStatus = 'starting';
         } else if (result.start_task_id) {
           state.start_task_id = result.start_task_id;
+          state._last_event_ts = '';  // reset event pagination for new conversation
           state.last_sent_position = q.position;  // will be sent when conv resolves
           convStatus = 'starting';
         }
@@ -1319,6 +1344,7 @@ async function route(method, path, url, request, env) {
           q.position++;
           q.done = Math.min(q.position, q.total);
           state.conversation_id = null;
+          state._last_event_ts = "";
           state.sandbox_id = null;
           state.last_sent_position = -1;
           state._run_started_at = undefined;
@@ -1347,6 +1373,7 @@ async function route(method, path, url, request, env) {
         // Any send error means the conversation is dead — clear it
         // so the next batch creates a fresh one.
         state.conversation_id = null;
+        state._last_event_ts = "";
         state.sandbox_id = null;
         await writeState(env, repo, state);
       } else {
@@ -1565,6 +1592,7 @@ async function route(method, path, url, request, env) {
         q.done = Math.min(q.position, q.total);
         skipFutureCancelled(q);
         state.conversation_id = null;
+        state._last_event_ts = "";
         state.sandbox_id = null;
         state.last_sent_position = -1;
         state.start_task_id = null;
@@ -1580,6 +1608,7 @@ async function route(method, path, url, request, env) {
         q.done = Math.min(q.position, q.total);
         skipFutureCancelled(q);
         state.conversation_id = null;
+        state._last_event_ts = "";
         state.sandbox_id = null;
         state.last_sent_position = -1;
         state.start_task_id = null;
