@@ -47,8 +47,18 @@ function safeStr(v, maxLen) {
   return String(v).slice(0, maxLen || 200);
 }
 
-function cloudHeaders(env) {
-  return { 'Authorization': `Bearer ${env.OPENHANDS_CLOUD_API_KEY}`, 'Content-Type': 'application/json', 'Accept': 'application/json' };
+async function cloudHeaders(env) {
+  let key = env.OPENHANDS_CLOUD_API_KEY || '';
+  if (!key) {
+    try {
+      const raw = await env.VIBECODE.get('config:llm');
+      if (raw) {
+        const cfg = JSON.parse(raw);
+        key = cfg.api_key || '';
+      }
+    } catch (_) {}
+  }
+  return { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json', 'Accept': 'application/json' };
 }
 
 function json(data, status = 200) {
@@ -170,7 +180,7 @@ async function fetchWithTimeout(url, opts = {}, timeout = CLOUD_API_TIMEOUT) {
 }
 
 async function cloudGet(env, path) {
-  const resp = await fetchWithTimeout(`${CLOUD_API}${path}`, { headers: cloudHeaders(env) });
+  const resp = await fetchWithTimeout(`${CLOUD_API}${path}`, { headers: await cloudHeaders(env) });
   if (!resp.ok) {
     const text = await resp.text();
     throw new Error(`${resp.status}:${text.slice(0, 200)}`);
@@ -181,7 +191,7 @@ async function cloudGet(env, path) {
 async function cloudPost(env, path, body) {
   const resp = await fetchWithTimeout(`${CLOUD_API}${path}`, {
     method: 'POST',
-    headers: cloudHeaders(env),
+    headers: await cloudHeaders(env),
     body: JSON.stringify(body),
   });
   if (!resp.ok) {
@@ -324,7 +334,7 @@ async function createConversation(env, prompt, repo, branch, mode) {
 
   const resp = await fetchWithTimeout(`${CLOUD_API}/api/v1/app-conversations`, {
     method: 'POST',
-    headers: cloudHeaders(env),
+    headers: await cloudHeaders(env),
     body: JSON.stringify(body),
   });
   if (!resp.ok) {
@@ -389,7 +399,7 @@ async function sendMessage(env, convId, prompt, sandboxId) {
   for (let attempt = 0; attempt < 2; attempt++) {
     const resp = await fetchWithTimeout(`${CLOUD_API}/api/v1/app-conversations/${convId}/send-message`, {
       method: 'POST',
-      headers: cloudHeaders(env),
+      headers: await cloudHeaders(env),
       body: JSON.stringify(body),
     });
     if (resp.ok) {
@@ -416,7 +426,7 @@ async function sendMessage(env, convId, prompt, sandboxId) {
     if (resp.status === 409 && attempt === 0 && sandboxId) {
       try {
         const r = await fetch(`${CLOUD_API}/api/v1/sandboxes/${sandboxId}/resume`, {
-          method: 'POST', headers: cloudHeaders(env),
+          method: 'POST', headers: await cloudHeaders(env),
         });
         if (r.ok) continue;  // retry send-message
       } catch (_) {}
@@ -691,7 +701,7 @@ const zipInflate = async (data, usize) => {
 async function fetchResponseFromZip(env, convId, state) {
   try {
     // No timeout: ZIP export takes 1-3min and I/O wait doesn't count toward CPU limit.
-    const resp = await fetchWithTimeout(`${CLOUD_API}/api/v1/app-conversations/${convId}/download`, { headers: cloudHeaders(env) }, 0);
+    const resp = await fetchWithTimeout(`${CLOUD_API}/api/v1/app-conversations/${convId}/download`, { headers: await cloudHeaders(env) }, 0);
     if (!resp.ok) return null;
     const buf = await resp.arrayBuffer();
     // Try events.json first (standard OpenHands trajectory format)
