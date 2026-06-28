@@ -361,8 +361,10 @@ async function fetchResponse(env, convId, state) {
 
       const kind = evt.kind || evt.type || evt.event || '';
       const source = evt.source || '';
+      const tool = evt.tool_name || evt.tool || evt.name || '';
       const ts = evt.timestamp || evt.created_at || now();
 
+      // --- MessageEvent (assistant response) ---
       if (kind === 'MessageEvent' && source !== 'user') {
         foundNewAssistant = true;
         const llmMsg = evt.llm_message || evt.message || null;
@@ -387,32 +389,103 @@ async function fetchResponse(env, convId, state) {
           if (allText) allText += '\n\n';
           allText += text;
         }
-      } else if (kind === 'AgentStateChangeEvent') {
-        const state_ = evt.agent_state || evt.state || evt.text || '';
-        if (state_ && !state.event_kinds?.has?.(eid)) {
-          const label = { thinking: '🤔 Thinking...', running: '▶️ Running...', completed: '✅ Done' }[state_] || `▶️ ${state_}`;
-          state.messages.push({ id: eid ? parseInt(eid.replace(/\D/g,'').slice(-8) || '0') + now() : nextMsgId(state), role: 'event', content: `[STATUS] ${label}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
-          if (!state.event_kinds) state.event_kinds = {};
-          state.event_kinds[eid] = true;
+        continue;
+      }
+
+      // Dedup tracking for non-MessageEvents
+      if (state.event_kinds?.[eid]) continue;
+      if (!state.event_kinds) state.event_kinds = {};
+      state.event_kinds[eid] = true;
+
+      // --- AgentStateChangeEvent ---
+      if (kind === 'AgentStateChangeEvent') {
+        const agentState = evt.agent_state || evt.state || '';
+        if (agentState) {
+          const label = {
+            thinking: '🤔 Thinking...',
+            running: '▶️ Running...',
+            completed: '✅ Done',
+            paused: '⏸ Paused',
+            awaiting_user_input: '💬 Waiting for input...',
+            failed: '❌ Failed',
+          }[agentState] || `▶️ ${agentState}`;
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[STATUS] ${label}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
         }
-      } else if (kind === 'ToolEvent' || kind === 'tool') {
-        const tool = evt.tool || evt.name || '';
+        continue;
+      }
+
+      // --- ActionEvent (tool invocations) ---
+      if (kind === 'ActionEvent') {
+        let action = evt.action || evt.content || evt.message || {};
+        if (typeof action === 'string') {
+          try { action = JSON.parse(action); } catch { action = { content: action }; }
+        }
+        const cmd = (action.command || action.cmd || '').trim();
+        const path = action.path || action.file || '';
+        const query = action.query || '';
+
+        let eventText = '';
+        if (tool.includes('bash') || tool.includes('terminal') || tool.includes('execute')) {
+          const snippet = cmd.slice(0, 200).replace(/\n/g, ' ').trim();
+          eventText = `$ ${snippet}`;
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[TERMINAL] ${snippet}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+        } else if (tool.includes('file_editor') || tool.includes('str_replace')) {
+          if (cmd === 'view') eventText = `Reading ${path}`;
+          else if (cmd === 'create') eventText = `Creating ${path}`;
+          else if (cmd === 'undo_edit') eventText = `Undoing ${path}`;
+          else eventText = `Editing ${path}`;
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[EDIT] ${eventText}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+        } else if (tool.includes('tavily') || tool.includes('search')) {
+          const q = query || cmd || '';
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[SEARCH] Searching: ${q.slice(0, 150)}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+        } else if (tool.includes('browser') || tool.includes('navigate')) {
+          const url = action.url || cmd || '';
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[BROWSER] Navigate: ${url.slice(0, 150)}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+        } else {
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[TOOL] ${tool}: ${JSON.stringify(action).slice(0, 120)}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+        }
+        continue;
+      }
+
+      // --- ObservationEvent (tool results) ---
+      if (kind === 'ObservationEvent') {
+        let obs = evt.observation || evt.output || evt.content || {};
+        if (typeof obs === 'string') {
+          try { obs = JSON.parse(obs); } catch { obs = { output: obs }; }
+        }
+        const stdout = obs.stdout || obs.output || obs.content || '';
+        const stderr = obs.stderr || '';
+
+        if (tool.includes('bash') || tool.includes('terminal') || tool.includes('execute')) {
+          const out = stdout || stderr;
+          if (out) {
+            const short = String(out).slice(0, 200).replace(/\n/g, ' ').trim();
+            const tag = stderr ? '[WARN]' : '[OUT]';
+            state.messages.push({ id: nextMsgId(state), role: 'event', content: `${tag} ${short}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+          }
+        } else if (tool.includes('file_editor') || tool.includes('str_replace')) {
+          const diff = obs.diff || '';
+          if (diff) {
+            state.messages.push({ id: nextMsgId(state), role: 'event', content: `[FILE] Diff (${String(diff).length} chars)`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+          }
+        }
+        continue;
+      }
+
+      // --- ToolEvent / GenericEvent fallback ---
+      if (kind === 'ToolEvent' || kind === 'tool') {
         const input = evt.input || evt.arguments || evt.text || '';
         const summary = input ? (typeof input === 'string' ? input.slice(0, 100) : JSON.stringify(input).slice(0, 100)) : '';
-        const eventId = eid || `tool_${ts}_${tool}`;
-        if (!state.event_kinds?.[eventId]) {
-          const label = summary ? `🛠 ${tool}: ${summary}` : `🛠 ${tool}`;
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[TOOL] ${label}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
-          if (!state.event_kinds) state.event_kinds = {};
-          state.event_kinds[eventId] = true;
-        }
-      } else if (kind === 'GenericEvent' || kind === 'generic') {
+        state.messages.push({ id: nextMsgId(state), role: 'event', content: `[TOOL] ${tool}: ${summary}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+        continue;
+      }
+
+      if (kind === 'GenericEvent' || kind === 'generic') {
         const text = evt.text || evt.message || evt.content || '';
-        if (text && text.trim() && !state.event_kinds?.[eid]) {
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[INFO] ${text.trim().slice(0, 200)}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
-          if (!state.event_kinds) state.event_kinds = {};
-          state.event_kinds[eid] = true;
+        if (text && text.trim()) {
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[INFO] ${String(text).trim().slice(0, 200)}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
         }
+        continue;
       }
     }
     if (list.length < limit) break;
@@ -849,7 +922,12 @@ async function route(method, path, url, request, env) {
         }
         await writeState(env, repo, state);
       } else {
-        // Still running — save seen event IDs update if poll changed them
+        // Still running — process live events (AgentStateChange, ActionEvent, etc.)
+        // PollConversation's running path doesn't fetch events; we do it here.
+        const liveEventsPromise = fetchResponse(env, state.conversation_id, state);
+        // Don't await — non-blocking; events will be on next poll if we miss them
+        // We do await for simplicity and correctness
+        await liveEventsPromise;
         await writeState(env, repo, state);
       }
     }
