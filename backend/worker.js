@@ -153,8 +153,20 @@ function nextMsgId(state) {
 // Cloud API calls
 // ---------------------------------------------------------------------------
 
+const FETCH_TIMEOUT = 25000; // 25s max per Cloud API call (within 30s worker limit)
+
+async function fetchWithTimeout(url, opts = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function cloudGet(env, path) {
-  const resp = await fetch(`${CLOUD_API}${path}`, { headers: cloudHeaders(env) });
+  const resp = await fetchWithTimeout(`${CLOUD_API}${path}`, { headers: cloudHeaders(env) });
   if (!resp.ok) {
     const text = await resp.text();
     throw new Error(`${resp.status}:${text.slice(0, 200)}`);
@@ -163,7 +175,7 @@ async function cloudGet(env, path) {
 }
 
 async function cloudPost(env, path, body) {
-  const resp = await fetch(`${CLOUD_API}${path}`, {
+  const resp = await fetchWithTimeout(`${CLOUD_API}${path}`, {
     method: 'POST',
     headers: cloudHeaders(env),
     body: JSON.stringify(body),
@@ -306,7 +318,7 @@ async function createConversation(env, prompt, repo, branch, mode) {
     }
   } catch (_) {}
 
-  const resp = await fetch(`${CLOUD_API}/api/v1/app-conversations`, {
+  const resp = await fetchWithTimeout(`${CLOUD_API}/api/v1/app-conversations`, {
     method: 'POST',
     headers: cloudHeaders(env),
     body: JSON.stringify(body),
@@ -355,7 +367,7 @@ async function sendMessage(env, convId, prompt, sandboxId) {
   };
   let lastErr = null;
   for (let attempt = 0; attempt < 2; attempt++) {
-    const resp = await fetch(`${CLOUD_API}/api/v1/app-conversations/${convId}/send-message`, {
+    const resp = await fetchWithTimeout(`${CLOUD_API}/api/v1/app-conversations/${convId}/send-message`, {
       method: 'POST',
       headers: cloudHeaders(env),
       body: JSON.stringify(body),
@@ -648,7 +660,7 @@ const zipInflate = async (data, usize) => {
 
 async function fetchResponseFromZip(env, convId, state) {
   try {
-    const resp = await fetch(`${CLOUD_API}/api/v1/app-conversations/${convId}/download`, { headers: cloudHeaders(env) });
+    const resp = await fetchWithTimeout(`${CLOUD_API}/api/v1/app-conversations/${convId}/download`, { headers: cloudHeaders(env) });
     if (!resp.ok) return null;
     const buf = await resp.arrayBuffer();
     // Try events.json first (standard OpenHands trajectory format)
