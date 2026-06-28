@@ -332,11 +332,16 @@ async function createConversation(env, prompt, repo, branch, mode) {
   }
   const data = await resp.json();
 
-  // Direct response — may have conversation ID or start-task ID
+  // Direct response — may have conversation ID or start-task ID.
+  // The Cloud API response format has evolved: check multiple field names.
+  const directId = data.app_conversation_id || data.conversation_id || data.id || '';
+  // Only look for a start-task ID if we DON'T already have a direct conversation ID
+  const taskId = directId ? '' : (data.start_task_id || data.id || '');
+  const sboxId = data.sandbox_id || '';
   return {
-    conversation_id: data.app_conversation_id || '',
-    start_task_id: data.id || '',
-    sandbox_id: data.sandbox_id || '',
+    conversation_id: directId,
+    start_task_id: taskId,
+    sandbox_id: sboxId,
   };
 }
 
@@ -350,10 +355,22 @@ async function pollForConvId(env, startTaskId) {
   try {
     const data = await cloudGet(env, `/api/v1/app-conversations/start-tasks?ids=${startTaskId}`);
     const items = Array.isArray(data) ? data : (data.items || []);
-    if (items.length && items[0].app_conversation_id) {
-      return { conversation_id: items[0].app_conversation_id, sandbox_id: items[0].sandbox_id || '' };
+    if (items.length) {
+      const item = items[0];
+      // The API may return app_conversation_id, conversation_id, or id
+      const convId = item.app_conversation_id || item.conversation_id || item.id || '';
+      if (convId) {
+        return { conversation_id: convId, sandbox_id: item.sandbox_id || '' };
+      }
+      // Check if the task has failed (status field may indicate this)
+      if (item.status === 'failed' || item.status === 'error') {
+        throw new Error(`Start task failed: ${item.error || item.status || 'unknown'}`);
+      }
     }
-  } catch (_) {}
+  } catch (e) {
+    // Re-throw non-status errors so the caller can distinguish
+    if (e.message?.startsWith('Start task failed')) throw e;
+  }
   return null;
 }
 
@@ -1168,22 +1185,27 @@ async function route(method, path, url, request, env) {
         if (raw) stCount = parseInt(raw, 10) || 0;
       } catch (_) {}
       stCount++;
-      // Give up after 36 attempts (~3min with 5s sleep per attempt)
-      if (stCount >= 36) {
-        const deadId = state.start_task_id;
-        state.start_task_id = null;
-        try { await env.VIBECODE.delete(stKey); } catch (_) {}
-        console.error(`Start task ${deadId} never resolved after ${stCount} attempts`);
-      } else {
+      try {
         const result = await pollForConvId(env, state.start_task_id);
         if (result) {
           state.conversation_id = result.conversation_id;
           if (result.sandbox_id) state.sandbox_id = result.sandbox_id;
           state.start_task_id = null;
           try { await env.VIBECODE.delete(stKey); } catch (_) {}
+        } else if (stCount >= 36) {
+          // ~3min with 5s sleep per attempt — give up
+          const deadId = state.start_task_id;
+          state.start_task_id = null;
+          try { await env.VIBECODE.delete(stKey); } catch (_) {}
+          console.error(`Start task ${deadId} never resolved after ${stCount} attempts`);
         } else {
           try { await env.VIBECODE.put(stKey, String(stCount), { expirationTtl: 600 }); } catch (_) {}
         }
+      } catch (e) {
+        // Start task explicitly failed (status=error/failed) — give up immediately
+        console.error(`Start task failed: ${e.message}`);
+        state.start_task_id = null;
+        try { await env.VIBECODE.delete(stKey); } catch (_) {}
       }
       await writeState(env, repo, state);
     }
