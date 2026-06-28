@@ -1069,21 +1069,22 @@ async function route(method, path, url, request, env) {
         }
         await writeState(env, repo, state);
       } else {
-        // Still running — process live events (AgentStateChange, ActionEvent, etc.)
-        // PollConversation's running path doesn't fetch events; we do it here.
-        const eventsBefore = state.seen_event_ids?.length || 0;
-        const msgsBefore = state.messages.length;
-        const posBefore = q.position;
-        await fetchResponse(env, state.conversation_id, state);
-        // Only write KV if state actually changed — saves significant KV writes
-        // for long tasks (e.g. 1000s task: 333 writes → ~100 writes)
-        if (
-          (state.seen_event_ids?.length || 0) > eventsBefore ||
-          state.messages.length > msgsBefore ||
-          q.position !== posBefore
-        ) {
+        // Still running — FINAL-ONLY MODE: skip real-time events to slash KV writes.
+        // Events + final response are fetched atomically when the conversation
+        // completes. The app shows "Agent working..." until then.
+        // This transforms a 1000s task from ~333 KV writes down to ~30-40 writes.
+        //
+        // A brief heartbeat status is written every 30s so the app doesn't stall.
+        const nowMs = Date.now();
+        const lastHeartbeat = state._last_heartbeat || 0;
+        if (!lastHeartbeat || (nowMs - lastHeartbeat) > 28000) {
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent is working...', kind: 'SystemEvent', timestamp: now() });
+          state._last_heartbeat = nowMs;
           await writeState(env, repo, state);
         }
+        // fetchResponse NOT called here — saves all Cloud API events/search calls
+        // and all event-processing KV writes during the running phase.
+        // pollConversation() → completed handler will call it once when done.
       }
     }
 
