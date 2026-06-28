@@ -209,7 +209,22 @@ async function createConversation(env, prompt, repo, branch, mode) {
   // Build prompt with repo context (matching chat_service.py)
   let fullPrompt = prompt;
   const effectiveBranch = branch || (repo ? (await getDefaultBranch(repo)) : '') || 'main';
-  if (repo) {
+  if (mode === 'plan' && repo) {
+    fullPrompt =
+      `Repository: ${repo} (branch: ${effectiveBranch}).\n` +
+      `IMPORTANT — PLAN MODE:\n` +
+      `1. FIRST, analyze the task and research the codebase. Read files, search, ` +
+      `understand the architecture. Create a detailed implementation plan saved ` +
+      `to .agents_tmp/PLAN.md. Do NOT implement anything yet.\n` +
+      `2. After creating the plan, present your findings and ask ` +
+      `whether to proceed with implementation.\n` +
+      `3. You are in READ-ONLY mode. Do NOT edit, create, or delete any files ` +
+      `other than .agents_tmp/PLAN.md. Do NOT run git commit or git push.\n` +
+      `IMPORTANT: Stop after EXPLORATION + ANALYSIS.\n\n` +
+      `[SANDBOX] REPO RESTRICTION: You are confined to repository \`${repo}\`. ` +
+      `Switch branches freely, but NEVER touch any other repo.\n\n` +
+      `Task: ${prompt}`;
+  } else if (repo) {
     fullPrompt =
       `Repository: ${repo} (branch: ${effectiveBranch}).\n` +
       `IMPORTANT: First run \`git pull\` to get the latest code. ` +
@@ -249,16 +264,19 @@ async function createConversation(env, prompt, repo, branch, mode) {
     body.selected_branch = effectiveBranch;
   }
 
-  // Add MCP servers (Tavily web search) if env var is set
+  // Add MCP servers (matching agent_runner.py _build_default_mcp_config):
+  // 1. Web fetch (mcp-server-fetch): gated behind VIBECODE_ENABLE_FETCH env var
+  // 2. Tavily search: if TAVILY_API_KEY env var is set
+  const mcpServers = [];
+  if (env.VIBECODE_ENABLE_FETCH !== '0') {
+    mcpServers.push({ name: 'fetch', command: 'uvx', args: ['mcp-server-fetch'] });
+  }
   const tavilyKey = env.TAVILY_API_KEY || '';
   if (tavilyKey) {
-    body.mcp_servers = [
-      {
-        name: 'tavily-search',
-        url: 'https://tavily.com/api/mcp',
-        env: { TAVILY_API_KEY: tavilyKey },
-      },
-    ];
+    mcpServers.push({ name: 'tavily', command: 'uvx', args: ['tavily-mcp'], env: { TAVILY_API_KEY: tavilyKey } });
+  }
+  if (mcpServers.length) {
+    body.mcp_servers = mcpServers;
   }
 
   // Add git config if user configured it
@@ -842,7 +860,9 @@ async function route(method, path, url, request, env) {
     const repo = (body.repo || '').trim();
     const branch = (body.branch || '').trim();
     const mode = (body.mode || 'code').trim();
+    if (!['code', 'plan'].includes(mode)) return error("mode must be 'code' or 'plan'", 400);
     if (!repo) return error('repo is required', 400);
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return error(`Invalid repo format: '${repo}'. Use owner/repo`, 400);
 
     const state = (await readState(env, repo)) || emptyState(repo, branch, mode);
     if (branch) state.branch = branch;
