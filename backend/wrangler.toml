@@ -1,0 +1,23 @@
+name = "vibecode-proxy"
+main = "worker.js"
+compatibility_date = "2025-03-01"
+
+# KV namespace for state persistence
+# Create it with: npx wrangler kv:namespace create "VIBECODE"
+# Then paste the ID below and in preview_id
+kv_namespaces = [
+  { binding = "VIBECODE", id = "YOUR_KV_ID", preview_id = "YOUR_KV_PREVIEW_ID" }
+]
+
+# Environment variables (secrets should use wrangler secret put instead)
+[vars]
+LLM_MODEL = "deepseek/deepseek-v4-flash"
+
+# Secrets to set manually:
+# npx wrangler secret put OPENHANDS_CLOUD_API_KEY
+# npx wrangler secret put LLM_API_KEY
+
+[env.production]
+kv_namespaces = [
+  { binding = "VIBECODE", id = "YOUR_KV_ID" }
+]
