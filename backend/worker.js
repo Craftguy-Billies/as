@@ -608,6 +608,19 @@ async function route(method, path, url, request, env) {
   if (path === '/api/health' && method === 'GET') {
     return json({ status: 'ok', timestamp: now() });
   }
+  if (path === '/api/hello' && method === 'GET') {
+    return json({ message: 'VibeCode Worker' });
+  }
+  // Clear queue — full reset (same as DELETE /api/chat without repo)
+  if (path === '/api/chat/clear-queue' && method === 'POST') {
+    try {
+      const list = await env.VIBECODE.list({ prefix: 'state:' });
+      for (const key of list.keys) await env.VIBECODE.delete(key.name);
+      const list2 = await env.VIBECODE.list({ prefix: 'log:' });
+      for (const key of list2.keys) await env.VIBECODE.delete(key.name);
+    } catch (_) {}
+    return json({ ok: true, message: 'All chat state cleared.' });
+  }
 
   // LLM config
   if (path === '/api/config/llm' && method === 'PUT') {
