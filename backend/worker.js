@@ -1076,22 +1076,39 @@ async function route(method, path, url, request, env) {
         }
         await writeState(env, repo, state);
       } else {
-        // Still running — FINAL-ONLY MODE: skip real-time events to slash KV writes.
-        // Events + final response are fetched atomically when the conversation
-        // completes. The app shows "Agent working..." until then.
-        // This transforms a 1000s task from ~333 KV writes down to ~30-40 writes.
-        //
-        // A brief heartbeat status is written every 30s so the app doesn't stall.
+        // Still running — show elapsed timer, update in-place (no repeated spam).
+        // Uses _run_started_at as epoch for elapsed calculation.
         const nowMs = Date.now();
-        const lastHeartbeat = state._last_heartbeat || 0;
-        if (!lastHeartbeat || (nowMs - lastHeartbeat) > 28000) {
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent is working...', kind: 'SystemEvent', timestamp: now() });
+        if (!state._run_started_at) state._run_started_at = nowMs;
+        const elapsed = Math.floor((nowMs - state._run_started_at) / 1000);
+        const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m${elapsed % 60}s`;
+
+        // Find the last "Working" heartbeat and update in-place
+        let foundHb = false;
+        if (state.messages) {
+          for (let i = state.messages.length - 1; i >= 0; i--) {
+            const m = state.messages[i];
+            if (m.role === 'event' && typeof m.content === 'string' &&
+                m.content.includes('[STATUS]') &&
+                (m.content.includes('Working') || m.content.includes('working'))) {
+              m.content = `[STATUS] Working... (${elapsedStr})`;
+              m.timestamp = now();
+              foundHb = true;
+              break;
+            }
+          }
+        }
+        if (!foundHb) {
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[STATUS] Working... (${elapsedStr})`, kind: 'SystemEvent', timestamp: now() });
+        }
+
+        // Persist timer every 30s (not every poll — saves KV writes)
+        const lastHb = state._last_heartbeat || 0;
+        if (!lastHb || (nowMs - lastHb) > 28000) {
           state._last_heartbeat = nowMs;
           await writeState(env, repo, state);
         }
-        // fetchResponse NOT called here — saves all Cloud API events/search calls
-        // and all event-processing KV writes during the running phase.
-        // pollConversation() → completed handler will call it once when done.
+        // fetchResponse NOT called — all events fetched atomically at completion.
       }
     }
 
