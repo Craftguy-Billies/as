@@ -1071,11 +1071,19 @@ async function route(method, path, url, request, env) {
       } else {
         // Still running — process live events (AgentStateChange, ActionEvent, etc.)
         // PollConversation's running path doesn't fetch events; we do it here.
-        const liveEventsPromise = fetchResponse(env, state.conversation_id, state);
-        // Don't await — non-blocking; events will be on next poll if we miss them
-        // We do await for simplicity and correctness
-        await liveEventsPromise;
-        await writeState(env, repo, state);
+        const eventsBefore = state.seen_event_ids?.length || 0;
+        const msgsBefore = state.messages.length;
+        const posBefore = q.position;
+        await fetchResponse(env, state.conversation_id, state);
+        // Only write KV if state actually changed — saves significant KV writes
+        // for long tasks (e.g. 1000s task: 333 writes → ~100 writes)
+        if (
+          (state.seen_event_ids?.length || 0) > eventsBefore ||
+          state.messages.length > msgsBefore ||
+          q.position !== posBefore
+        ) {
+          await writeState(env, repo, state);
+        }
       }
     }
 
