@@ -1034,6 +1034,11 @@ async function route(method, path, url, request, env) {
     if (state.queue.position >= state.queue.total) {
       state.queue.position = 0;
       state.queue.done = 0;
+      state.last_sent_position = -1;
+      state._run_started_at = undefined;
+      if (state.conversation_id) {
+        try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
+      }
     }
     await writeState(env, repo, state);
     return json({ status: 'queued', position: state.queue.position, total: state.queue.total });
@@ -1063,6 +1068,12 @@ async function route(method, path, url, request, env) {
       state.queue.done = 0;
       state.last_sent_position = -1;
       state._run_started_at = undefined;  // reset timer for new batch
+      // Stale retry state from previous batch (same conversation_id) would cause
+      // the poll handler to find an old MessageEvent and advance the queue
+      // prematurely. Delete it so the retry starts fresh.
+      if (state.conversation_id) {
+        try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
+      }
     }
     state.queue.prompts.push(...prompts);
     state.queue.modes.push(...Array(prompts.length).fill(mode));
