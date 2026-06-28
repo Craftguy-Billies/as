@@ -187,6 +187,29 @@ async function createConversation(env, prompt, repo, branch, mode) {
     body.selected_branch = effectiveBranch;
   }
 
+  // Add MCP servers (Tavily web search) if env var is set
+  const tavilyKey = env.TAVILY_API_KEY || '';
+  if (tavilyKey) {
+    body.mcp_servers = [
+      {
+        name: 'tavily-search',
+        url: 'https://tavily.com/api/mcp',
+        env: { TAVILY_API_KEY: tavilyKey },
+      },
+    ];
+  }
+
+  // Add git config if user configured it
+  try {
+    const raw = await env.VIBECODE.get('config:git');
+    if (raw) {
+      const git = JSON.parse(raw);
+      if (git.name && git.email) {
+        body.git_config = { name: git.name, email: git.email };
+      }
+    }
+  } catch (_) {}
+
   const resp = await fetch(`${CLOUD_API}/api/v1/app-conversations`, {
     method: 'POST',
     headers: cloudHeaders(env),
@@ -796,6 +819,11 @@ async function route(method, path, url, request, env) {
     });
   }
 
+  // GET /api/logs — server log viewer (stub: returns empty for Worker, no local logs)
+  if (path === '/api/logs' && method === 'GET') {
+    return json({ lines: [] });
+  }
+
   // --- Misc stubs ---
 
   // POST /api/fcm-token — Firebase push notification token (stub)
@@ -803,13 +831,18 @@ async function route(method, path, url, request, env) {
     return json({ ok: true });
   }
 
-  // PUT /api/config/git — git user config (stub, git not used in Worker)
+  // PUT /api/config/git — git user config
   if (path === '/api/config/git' && method === 'PUT') {
-    return json({ ok: true, name: '', email: '' });
+    const body = await request.json();
+    const git = { name: body.name || '', email: body.email || '' };
+    await env.VIBECODE.put('config:git', JSON.stringify(git));
+    return json({ ok: true, name: git.name, email: git.email });
   }
   // GET /api/config/git
   if (path === '/api/config/git' && method === 'GET') {
-    return json({ name: '', email: '' });
+    const raw = await env.VIBECODE.get('config:git');
+    const git = raw ? JSON.parse(raw) : { name: '', email: '' };
+    return json(git);
   }
 
   return json({ error: `Not found: ${method} ${path}` }, 404);
