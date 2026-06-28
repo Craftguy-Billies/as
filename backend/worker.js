@@ -742,6 +742,7 @@ async function route(method, path, url, request, env) {
       state.queue.position = 0;
       state.queue.done = 0;
       state.last_sent_position = -1;
+      state._run_started_at = undefined;  // reset timer for new batch
     }
     state.queue.prompts.push(...prompts);
     state.queue.modes.push(...Array(prompts.length).fill(mode));
@@ -811,6 +812,7 @@ async function route(method, path, url, request, env) {
       state.sandbox_id = null;
       state.start_task_id = null;
       state.last_sent_position = -1;
+      state._run_started_at = undefined;
     }
     await writeState(env, repo, state);
     return json({ ok: true });
@@ -913,6 +915,9 @@ async function route(method, path, url, request, env) {
         const cfg = await readConfig(env);
         state.llm_model = cfg.model || '';
         state.configured_model = cfg.model || '';
+
+        // Reset elapsed timer for this new conversation
+        state._run_started_at = now();
 
         // Add user message to local state
         state.messages.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
@@ -1056,6 +1061,8 @@ async function route(method, path, url, request, env) {
         }
 
         await writeState(env, repo, state);
+        // Must return here so we don't fall through to the idle/running handlers
+        return buildStateResponse(state, q, stillPending);
       } else if (pollResult.status === 'failed') {
         const errMsg = pollResult.error || 'unknown error';
         state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] Agent failed: ${errMsg.slice(0, 200)}`, kind: 'ErrorEvent', timestamp: now() });
