@@ -535,7 +535,10 @@ async function fetchResponse(env, convId, state) {
               text = content.trim();
             }
           }
-          if (text) return text;
+          if (text) {
+            console.log(`[FETCH] conv=${convId}: found MessageEvent (${text.length} chars) after ${page} pages`);
+            return text;
+          }
         }
       }
 
@@ -544,6 +547,7 @@ async function fetchResponse(env, convId, state) {
       if (!lastTs || String(lastTs) === minTs) break;  // no more events or stuck
       minTs = String(lastTs);
     }
+    console.log(`[FETCH] conv=${convId}: no MessageEvent after ${page} pages`);
   } catch (_) {}
   return null;
 }
@@ -1463,6 +1467,7 @@ async function route(method, path, url, request, env) {
         // Retry state stored in SEPARATE KV key so it survives main state write failures.
         // Each poll does ONE attempt so we never block >30s on free tier.
         // Retry window extends up to ~5min as long as the app keeps polling.
+        console.log(`[RETRY] conv=${state.conversation_id}: completed with no msg (pos=${q.position}) — starting retry`);
         let retryResponse = null;
         let rState = { count: 0, started_at: 0 };
         try {
@@ -1483,7 +1488,7 @@ async function route(method, path, url, request, env) {
           if (!retryKeyExists) {
             // writeState failed on previous poll — retry state is lost.
             // Don't loop forever: advance queue and move on.
-            console.error(`Retry state lost for conv ${state.conversation_id} (position ${q.position}) — advancing`);
+            console.error(`[RETRY] conv=${state.conversation_id}: retry key lost (pos=${q.position}) — advancing`);
             q.position++;
             q.done = Math.min(q.position, q.total);
             skipFutureCancelled(q);
@@ -1491,7 +1496,7 @@ async function route(method, path, url, request, env) {
             await writeState(env, repo, state);
             return buildStateResponse(state, q, stillPending, repo, mode, 'idle');
           }
-          // Retry key exists — retry is still active, keep waiting.
+          console.log(`[RETRY] conv=${state.conversation_id}: completed_position matched but retry key exists — continuing (count=${retryCount})`);
           // Fall through to retry logic below.
         }
         state._completed_position = q.position;
@@ -1540,6 +1545,7 @@ async function route(method, path, url, request, env) {
         try { await env.VIBECODE.put(`retry:${state.conversation_id}`, JSON.stringify(rState)); } catch (_) {}
 
         if (retryResponse) {
+          console.log(`[RETRY] conv=${state.conversation_id}: response found (${retryResponse.length} chars) after ${retryCount} attempts`);
           // Clean up retry state
           try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
           state.messages.push({ id: nextMsgId(state), role: 'assistant', content: retryResponse, timestamp: now() });
