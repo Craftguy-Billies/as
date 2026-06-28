@@ -85,6 +85,11 @@ app.add_middleware(
 # Health
 # ---------------------------------------------------------------------------
 
+@app.get("/api/hello")
+async def hello():
+    return {"message": "Hello from VibeCode!"}
+
+
 @app.get("/api/health", response_model=HealthResponse)
 async def health():
     cfg = get_llm_config()
