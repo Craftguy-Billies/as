@@ -73,6 +73,12 @@ async function readState(env, repo) {
 }
 
 async function writeState(env, repo, state) {
+  try {
+    await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
+  } catch (_) {
+    // KV write limit exceeded — log and continue.
+    // Worker stays functional in-memory; next poll may retry.
+  }
   if (state.messages && state.messages.length > 500) {
     state.messages = state.messages.slice(-400);
   }
