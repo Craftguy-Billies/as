@@ -387,6 +387,7 @@ function emptyState(repo, branch, mode) {
     seen_event_ids: [],
     last_event_index: 0,
     last_event_timestamp: '',
+    last_sent_position: -1,  // tracks which queue position was last sent to Cloud
     llm_model: '',
     configured_model: '',
   };
@@ -526,6 +527,7 @@ async function route(method, path, url, request, env) {
       state.queue.modes = [];
       state.queue.position = 0;
       state.queue.done = 0;
+      state.last_sent_position = -1;
     }
     state.queue.prompts.push(...prompts);
     state.queue.modes.push(...Array(prompts.length).fill(mode));
@@ -661,9 +663,11 @@ async function route(method, path, url, request, env) {
         if (result.conversation_id) {
           state.conversation_id = result.conversation_id;
           if (result.sandbox_id) state.sandbox_id = result.sandbox_id;
+          state.last_sent_position = q.position;  // sent via initial_message
           convStatus = 'starting';
         } else if (result.start_task_id) {
           state.start_task_id = result.start_task_id;
+          state.last_sent_position = q.position;  // will be sent when conv resolves
           convStatus = 'starting';
         }
 
@@ -681,6 +685,27 @@ async function route(method, path, url, request, env) {
         console.error(`Create conv error: ${e.message}`);
         q.cancelled = true;
         state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] Failed to start agent. Please try again.`, kind: 'ErrorEvent', timestamp: now() });
+        await writeState(env, repo, state);
+      }
+    }
+
+    // --- Phase: send follow-up message if queue advanced but not sent yet ---
+    // This handles: conversation exists, new prompt in queue, not yet sent via
+    // send-message. Triggered when last_sent_position < q.position.
+    if (hasPending && state.conversation_id && state.last_sent_position < q.position) {
+      const prompt = q.prompts[q.position];
+      const sendErr = await sendMessage(env, state.conversation_id, prompt, state.sandbox_id);
+      if (sendErr) {
+        console.error(`sendMessage follow-up error: ${sendErr}`);
+        if (sendErr.startsWith('409')) {
+          state.conversation_id = null;
+          state.sandbox_id = null;
+        }
+      } else {
+        state.last_sent_position = q.position;
+        // Add user message
+        state.messages.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
+        state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
         await writeState(env, repo, state);
       }
     }
@@ -709,7 +734,13 @@ async function route(method, path, url, request, env) {
         if (q.position < q.total && !q.cancelled) {
           const nextPrompt = q.prompts[q.position];
           const sendErr = await sendMessage(env, state.conversation_id, nextPrompt, state.sandbox_id);
-          if (sendErr) console.error(`sendMessage error at pos ${q.position}: ${sendErr}`);
+          if (sendErr) {
+            console.error(`sendMessage error at pos ${q.position}: ${sendErr}`);
+          } else {
+            state.last_sent_position = q.position;
+            state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
+            state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+          }
         }
 
         await writeState(env, repo, state);
