@@ -85,6 +85,10 @@ async function writeState(env, repo, state) {
   if (state.seen_event_ids && state.seen_event_ids.length > 2000) {
     state.seen_event_ids = state.seen_event_ids.slice(-1500);
   }
+  // Trim _batch_skip if too many cancelled prompts piled up (unlikely but safe)
+  if (state._batch_skip && Object.keys(state._batch_skip).length > 100) {
+    state._batch_skip = undefined;
+  }
   await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
 }
 
@@ -577,6 +581,7 @@ function emptyState(repo, branch, mode) {
     seen_event_ids: [],
     event_kinds: {},
     _extracted_hashes: {},
+    _batch_skip: undefined,
     last_event_index: 0,
     last_event_timestamp: '',
     last_sent_position: -1,
@@ -726,8 +731,8 @@ async function route(method, path, url, request, env) {
     if (branch) state.branch = branch;
     if (mode) state.mode = mode;
 
-    // If all previous prompts finished, start fresh (replace queue)
-    if (state.queue.position >= state.queue.total) {
+    // If all previous prompts finished OR were cancelled, start fresh (replace queue)
+    if (state.queue.position >= state.queue.total || state.queue.cancelled) {
       state.queue.prompts = [];
       state.queue.modes = [];
       state.queue.position = 0;
@@ -769,10 +774,22 @@ async function route(method, path, url, request, env) {
     if (!state) return json({ ok: true });
 
     if (index >= 0 && index < state.queue.total) {
-      // Cancel specific prompt — advance past it if it's current
+      // Cancel specific prompt
       if (index === state.queue.position) {
+        // Current prompt: advance past it
         state.queue.position++;
         state.queue.done++;
+        // Also skip past any future-cancelled prompts
+        if (state._batch_skip) {
+          while (state._batch_skip[state.queue.position]) {
+            state.queue.position++;
+            state.queue.done++;
+          }
+        }
+      } else if (index > state.queue.position) {
+        // Future prompt: mark as skipped, will be advanced past when reached
+        if (!state._batch_skip) state._batch_skip = {};
+        state._batch_skip[index] = true;
       }
     } else {
       state.queue.cancelled = true;
@@ -915,6 +932,13 @@ async function route(method, path, url, request, env) {
       }
     }
 
+    const skipFutureCancelled = (q) => {
+      while (state._batch_skip && state._batch_skip[q.position]) {
+        q.position++;
+        q.done = Math.min(q.position, q.total);
+      }
+    };
+
     // --- Phase: poll Cloud API for agent status ---
     if (state.conversation_id && hasPending) {
       const pollResult = await pollConversation(env, state.conversation_id, state);
@@ -930,6 +954,7 @@ async function route(method, path, url, request, env) {
           // Advance queue
           q.position++;
           q.done = Math.min(q.position, q.total);
+          skipFutureCancelled(q);
           // If more prompts, send next one
           if (q.position < q.total && !q.cancelled) {
             const nextPrompt = q.prompts[q.position];
@@ -984,6 +1009,7 @@ async function route(method, path, url, request, env) {
         // Advance queue
         q.position++;
         q.done = Math.min(q.position, q.total);
+        skipFutureCancelled(q);
 
         // If more prompts, send next one
         if (q.position < q.total && !q.cancelled) {
@@ -1004,6 +1030,7 @@ async function route(method, path, url, request, env) {
         state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] Agent failed: ${errMsg.slice(0, 200)}`, kind: 'ErrorEvent', timestamp: now() });
         q.position++;
         q.done = Math.min(q.position, q.total);
+        skipFutureCancelled(q);
         await writeState(env, repo, state);
       } else if (['idle', 'pending'].includes(pollResult.status) || (pollResult.status === 'completed' && !pollResult.response)) {
         // Conversation is idle/completed but queue has work and no response.
