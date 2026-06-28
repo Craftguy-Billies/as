@@ -345,16 +345,15 @@ async function createConversation(env, prompt, repo, branch, mode) {
 // ---------------------------------------------------------------------------
 
 async function pollForConvId(env, startTaskId) {
-  for (let i = 0; i < 10; i++) {  // up to 50s
-    await sleep(5000);
-    try {
-      const data = await cloudGet(env, `/api/v1/app-conversations/start-tasks?ids=${startTaskId}`);
-      const items = Array.isArray(data) ? data : (data.items || []);
-      if (items.length && items[0].app_conversation_id) {
-        return { conversation_id: items[0].app_conversation_id, sandbox_id: items[0].sandbox_id || '' };
-      }
-    } catch (_) {}
-  }
+  // Single attempt — retried across polls via stateful counter
+  await sleep(5000);
+  try {
+    const data = await cloudGet(env, `/api/v1/app-conversations/start-tasks?ids=${startTaskId}`);
+    const items = Array.isArray(data) ? data : (data.items || []);
+    if (items.length && items[0].app_conversation_id) {
+      return { conversation_id: items[0].app_conversation_id, sandbox_id: items[0].sandbox_id || '' };
+    }
+  } catch (_) {}
   return null;
 }
 
@@ -1135,7 +1134,13 @@ async function route(method, path, url, request, env) {
     }
 
     const q = state.queue;
-    const hasPending = q.position < q.total && !q.cancelled;
+    // Migration: old code set q.cancelled=true on conv failure, locking the
+    // queue. If cancelled but has pending work, clear stale flag and retry.
+    let hasPending = q.position < q.total && !q.cancelled;
+    if (q.cancelled && q.position < q.total) {
+      q.cancelled = false;
+      hasPending = true;
+    }
 
     // Queue naturally completed — reset to clean idle state so the app
     // doesn't show stale "1/1 done" after the task finishes.
@@ -1154,15 +1159,33 @@ async function route(method, path, url, request, env) {
     }
     let convStatus = 'idle';
 
-    // --- Phase: resolve start_task to conversation_id ---
+    // --- Phase: resolve start_task to conversation_id (stateful retry across polls) ---
     if (!state.conversation_id && state.start_task_id) {
-      const result = await pollForConvId(env, state.start_task_id);
-      if (result) {
-        state.conversation_id = result.conversation_id;
-        if (result.sandbox_id) state.sandbox_id = result.sandbox_id;
+      const stKey = `start_task:${state.start_task_id}`;
+      let stCount = 0;
+      try {
+        const raw = await env.VIBECODE.get(stKey);
+        if (raw) stCount = parseInt(raw, 10) || 0;
+      } catch (_) {}
+      stCount++;
+      // Give up after 36 attempts (~3min with 5s sleep per attempt)
+      if (stCount >= 36) {
+        const deadId = state.start_task_id;
         state.start_task_id = null;
-        await writeState(env, repo, state);
+        try { await env.VIBECODE.delete(stKey); } catch (_) {}
+        console.error(`Start task ${deadId} never resolved after ${stCount} attempts`);
+      } else {
+        const result = await pollForConvId(env, state.start_task_id);
+        if (result) {
+          state.conversation_id = result.conversation_id;
+          if (result.sandbox_id) state.sandbox_id = result.sandbox_id;
+          state.start_task_id = null;
+          try { await env.VIBECODE.delete(stKey); } catch (_) {}
+        } else {
+          try { await env.VIBECODE.put(stKey, String(stCount), { expirationTtl: 600 }); } catch (_) {}
+        }
       }
+      await writeState(env, repo, state);
     }
 
     // --- Phase: create conversation if queue has work ---
