@@ -1526,6 +1526,19 @@ async function route(method, path, url, request, env) {
           const rRaw = await env.VIBECODE.get(`retry:${state.conversation_id}`);
           if (rRaw) rState = JSON.parse(rRaw);
         } catch (_) {}
+
+        // Stale retry state detection: reset if this is a new prompt (position
+        // mismatch) OR if the retry started more than 10min ago (same position
+        // coincidentally matches across different batches for 1-prompt tasks).
+        const isStale =
+          state._completed_position !== q.position ||
+          (rState.started_at > 0 && (Date.now() - rState.started_at) > 600000);  // 10min
+        if (rState.count > 0 && isStale) {
+          console.log(`[RETRY] conv=${state.conversation_id}: stale retry state (count=${rState.count}) for new prompt — resetting`);
+          rState = { count: 0, started_at: 0 };
+          try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
+        }
+
         const retryCount = rState.count || 0;
 
         // Detect repeated completion for same prompt (writeState failed on prev poll).
