@@ -845,80 +845,47 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                 logger.info("send: no branch — sending prompt as-is, no git pull")
             success, send_err = _send_message(current_conv_id, effective_prompt)
             if not success:
-                # If sandbox is paused/gone, auto-recover: reset + create new
-                # conversation with same prompt. The caller never sees a 409.
+                # 409 = sandbox paused/gone. _send_message already tried resume
+                # + polling + retry. If it still fails, propagate error — do NOT
+                # create a new conversation (that would burn uncached tokens).
+                # The user can retry manually.
                 if send_err and "409" in str(send_err):
-                    logger.warning("Sandbox paused/gone for conversation %s — recovering", current_conv_id)
-                    recent_user_msgs: list = []
-                    with _lock:
-                        # Capture ONLY user messages from recent context so the new
-                        # conversation knows what was discussed (not just UI history).
-                        # EXCLUDE assistant responses — injecting them causes the AI
-                        # to get confused between its own prior output and the new task,
-                        # leading to repeated responses, code-file output, and skipped
-                        # tool execution steps.
-                        for m in _msgs()[-6:]:
-                            role = m.get("role", "")
-                            if role == "user" and m.get("content"):
-                                recent_user_msgs.append(m["content"])
-                        _conversation_id = None
-                        _last_event_index = 0
-                        _sandbox_id = None
-                        _persist_to_db()
-                    if recent_user_msgs:
-                        # Use a clean factual summary so the AI never confuses
-                        # injected history with its own pending response.
-                        summarized = "; ".join(
-                            m[:200].replace("\n", " ") for m in recent_user_msgs
-                        )
-                        enhanced = (
-                            f"Previous user messages (from before server restart): {summarized}\n\n"
-                            f"---\n\n"
-                            f"{prompt}"
-                        )
-                        logger.info("AUDIT 409-recovery: %d user msgs injected, prompt=%s",
-                                    len(recent_user_msgs), prompt[:80])
-                    else:
-                        enhanced = prompt
-                    new_conv_id = _create_conversation(enhanced, repo, branch, mode)
-                    logger.info("Recovered: created new conv=%s (%d user msgs injected)",
-                                new_conv_id, len(recent_user_msgs))
-                    need_new_conv = True  # Phase 1c will store it
+                    logger.warning("send-message 409 unrecoverable for %s — propagating to user", current_conv_id)
+                    raise Exception("409:Sandbox unavailable")
+                # Non-409 failures (timeout, model busy, sandbox gone) should
+                # NOT kill the user's request. Create a fresh conversation and
+                # retry. This handles cases where the old conversation is too
+                # large (401+ msgs), the sandbox is cold, or the Cloud API is
+                # slow to respond.
+                logger.warning("send_message failed (non-409): send_err=%s — attempting recovery with new conversation. "
+                               "conv=%s status=%s seen_ids=%d",
+                               send_err, current_conv_id, _conversation_status, len(_seen_event_ids))
+                recent_user_msgs = []
+                with _lock:
+                    for m in _msgs()[-6:]:
+                        role = m.get("role", "")
+                        if role == "user" and m.get("content"):
+                            recent_user_msgs.append(m["content"])
+                    _conversation_id = None
+                    _last_event_index = 0
+                    _sandbox_id = None
+                    _persist_to_db()
+                if recent_user_msgs:
+                    summarized = "; ".join(
+                        m[:200].replace("\n", " ") for m in recent_user_msgs
+                    )
+                    enhanced = (
+                        f"Previous user messages (from before timeout): {summarized}\n\n"
+                        f"---\n\n"
+                        f"{prompt}"
+                    )
+                    logger.info("AUDIT non-409-recovery: %d user msgs injected, prompt=%s",
+                                len(recent_user_msgs), prompt[:80])
                 else:
-                    logger.warning("send_message failed (non-409): send_err=%s — attempting recovery with new conversation. "
-                                   "conv=%s status=%s seen_ids=%d",
-                                   send_err, current_conv_id, _conversation_status, len(_seen_event_ids))
-                    # Non-409 failures (timeout, model busy, sandbox gone) should
-                    # NOT kill the user's request. Create a fresh conversation and
-                    # retry. This handles cases where the old conversation is too
-                    # large (401+ msgs), the sandbox is cold, or the Cloud API is
-                    # slow to respond.
-                    recent_user_msgs = []
-                    with _lock:
-                        for m in _msgs()[-6:]:
-                            role = m.get("role", "")
-                            if role == "user" and m.get("content"):
-                                recent_user_msgs.append(m["content"])
-                        _conversation_id = None
-                        _last_event_index = 0
-                        _sandbox_id = None
-                        _persist_to_db()
-                    if recent_user_msgs:
-                        summarized = "; ".join(
-                            m[:200].replace("\n", " ") for m in recent_user_msgs
-                        )
-                        enhanced = (
-                            f"Previous user messages (from before timeout): {summarized}\n\n"
-                            f"---\n\n"
-                            f"{prompt}"
-                        )
-                        logger.info("AUDIT non-409-recovery: %d user msgs injected, prompt=%s",
-                                    len(recent_user_msgs), prompt[:80])
-                    else:
-                        enhanced = prompt
-                    new_conv_id = _create_conversation(enhanced, repo, branch, mode)
-                    logger.info("Recovered from non-409: created new conv=%s", new_conv_id)
-                    need_new_conv = True
+                    enhanced = prompt
+                new_conv_id = _create_conversation(enhanced, repo, branch, mode)
+                logger.info("Recovered from non-409: created new conv=%s", new_conv_id)
+                need_new_conv = True
     except httpx.HTTPStatusError as e:
         status_code = e.response.status_code
         logger.error("HTTP error: %s %s", status_code, e.response.text[:200])
@@ -1536,8 +1503,9 @@ def cancel_batch_prompt(index: int) -> dict:
 def _send_message(conversation_id: str, prompt: str) -> tuple[bool, str | None]:
     """Send a follow-up message to an existing conversation via send-message endpoint.
 
-    Returns (success, error_message). Handles 409 (sandbox paused/gone)
-    by attempting to resume the sandbox and retrying once.
+    Returns (success, error_message). On 409 (sandbox paused), resumes the
+    sandbox + polls until RUNNING + retries once. Does NOT create a new
+    conversation — the caller should propagate 409 errors to the user.
 
     Verified against OpenHands Cloud OpenAPI spec.
     """
@@ -1549,9 +1517,7 @@ def _send_message(conversation_id: str, prompt: str) -> tuple[bool, str | None]:
         "run": True,
     }
 
-    import time as _st
-    max_attempts = 5
-    for attempt in range(max_attempts):
+    for attempt in range(2):  # first + one retry after resume
         try:
             resp = httpx.post(
                 f"{CLOUD_API_URL}/api/v1/app-conversations/{conversation_id}/send-message",
@@ -1561,20 +1527,24 @@ def _send_message(conversation_id: str, prompt: str) -> tuple[bool, str | None]:
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 409:
-                logger.warning("send-message 409: sandbox not running for %s (attempt %d/%d)", conversation_id, attempt + 1, max_attempts)
-                # Attempt 0: try resume sandbox first
-                if attempt == 0 and _sandbox_id:
-                    resume_err = _resume_sandbox(_sandbox_id)
-                    if not resume_err:
-                        logger.info("send-message: sandbox resumed, retrying immediately")
-                        continue
-                    logger.warning("send-message: resume failed (%s), will retry with backoff", resume_err)
-                # Backoff before retry: 3s, 5s, 10s, 15s
-                backoff = [3, 5, 10, 15][min(attempt, 3)]
-                logger.info("send-message: retrying in %ds (attempt %d/%d)", backoff, attempt + 1, max_attempts)
-                _st.sleep(backoff)
-                continue
+            if e.response.status_code == 409 and attempt == 0:
+                # Fetch sandbox_id from conversation if we don't have it cached
+                sid = _sandbox_id
+                if not sid:
+                    sid = _fetch_sandbox_id(conversation_id)
+                if sid:
+                    logger.warning("send-message 409: resuming sandbox %s...", sid)
+                    err = _resume_sandbox(sid)
+                    if err:
+                        logger.error("send-message: resume failed: %s", err)
+                        return False, "409:Sandbox could not be resumed"
+                    # Retry send-message now that sandbox is RUNNING
+                    continue
+                else:
+                    logger.warning("send-message 409: no sandbox_id known for %s", conversation_id)
+                    return False, "409:No sandbox_id available"
+            elif e.response.status_code == 409:
+                return False, "409:Sandbox still not running after resume"
             raise  # re-raise other HTTP errors
         except httpx.TimeoutException:
             return False, (
@@ -1589,18 +1559,85 @@ def _send_message(conversation_id: str, prompt: str) -> tuple[bool, str | None]:
             sandbox_status = data.get("sandbox_status", "unknown")
             msg = data.get("message", "")
             logger.error("send-message returned success=false (sandbox=%s): %s", sandbox_status, msg)
-            return False, f"Agent not available (sandbox status: {sandbox_status}). {msg}".strip()
+            return False, f"send-message rejected (sandbox={sandbox_status})"
 
         # Update sandbox_id from response if we don't have it
         sandbox_status = data.get("sandbox_status", "")
         logger.info("send-message OK (sandbox=%s)", sandbox_status)
+
+        # Bug #14698 mitigation: agent may ignore run:true on finished convs.
+        # If status doesn't transition to running within 5s, force-trigger via
+        # the agent server's /run endpoint.
+        _ensure_agent_runs(conversation_id)
+
         return True, None
 
-    return False, "Sandbox not running after resume attempt"
+    return False, "409:Sandbox not running after resume attempt"
+
+
+def _fetch_sandbox_id(conversation_id: str) -> str | None:
+    """Get sandbox_id for a conversation from the Cloud API."""
+    try:
+        r = httpx.get(
+            f"{CLOUD_API_URL}/api/v1/app-conversations",
+            headers=_headers(),
+            params={"ids": conversation_id},
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        items = data if isinstance(data, list) else data.get("items", [])
+        if items:
+            sid = items[0].get("sandbox_id")
+            if sid:
+                global _sandbox_id
+                _sandbox_id = sid
+                return sid
+    except Exception as e:
+        logger.warning("Failed to fetch sandbox_id for %s: %s", conversation_id, e)
+    return None
+
+
+def _ensure_agent_runs(conversation_id: str) -> None:
+    """Mitigation for bug #14698: after send-message 200, the agent may
+    silently ignore run:true on a finished conversation. Poll status briefly
+    and if it stays idle, try to trigger the agent loop via the agent server."""
+    import time as _st
+    _st.sleep(2)
+    try:
+        r = httpx.get(
+            f"{CLOUD_API_URL}/api/v1/app-conversations",
+            headers=_headers(),
+            params={"ids": conversation_id},
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        items = data if isinstance(data, list) else data.get("items", [])
+        if not items:
+            return
+        status = items[0].get("execution_status", "")
+        if status in ("completed", "finished", "idle"):
+            acp = items[0].get("acp_server", "") or items[0].get("agent_server_url", "")
+            session_key = items[0].get("session_api_key", "")
+            if acp and session_key:
+                logger.warning("Bug #14698: status=%s after send-message — forcing /run", status)
+                r2 = httpx.post(
+                    f"{acp}/api/conversations/{conversation_id}/run",
+                    headers={"X-Session-API-Key": session_key},
+                    timeout=15,
+                )
+                logger.info("Forced /run returned %s", r2.status_code)
+            else:
+                logger.warning("Bug #14698: status=%s after send-message but no acp_server available", status)
+    except Exception as e:
+        logger.warning("Bug #14698 mitigation failed: %s", e)
 
 
 def _resume_sandbox(sandbox_id: str) -> str | None:
-    """Resume a paused sandbox. Returns None on success, error message on failure."""
+    """Resume a paused sandbox and poll until RUNNING status.
+    Returns None on success, error message on failure.
+    Polls for up to 60s (30 attempts × 2s)."""
     try:
         resp = httpx.post(
             f"{CLOUD_API_URL}/api/v1/sandboxes/{sandbox_id}/resume",
@@ -1608,12 +1645,40 @@ def _resume_sandbox(sandbox_id: str) -> str | None:
             timeout=30,
         )
         resp.raise_for_status()
-        logger.info("Sandbox %s resumed", sandbox_id)
-        return None
+        logger.info("Sandbox %s resume accepted, polling for RUNNING...", sandbox_id)
     except Exception as e:
         logger.error("Failed to resume sandbox %s: %s", sandbox_id, e)
-        # Don't leak raw exception text to the caller
         return "failed to resume sandbox"
+
+    # Poll sandbox/search until RUNNING (up to 60s)
+    import time as _st
+    deadline = _st.time() + 60
+    while _st.time() < deadline:
+        try:
+            r = httpx.get(
+                f"{CLOUD_API_URL}/api/v1/sandboxes/search",
+                headers=_headers(),
+                params={"sandbox_id": sandbox_id},
+                timeout=10,
+            )
+            data = r.json()
+            # Handle both list and object responses
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict):
+                items = data.get("items", [data])
+            else:
+                items = []
+            status = items[0].get("status", "") if items else ""
+            if status == "RUNNING":
+                logger.info("Sandbox %s is RUNNING", sandbox_id)
+                return None
+        except Exception as e:
+            logger.warning("Sandbox status poll error: %s", e)
+        _st.sleep(2)
+
+    logger.error("Sandbox %s did not reach RUNNING within 60s", sandbox_id)
+    return "sandbox did not reach RUNNING status"
 
 
 # Cache for GitHub default branch detection (repo → branch, 1h TTL)
