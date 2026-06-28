@@ -969,7 +969,9 @@ async function route(method, path, url, request, env) {
 
         if (responseText) {
           state.messages.push({ id: nextMsgId(state), role: 'assistant', content: responseText, timestamp: now() });
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: '[DONE] Task completed', kind: 'SystemEvent', timestamp: now() });
+          // No [DONE] event — assistant response IS the completion signal.
+          // (App groups consecutive events + assistant into one bubble;
+          //  a trailing event would create a spurious second bubble.)
           // Advance queue
           q.position++;
           q.done = Math.min(q.position, q.total);
@@ -1022,9 +1024,8 @@ async function route(method, path, url, request, env) {
 
         if (retryResponse) {
           state.messages.push({ id: nextMsgId(state), role: 'assistant', content: retryResponse, timestamp: now() });
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: '[DONE] Task completed', kind: 'SystemEvent', timestamp: now() });
         } else {
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: '[DONE] Task completed (no text extracted)', kind: 'SystemEvent', timestamp: now() });
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: '[ERROR] Task finished but no response text found', kind: 'ErrorEvent', timestamp: now() });
         }
 
         // Advance queue
