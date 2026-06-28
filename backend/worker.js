@@ -1508,7 +1508,7 @@ async function route(method, path, url, request, env) {
           }
         }
         await writeState(env, repo, state);
-        return buildStateResponse(state, q, stillPending);
+        return buildStateResponse(state, q, stillPending, repo, mode, stillPending ? 'running' : 'idle');
       }
 
       // No events found — fall back to status-based polling.
@@ -1666,7 +1666,7 @@ async function route(method, path, url, request, env) {
           }
 
           await writeState(env, repo, state);
-          return buildStateResponse(state, q, stillPending);
+          return buildStateResponse(state, q, stillPending, repo, mode, stillPending ? 'running' : 'idle');
         } else if (convStatus === 'pending') {
           // Still waiting for ZIP to generate — return current state, retry next poll
           // Write main state too so _completed_position is saved
@@ -1695,7 +1695,7 @@ async function route(method, path, url, request, env) {
           }
 
           await writeState(env, repo, state);
-          return buildStateResponse(state, q, stillPending);
+          return buildStateResponse(state, q, stillPending, repo, mode, stillPending ? 'running' : 'idle');
         }
       } else if (pollResult.status === 'failed') {
         // Agent execution failed — conversation is dead.
