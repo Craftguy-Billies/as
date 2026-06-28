@@ -58,6 +58,10 @@ async function writeState(env, repo, state) {
   if (state.messages && state.messages.length > 500) {
     state.messages = state.messages.slice(-400);
   }
+  // Trim event_kinds to prevent unbounded growth
+  if (state.event_kinds && Object.keys(state.event_kinds).length > 1000) {
+    state.event_kinds = {};
+  }
   await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
 }
 
@@ -340,6 +344,7 @@ async function fetchResponse(env, convId, state) {
   let offset = 0;
   const limit = 100;
   const maxPages = 20;
+  let foundNewAssistant = false;
 
   for (let page = 0; page < maxPages; page++) {
     let events;
@@ -356,33 +361,58 @@ async function fetchResponse(env, convId, state) {
 
       const kind = evt.kind || evt.type || evt.event || '';
       const source = evt.source || '';
-      if (kind !== 'MessageEvent' || source === 'user') continue;
+      const ts = evt.timestamp || evt.created_at || now();
 
-      // Extract from llm_message or message object
-      // Structure: { llm_message: { content: [{ type: "text", text: "..." }] } }
-      const llmMsg = evt.llm_message || evt.message || null;
-      if (!llmMsg) continue;
-
-      let text = '';
-      if (typeof llmMsg === 'string' && llmMsg.trim()) {
-        text = llmMsg.trim();
-      } else if (typeof llmMsg === 'object') {
-        const content = llmMsg.content || [];
-        if (Array.isArray(content)) {
-          for (const block of content) {
-            if (block && block.type === 'text' && block.text && block.text.trim()) {
-              if (text) text += '\n';
-              text += block.text.trim();
+      if (kind === 'MessageEvent' && source !== 'user') {
+        foundNewAssistant = true;
+        const llmMsg = evt.llm_message || evt.message || null;
+        if (!llmMsg) continue;
+        let text = '';
+        if (typeof llmMsg === 'string' && llmMsg.trim()) {
+          text = llmMsg.trim();
+        } else if (typeof llmMsg === 'object') {
+          const content = llmMsg.content || [];
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block && block.type === 'text' && block.text && block.text.trim()) {
+                if (text) text += '\n';
+                text += block.text.trim();
+              }
             }
+          } else if (typeof content === 'string' && content.trim()) {
+            text = content.trim();
           }
-        } else if (typeof content === 'string' && content.trim()) {
-          text = content.trim();
         }
-      }
-
-      if (text) {
-        if (allText) allText += '\n\n';
-        allText += text;
+        if (text) {
+          if (allText) allText += '\n\n';
+          allText += text;
+        }
+      } else if (kind === 'AgentStateChangeEvent') {
+        const state_ = evt.agent_state || evt.state || evt.text || '';
+        if (state_ && !state.event_kinds?.has?.(eid)) {
+          const label = { thinking: '🤔 Thinking...', running: '▶️ Running...', completed: '✅ Done' }[state_] || `▶️ ${state_}`;
+          state.messages.push({ id: eid ? parseInt(eid.replace(/\D/g,'').slice(-8) || '0') + now() : nextMsgId(state), role: 'event', content: `[STATUS] ${label}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+          if (!state.event_kinds) state.event_kinds = {};
+          state.event_kinds[eid] = true;
+        }
+      } else if (kind === 'ToolEvent' || kind === 'tool') {
+        const tool = evt.tool || evt.name || '';
+        const input = evt.input || evt.arguments || evt.text || '';
+        const summary = input ? (typeof input === 'string' ? input.slice(0, 100) : JSON.stringify(input).slice(0, 100)) : '';
+        const eventId = eid || `tool_${ts}_${tool}`;
+        if (!state.event_kinds?.[eventId]) {
+          const label = summary ? `🛠 ${tool}: ${summary}` : `🛠 ${tool}`;
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[TOOL] ${label}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+          if (!state.event_kinds) state.event_kinds = {};
+          state.event_kinds[eventId] = true;
+        }
+      } else if (kind === 'GenericEvent' || kind === 'generic') {
+        const text = evt.text || evt.message || evt.content || '';
+        if (text && text.trim() && !state.event_kinds?.[eid]) {
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[INFO] ${text.trim().slice(0, 200)}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+          if (!state.event_kinds) state.event_kinds = {};
+          state.event_kinds[eid] = true;
+        }
       }
     }
     if (list.length < limit) break;
@@ -390,6 +420,14 @@ async function fetchResponse(env, convId, state) {
   }
 
   state.seen_event_ids = Array.from(seen);
+
+  // Silence detection: if conversation is completed but no MessageEvent found,
+  // try to force /run on the ACP server (bug #14698 mitigation)
+  if (!foundNewAssistant && allText) {
+    // We have text from a previous collection — that's fine
+    return allText;
+  }
+
   return allText || null;
 }
 
@@ -408,9 +446,10 @@ function emptyState(repo, branch, mode) {
     messages: [],
     queue: { position: 0, total: 0, done: 0, prompts: [], modes: [], cancelled: false },
     seen_event_ids: [],
+    event_kinds: {},
     last_event_index: 0,
     last_event_timestamp: '',
-    last_sent_position: -1,  // tracks which queue position was last sent to Cloud
+    last_sent_position: -1,
     llm_model: '',
     configured_model: '',
   };
@@ -773,11 +812,13 @@ async function route(method, path, url, request, env) {
         q.position++;
         q.done = Math.min(q.position, q.total);
         await writeState(env, repo, state);
-      } else if (['idle', 'pending'].includes(pollResult.status)) {
-        // Conversation is idle but queue has work. This means either:
+      } else if (['idle', 'pending'].includes(pollResult.status) || (pollResult.status === 'completed' && !pollResult.response)) {
+        // Conversation is idle/completed but queue has work and no response.
+        // This means either:
         // 1. send-message was never called
         // 2. send-message failed
-        // → Try sending the current prompt
+        // 3. Agent stuck in idle (bug #14698)
+        // → Try sending the current prompt AND force /run
         if (convStatus !== 'starting') {
           const currentPrompt = q.prompts[q.position];
           const sendErr = await sendMessage(env, state.conversation_id, currentPrompt, state.sandbox_id);
@@ -786,6 +827,25 @@ async function route(method, path, url, request, env) {
           } else {
             convStatus = 'running';
           }
+          // Also try force /run via ACP directly (bug #14698 mitigation)
+          try {
+            const convData = await cloudGet(env, `/api/v1/app-conversations?ids=${state.conversation_id}`);
+            const items = Array.isArray(convData) ? convData : (convData.items || []);
+            if (items.length) {
+              const conv = items[0];
+              const execStatus = conv.execution_status || '';
+              if (['completed', 'finished', 'idle'].includes(execStatus)) {
+                const acp = conv.acp_server || '';
+                const sessionKey = conv.session_api_key || '';
+                if (acp && sessionKey) {
+                  fetch(`${acp}/api/conversations/${state.conversation_id}/run`, {
+                    method: 'POST',
+                    headers: { 'X-Session-API-Key': sessionKey },
+                  }).catch(() => {});
+                }
+              }
+            }
+          } catch (_) {}
         }
         await writeState(env, repo, state);
       } else {
