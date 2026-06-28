@@ -1,5 +1,7 @@
 # VibeCode — AI Coding Assistant for Android
 
+Hello! 👋 Welcome to the VibeCode project.
+
 Type prompts from your phone → OpenHands Cloud runs the AI agent → live stream + push notifications.
 
 ## Download
