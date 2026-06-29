@@ -514,7 +514,8 @@ async function fetchResponse(env, convId, state) {
         : `/api/v1/conversation/${convId}/events/search?limit=100`;
       const data = await cloudGet(env, url);
       const list = Array.isArray(data) ? data : (data.events || data.items || []);
-      if (!list.length) break;
+      console.log(`[FETCH] conv=${convId}: page ${page} got ${list.length} events${minTs ? ` (cursor="${minTs}")` : ''}`);
+      if (!list.length) { console.log(`[FETCH] conv=${convId}: page ${page} empty — breaking`); break; }
 
       // Check each event in this batch (reversed = most recent first)
       for (let i = list.length - 1; i >= 0; i--) {
@@ -525,8 +526,12 @@ async function fetchResponse(env, convId, state) {
         if (kind === 'MessageEvent' && source !== 'user') {
           // Skip old responses: only events timestamp > last_response_ts are new
           const msgTs = evt.timestamp || evt.created_at || '';
-          if (cutoffTs && msgTs && String(msgTs) <= String(cutoffTs)) {
-            console.log(`[FETCH] conv=${convId}: SKIPPING old MessageEvent at ts=${String(msgTs)} (last_response=${cutoffTs})`);
+          const strMsgTs = String(msgTs);
+          const strCutoff = String(cutoffTs);
+          const isOld = cutoffTs && msgTs && strMsgTs <= strCutoff;
+          console.log(`[FETCH] conv=${convId}: MessageEvent ts="${strMsgTs}" cutoff="${strCutoff}" cmp="${strMsgTs}" <= "${strCutoff}" → ${isOld}`);
+          if (isOld) {
+            console.log(`[FETCH] conv=${convId}: SKIPPING old MessageEvent at ts=${strMsgTs} (last_response=${cutoffTs})`);
             continue;
           }
           const msg = evt.llm_message || evt.message || evt.content || {};
@@ -582,6 +587,7 @@ async function fetchResponse(env, convId, state) {
             console.log(`[FETCH] conv=${convId}: found FinishAction (${text.length} chars) after ${page} pages`);
             return text;
           }
+          console.log(`[FETCH] conv=${convId}: FinishAction found but text is EMPTY (ts=${evt.timestamp}, page=${page})`);
         }
       }
 
@@ -590,12 +596,12 @@ async function fetchResponse(env, convId, state) {
       if (!lastTs) break;
       const strLast = String(lastTs);
       if (minTs && strLast === String(minTs)) {
-        // Bump by 1ms to escape timestamp clusters (100+ events at same ts).
-        // CRITICAL: append 'Z' so JS parses as UTC, not local time. Without
-        // this, the bump goes BACKWARD (~8h in HK), returning the same page.
-        const d = new Date(strLast + 'Z');
+        const dRaw = strLast.includes('Z') ? strLast : strLast + 'Z';
+        const d = new Date(dRaw);
         if (!isNaN(d.getTime())) {
+          const beforeStr = minTs;
           minTs = new Date(d.getTime() + 1).toISOString();
+          console.log(`[FETCH/CLOUD] Bump: "${beforeStr}" → "${minTs}" (d=${d.toISOString()}, type=${typeof strLast})`);
           continue;
         }
       }
@@ -745,18 +751,16 @@ async function processCloudEvents(env, convId, state) {
 
       // Advance pagination cursor using the ACTUAL last event's timestamp
       // (including MessageEvents) so we don't re-fetch the same page.
-      // When lastTs === minTs (100+ events share the same timestamp cluster),
-      // bump forward by 1ms to break out of the cluster. Events at the exact
-      // boundary are skipped for this poll, but processCloudEvents is just UI
-      // progress — next poll picks them up via seen_event_ids dedup.
-      // CRITICAL: append 'Z' so JS parses as UTC, not local time.
       const lastEvtTs = list[list.length - 1].timestamp || list[list.length - 1].created_at || '';
       if (!lastEvtTs) break;
       const strLast = String(lastEvtTs);
       if (minTs && strLast === String(minTs)) {
-        const d = new Date(strLast + 'Z');
+        const dRaw = strLast.includes('Z') ? strLast : strLast + 'Z';
+        const d = new Date(dRaw);
         if (!isNaN(d.getTime())) {
+          const beforeStr = minTs;
           minTs = new Date(d.getTime() + 1).toISOString();
+          console.log(`[CLOUD] Bump: "${beforeStr}" → "${minTs}" (d=${d.toISOString()})`);
           continue;
         }
       }
