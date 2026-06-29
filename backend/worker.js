@@ -1530,19 +1530,11 @@ async function route(method, path, url, request, env) {
     // --- Phase: poll Cloud API for agent status ---
     if (state.conversation_id && hasPending) {
       // Try to read the agent's response from events FIRST.
-      // fetchResponse hits events/search directly — it's the most reliable
-      // indicator of completion and stays available even after the status
-      // endpoint starts returning items:[null].
-      //
-      // When _last_event_ts is set, we're in an existing conversation with
-      // prior events. Skip directResponse to prevent returning an old
-      // MessageEvent from a previous turn (sliding message issue). The
-      // response will be found via pollConversation's fetchResponse call
-      // which uses unfiltered events/search.
-      let directResponse = null;
-      if (!state._last_event_ts) {
-        directResponse = await fetchResponse(env, state.conversation_id, state);
-      }
+      // fetchResponse uses _last_response_ts as cutoff and skips old
+      // MessageEvents, so it always returns the CURRENT turn's response
+      // (if one exists). No need to guard on _last_event_ts — the cutoff
+      // handles dedup correctly.
+      let directResponse = await fetchResponse(env, state.conversation_id, state);
 
       // Process events for UI enrichment (tool calls, status changes).
       await processCloudEvents(env, state.conversation_id, state);
