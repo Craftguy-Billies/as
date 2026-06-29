@@ -1486,21 +1486,31 @@ async function route(method, path, url, request, env) {
     // send-message. Triggered when last_sent_position < q.position.
     if (hasPending && state.conversation_id && state.last_sent_position < q.position) {
       const prompt = q.prompts[q.position];
-      const sendErr = await sendMessage(env, state.conversation_id, prompt, state.sandbox_id);
-      if (sendErr) {
-        console.error(`sendMessage follow-up error: ${sendErr}`);
-        // Any send error means the conversation is dead — clear it
-        // so the next batch creates a fresh one.
-        state.conversation_id = null;
-        state._last_event_ts = "";
-        state.sandbox_id = null;
-        await writeState(env, repo, state);
-      } else {
+
+      // Guard: check if this prompt was already sent in a previous poll (KV
+      // write of last_sent_position may have failed silently). Without this,
+      // sendMessage fires on every poll, spamming the agent with duplicates.
+      const alreadySent = state.messages.some(m => m.role === 'user' && m.content === prompt);
+      if (alreadySent) {
         state.last_sent_position = q.position;
-        // Add user message
-        state.messages.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
-        state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
-        await writeState(env, repo, state);
+        console.log(`[POLL] repo=${repo}: prompt already sent (pos=${q.position}) — skipped sendMessage`);
+      } else {
+        const sendErr = await sendMessage(env, state.conversation_id, prompt, state.sandbox_id);
+        if (sendErr) {
+          console.error(`sendMessage follow-up error: ${sendErr}`);
+          // Any send error means the conversation is dead — clear it
+          // so the next batch creates a fresh one.
+          state.conversation_id = null;
+          state._last_event_ts = "";
+          state.sandbox_id = null;
+          await writeState(env, repo, state);
+        } else {
+          state.last_sent_position = q.position;
+          // Add user message
+          state.messages.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+          await writeState(env, repo, state);
+        }
       }
     }
 
