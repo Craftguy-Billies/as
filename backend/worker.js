@@ -474,23 +474,64 @@ async function pollConversation(env, convId, state) {
   }
 
   if (execStatus === 'completed' || execStatus === 'finished') {
-    // Events/search pagination with min_timestamp is NOT supported by the
-    // Cloud API — it returns the same page regardless of the cursor value.
-    // Extract the response directly from the conversation object instead.
-    const respText = conv.response || conv.last_message || conv.last_response || conv.message || null;
-    if (respText && typeof respText === 'string' && respText.trim()) {
-      return { status: 'completed', response: respText.trim(), sandbox_id: sandboxId };
+    // Events/search ignores min_timestamp cursor. Instead, use the
+    // conversation's updated_at to query a narrow time window around
+    // the completion time. This returns only the recent events (including
+    // the response) without needing pagination.
+    if (conv.updated_at) {
+      try {
+        const updatedMs = new Date(conv.updated_at).getTime();
+        if (!isNaN(updatedMs)) {
+          // Query 60s before updated_at to capture the response + recent events
+          const windowStart = new Date(updatedMs - 60000).toISOString().replace('Z', '');
+          const url = `/api/v1/conversation/${convId}/events/search?limit=200&min_timestamp=${encodeURIComponent(windowStart)}`;
+          const data = await cloudGet(env, url);
+          const list = Array.isArray(data) ? data : (data.events || data.items || []);
+          // Scan events for the agent's MessageEvent (most recent first)
+          for (let i = list.length - 1; i >= 0; i--) {
+            const evt = list[i];
+            const kind = evt.kind || evt.type || evt.event || '';
+            const source = evt.source || '';
+            if (kind === 'MessageEvent' && source !== 'user') {
+              const msg = evt.llm_message || evt.message || evt.content || {};
+              let text = '';
+              if (typeof msg === 'string' && msg.trim()) {
+                text = msg.trim();
+              } else if (Array.isArray(msg)) {
+                const parts = [];
+                for (const block of msg) {
+                  if (block && typeof block === 'object') {
+                    const t = block.text || block.content || '';
+                    if (t && String(t).trim()) parts.push(String(t).trim());
+                  } else if (typeof block === 'string' && block.trim()) {
+                    parts.push(block.trim());
+                  }
+                }
+                if (parts.length) text = parts.join('\n');
+              } else if (typeof msg === 'object') {
+                const content = msg.content || [];
+                if (Array.isArray(content)) {
+                  const parts = [];
+                  for (const block of content) {
+                    if (block?.type === 'text' && block.text?.trim()) {
+                      parts.push(block.text.trim());
+                    }
+                  }
+                  if (parts.length) text = parts.join('\n');
+                } else if (typeof content === 'string' && content.trim()) {
+                  text = content.trim();
+                }
+              }
+              if (text) {
+                console.log(`[POLL] conv=${convId}: found response via updated_at window (${text.length} chars)`);
+                return { status: 'completed', response: text, sandbox_id: sandboxId };
+              }
+            }
+          }
+        }
+      } catch (_) {}
     }
-    // Fallback: if conv object has it in a nested structure
-    if (respText && typeof respText === 'object') {
-      const text = respText.content || respText.text || respText.message || '';
-      if (text && typeof text === 'string' && text.trim()) {
-        return { status: 'completed', response: text.trim(), sandbox_id: sandboxId };
-      }
-    }
-    // Debug: log available conv fields when response not found
-    const convKeys = Object.keys(conv).filter(k => k !== 'events').join(',');
-    console.log(`[POLL] conv=${convId}: completed but no response in conv fields (keys=${convKeys}, execStatus=${execStatus})`);
+    console.log(`[POLL] conv=${convId}: completed but no response found (updated_at=${conv.updated_at})`);
     return { status: 'completed', response: null, sandbox_id: sandboxId };
   }
 
