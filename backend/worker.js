@@ -590,8 +590,10 @@ async function fetchResponse(env, convId, state) {
       if (!lastTs) break;
       const strLast = String(lastTs);
       if (minTs && strLast === String(minTs)) {
-        // Bump by 1ms to escape timestamp clusters (100+ events at same ts)
-        const d = new Date(strLast);
+        // Bump by 1ms to escape timestamp clusters (100+ events at same ts).
+        // CRITICAL: append 'Z' so JS parses as UTC, not local time. Without
+        // this, the bump goes BACKWARD (~8h in HK), returning the same page.
+        const d = new Date(strLast + 'Z');
         if (!isNaN(d.getTime())) {
           minTs = new Date(d.getTime() + 1).toISOString();
           continue;
@@ -747,14 +749,14 @@ async function processCloudEvents(env, convId, state) {
       // bump forward by 1ms to break out of the cluster. Events at the exact
       // boundary are skipped for this poll, but processCloudEvents is just UI
       // progress — next poll picks them up via seen_event_ids dedup.
+      // CRITICAL: append 'Z' so JS parses as UTC, not local time.
       const lastEvtTs = list[list.length - 1].timestamp || list[list.length - 1].created_at || '';
       if (!lastEvtTs) break;
       const strLast = String(lastEvtTs);
       if (minTs && strLast === String(minTs)) {
-        const d = new Date(strLast);
+        const d = new Date(strLast + 'Z');
         if (!isNaN(d.getTime())) {
           minTs = new Date(d.getTime() + 1).toISOString();
-          // The API might return 0 events after the bump — break if so
           continue;
         }
       }
@@ -1545,7 +1547,7 @@ async function route(method, path, url, request, env) {
         // Agent message found via events — skip status API entirely.
         convStatus = 'completed';
         state.messages.push({ id: nextMsgId(state), role: 'assistant', content: directResponse, timestamp: now() });
-        state._last_response_ts = now();
+        state._last_response_ts = new Date().toISOString();
         q.position++;
         q.done = Math.min(q.position, q.total);
         skipFutureCancelled(q);
@@ -1692,7 +1694,7 @@ async function route(method, path, url, request, env) {
           // Clean up retry state
           try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
           state.messages.push({ id: nextMsgId(state), role: 'assistant', content: retryResponse, timestamp: now() });
-          state._last_response_ts = now();
+          state._last_response_ts = new Date().toISOString();
 
           // Advance queue
           q.position++;
