@@ -506,9 +506,13 @@ async function fetchResponse(env, convId, state) {
     // and doesn't depend on _last_event_ts staying un-stuck.
     const cutoffTs = state._last_response_ts || '';
     console.log(`[FETCH] conv=${convId}: calling fetchResponse (cutoff=${cutoffTs}, _last_event_ts=${state._last_event_ts})`);
-    let minTs = '';
+    // Start from _last_event_ts (latest processed event by processCloudEvents),
+    // not from the beginning. This avoids fetching 100s of old events and hitting
+    // the 20-page cap. processCloudEvents runs before this is called, so
+    // _last_event_ts is already at the newest processed event.
+    let minTs = state._last_event_ts || '';
 
-    for (let page = 0; page < 10; page++) {  // max 10 pages = 1000 events
+    for (let page = 0; page < 20; page++) {  // max 20 pages = 2000 events
       const url = minTs
         ? `/api/v1/conversation/${convId}/events/search?limit=100&min_timestamp=${encodeURIComponent(minTs)}`
         : `/api/v1/conversation/${convId}/events/search?limit=100`;
