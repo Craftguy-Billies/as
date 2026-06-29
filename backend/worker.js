@@ -474,63 +474,60 @@ async function pollConversation(env, convId, state) {
   }
 
   if (execStatus === 'completed' || execStatus === 'finished') {
-    // events/search ignores min_timestamp entirely — returns the first 100
-    // events regardless of cursor. Use the V0 conversation endpoint which
-    // returns all events in order without pagination.
+    // Query events using the correct API parameter timestamp__gte (NOT
+    // min_timestamp!). Use the conversation's updated_at as a window start
+    // so we only fetch the recent events cluster.
+    const cutoff = state._last_response_ts || '';
     try {
-      const v0Url = `/api/conversations/${convId}`;
-      const v0Data = await cloudGet(env, v0Url);
-      const v0Events = Array.isArray(v0Data) ? v0Data : (v0Data.events || []);
-      if (v0Events.length) {
-        // Scan from the end for the agent's MessageEvent
-        for (let i = v0Events.length - 1; i >= 0; i--) {
-          const evt = v0Events[i];
-          const kind = evt.kind || evt.type || evt.event || '';
-          const source = evt.source || '';
-          if (kind === 'MessageEvent' && source !== 'user') {
-            const msg = evt.llm_message || evt.message || evt.content || {};
-            let text = '';
-            if (typeof msg === 'string' && msg.trim()) {
-              text = msg.trim();
-            } else if (Array.isArray(msg)) {
-              const parts = [];
-              for (const block of msg) {
-                if (block && typeof block === 'object') {
-                  const t = block.text || block.content || '';
-                  if (t && String(t).trim()) parts.push(String(t).trim());
-                } else if (typeof block === 'string' && block.trim()) {
-                  parts.push(block.trim());
+      const updatedMs = conv.updated_at ? new Date(conv.updated_at).getTime() : Date.now();
+      if (!isNaN(updatedMs)) {
+        // Query from 60s before updated_at — captures the current turn's events
+        const windowStart = new Date(updatedMs - 60000).toISOString();
+        let pageUrl = `/api/v1/conversation/${convId}/events/search?limit=100&timestamp__gte=${encodeURIComponent(windowStart)}&sort_order=timestamp`;
+        for (let page = 0; page < 10; page++) {
+          const data = await cloudGet(env, pageUrl);
+          const items = data.items || data.events || (Array.isArray(data) ? data : []);
+          if (!items.length) break;
+          // Scan from end for agent's MessageEvent (most recent first)
+          for (let i = items.length - 1; i >= 0; i--) {
+            const evt = items[i];
+            const source = evt.source || '';
+            const kind = evt.kind || evt.type || evt.event || '';
+            if ((kind === 'MessageEvent' || kind === 'message') && source !== 'user') {
+              const msg = evt.llm_message || evt.message || evt.content || {};
+              let text = '';
+              if (typeof msg === 'string' && msg.trim()) {
+                text = msg.trim();
+              } else if (Array.isArray(msg)) {
+                for (const block of msg) {
+                  if (block?.text?.trim()) text += (text ? '\n' : '') + block.text.trim();
+                  else if (block?.content?.trim()) text += (text ? '\n' : '') + block.content.trim();
+                  else if (typeof block === 'string' && block.trim()) text += (text ? '\n' : '') + block.trim();
                 }
-              }
-              if (parts.length) text = parts.join('\n');
-            } else if (typeof msg === 'object') {
-              const content = msg.content || [];
-              if (Array.isArray(content)) {
-                const parts = [];
-                for (const block of content) {
-                  if (block?.type === 'text' && block.text?.trim()) {
-                    parts.push(block.text.trim());
+              } else if (typeof msg === 'object') {
+                const c = msg.content || [];
+                if (Array.isArray(c)) {
+                  for (const block of c) {
+                    if (block?.type === 'text' && block.text?.trim()) text += (text ? '\n' : '') + block.text.trim();
                   }
+                } else if (typeof c === 'string' && c.trim()) {
+                  text = c.trim();
                 }
-                if (parts.length) text = parts.join('\n');
-              } else if (typeof content === 'string' && content.trim()) {
-                text = content.trim();
               }
-            }
-            if (text) {
-              console.log(`[POLL] conv=${convId}: found response via V0 API (${text.length} chars, ${v0Events.length} total events)`);
-              return { status: 'completed', response: text, sandbox_id: sandboxId };
+              if (text) {
+                console.log(`[POLL] conv=${convId}: found response via timestamp__gte (${text.length} chars, page ${page})`);
+                return { status: 'completed', response: text, sandbox_id: sandboxId };
+              }
             }
           }
+          if (!data.next_page_id) break;
+          pageUrl = `/api/v1/conversation/${convId}/events/search?limit=100&page_id=${encodeURIComponent(data.next_page_id)}`;
         }
-        console.log(`[POLL] conv=${convId}: V0 has ${v0Events.length} events but no agent MessageEvent found`);
-      } else {
-        console.log(`[POLL] conv=${convId}: V0 API returned 0 events`);
       }
     } catch (e) {
-      console.log(`[POLL] conv=${convId}: V0 API failed: ${e.message}`);
+      console.log(`[POLL] conv=${convId}: events/search failed: ${e.message}`);
     }
-    console.log(`[POLL] conv=${convId}: completed but no response found (updated_at=${conv.updated_at})`);
+    console.log(`[POLL] conv=${convId}: completed but no response found (cutoff=${cutoff}, updated_at=${conv.updated_at})`);
     return { status: 'completed', response: null, sandbox_id: sandboxId };
   }
 
@@ -563,14 +560,11 @@ async function fetchResponse(env, convId, state) {
     // not from the beginning. This avoids fetching 100s of old events and hitting
     // the 20-page cap. processCloudEvents runs before this is called, so
     // _last_event_ts is already at the newest processed event.
-    // Only fetch 1 page — events/search ignores min_timestamp, so pagination
-    // just loops the same 100 events. The response is extracted via
-    // pollConversation which uses conv.updated_at as a time window.
     let minTs = state._last_event_ts || '';
 
-    for (let page = 0; page < 1; page++) {
+    for (let page = 0; page < 20; page++) {
       const url = minTs
-        ? `/api/v1/conversation/${convId}/events/search?limit=100&min_timestamp=${encodeURIComponent(minTs)}`
+        ? `/api/v1/conversation/${convId}/events/search?limit=100&timestamp__gte=${encodeURIComponent(minTs)}`
         : `/api/v1/conversation/${convId}/events/search?limit=100`;
       const data = await cloudGet(env, url);
       const list = Array.isArray(data) ? data : (data.events || data.items || []);
@@ -685,14 +679,10 @@ async function processCloudEvents(env, convId, state) {
   try {
     // Paginate through ALL pages (not just the first 100). events/search max
     // limit=100, no offset support — use min_timestamp cursor.
-    // Only fetch 1 page — events/search ignores min_timestamp, so
-    // pagination just re-fetches the same events. 100 events per poll
-    // is sufficient for UI enrichment. The response is extracted via
-    // pollConversation using the updated_at window.
     let minTs = state._last_event_ts || '';
-    for (let page = 0; page < 1; page++) {
+    for (let page = 0; page < 20; page++) {
       const url = minTs
-        ? `/api/v1/conversation/${convId}/events/search?limit=100&min_timestamp=${encodeURIComponent(minTs)}`
+        ? `/api/v1/conversation/${convId}/events/search?limit=100&timestamp__gte=${encodeURIComponent(minTs)}`
         : `/api/v1/conversation/${convId}/events/search?limit=100`;
       const data = await cloudGet(env, url);
       const list = Array.isArray(data) ? data : (data.events || data.items || []);
