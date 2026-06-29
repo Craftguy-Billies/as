@@ -596,12 +596,15 @@ async function fetchResponse(env, convId, state) {
       if (!lastTs) break;
       const strLast = String(lastTs);
       if (minTs && strLast === String(minTs)) {
-        const dRaw = strLast.includes('Z') ? strLast : strLast + 'Z';
-        const d = new Date(dRaw);
+        // Bump by 1ms. CRITICAL: remove Z suffix — the Cloud API returns
+        // timestamps WITHOUT Z (eg '2026-06-29T04:16:17.755274') and does
+        // NOT filter by min_timestamp when the value has Z suffix, causing
+        // the API to return the same page (infinite loop).
+        const d = new Date(strLast.endsWith('Z') ? strLast : strLast + 'Z');
         if (!isNaN(d.getTime())) {
           const beforeStr = minTs;
-          minTs = new Date(d.getTime() + 1).toISOString();
-          console.log(`[FETCH/CLOUD] Bump: "${beforeStr}" → "${minTs}" (d=${d.toISOString()}, type=${typeof strLast})`);
+          minTs = new Date(d.getTime() + 1).toISOString().replace('Z', '');
+          console.log(`[FETCH/CLOUD] Bump: "${beforeStr}" → "${minTs}" (d=${d.toISOString()})`);
           continue;
         }
       }
@@ -750,16 +753,16 @@ async function processCloudEvents(env, convId, state) {
       }
 
       // Advance pagination cursor using the ACTUAL last event's timestamp
-      // (including MessageEvents) so we don't re-fetch the same page.
       const lastEvtTs = list[list.length - 1].timestamp || list[list.length - 1].created_at || '';
       if (!lastEvtTs) break;
       const strLast = String(lastEvtTs);
       if (minTs && strLast === String(minTs)) {
-        const dRaw = strLast.includes('Z') ? strLast : strLast + 'Z';
-        const d = new Date(dRaw);
+        // CRITICAL: remove Z suffix — Cloud API doesn't filter by min_timestamp
+        // when value has Z, returning the same page (infinite loop).
+        const d = new Date(strLast.endsWith('Z') ? strLast : strLast + 'Z');
         if (!isNaN(d.getTime())) {
           const beforeStr = minTs;
-          minTs = new Date(d.getTime() + 1).toISOString();
+          minTs = new Date(d.getTime() + 1).toISOString().replace('Z', '');
           console.log(`[CLOUD] Bump: "${beforeStr}" → "${minTs}" (d=${d.toISOString()})`);
           continue;
         }
@@ -1488,35 +1491,28 @@ async function route(method, path, url, request, env) {
     }
 
     // --- Phase: send follow-up message if queue advanced but not sent yet ---
-    // This handles: conversation exists, new prompt in queue, not yet sent via
-    // send-message. Triggered when last_sent_position < q.position.
+    // Triggered when last_sent_position < q.position (new prompt in queue).
+    // Uses a separate tiny KV key for last_sent_position so it survives main
+    // state write failures — the state object is large (messages + 100s of
+    // seen_event_ids), and KV failures on large writes are the #1 cause of
+    // duplicate sendMessage (next poll reads last_sent_position=-1 from stale
+    // state and fires again).
     if (hasPending && state.conversation_id && state.last_sent_position < q.position) {
       const prompt = q.prompts[q.position];
-
-      // Guard: check if this prompt was already sent in a previous poll (KV
-      // write of last_sent_position may have failed silently). Without this,
-      // sendMessage fires on every poll, spamming the agent with duplicates.
-      const alreadySent = state.messages.some(m => m.role === 'user' && m.content === prompt);
-      if (alreadySent) {
-        state.last_sent_position = q.position;
-        console.log(`[POLL] repo=${repo}: prompt already sent (pos=${q.position}) — skipped sendMessage`);
+      const sendErr = await sendMessage(env, state.conversation_id, prompt, state.sandbox_id);
+      if (sendErr) {
+        console.error(`sendMessage follow-up error: ${sendErr}`);
+        state.conversation_id = null;
+        state._last_event_ts = "";
+        state.sandbox_id = null;
+        await writeState(env, repo, state);
       } else {
-        const sendErr = await sendMessage(env, state.conversation_id, prompt, state.sandbox_id);
-        if (sendErr) {
-          console.error(`sendMessage follow-up error: ${sendErr}`);
-          // Any send error means the conversation is dead — clear it
-          // so the next batch creates a fresh one.
-          state.conversation_id = null;
-          state._last_event_ts = "";
-          state.sandbox_id = null;
-          await writeState(env, repo, state);
-        } else {
-          state.last_sent_position = q.position;
-          // Add user message
-          state.messages.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
-          await writeState(env, repo, state);
-        }
+        state.last_sent_position = q.position;
+        state.messages.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
+        state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+        // Write last_sent_position to SEPARATE small KV key FIRST
+        try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
+        await writeState(env, repo, state);
       }
     }
 
