@@ -474,10 +474,23 @@ async function pollConversation(env, convId, state) {
   }
 
   if (execStatus === 'completed' || execStatus === 'finished') {
-    // NOTE: fetchResponse is NOT called here — it can't check _last_event_ts
-    // for dedup, so it would return stale MessageEvents from previous turns.
-    // The caller (poll handler) handles response extraction via the retry loop,
-    // which calls fetchResponse after processCloudEvents has updated _last_event_ts.
+    // Events/search pagination with min_timestamp is NOT supported by the
+    // Cloud API — it returns the same page regardless of the cursor value.
+    // Extract the response directly from the conversation object instead.
+    const respText = conv.response || conv.last_message || conv.last_response || conv.message || null;
+    if (respText && typeof respText === 'string' && respText.trim()) {
+      return { status: 'completed', response: respText.trim(), sandbox_id: sandboxId };
+    }
+    // Fallback: if conv object has it in a nested structure
+    if (respText && typeof respText === 'object') {
+      const text = respText.content || respText.text || respText.message || '';
+      if (text && typeof text === 'string' && text.trim()) {
+        return { status: 'completed', response: text.trim(), sandbox_id: sandboxId };
+      }
+    }
+    // Debug: log available conv fields when response not found
+    const convKeys = Object.keys(conv).filter(k => k !== 'events').join(',');
+    console.log(`[POLL] conv=${convId}: completed but no response in conv fields (keys=${convKeys}, execStatus=${execStatus})`);
     return { status: 'completed', response: null, sandbox_id: sandboxId };
   }
 
