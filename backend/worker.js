@@ -1614,28 +1614,14 @@ async function route(method, path, url, request, env) {
 
         const retryCount = rState.count || 0;
 
-        // Detect repeated completion for same prompt (writeState failed on prev poll).
-        // Only advance if retry key is genuinely gone — if it still exists, the retry
-        // is still in progress and we should keep waiting.
+        // If _completed_position matches the current queue slot, the retry
+        // handler is already active for this prompt — fall through to the
+        // retry logic below which handles timing/count/backoff.
+        // NO retry key KV read here — Cloudflare KV is eventually consistent
+        // and the key might not be visible yet, causing premature queue advance.
+        // The 12-attempt cap in the retry loop prevents infinite loops.
         if (state._completed_position === q.position) {
-          let retryKeyExists = false;
-          try {
-            const rRaw = await env.VIBECODE.get(`retry:${state.conversation_id}`);
-            retryKeyExists = !!rRaw;
-          } catch (_) {}
-          if (!retryKeyExists) {
-            // writeState failed on previous poll — retry state is lost.
-            // Don't loop forever: advance queue and move on.
-            console.error(`[RETRY] conv=${state.conversation_id}: retry key lost (pos=${q.position}) — advancing`);
-            q.position++;
-            q.done = Math.min(q.position, q.total);
-            skipFutureCancelled(q);
-            const stillPending = q.position < q.total && !q.cancelled;
-            await writeState(env, repo, state);
-            return buildStateResponse(state, q, stillPending, repo, mode, 'idle');
-          }
-          console.log(`[RETRY] conv=${state.conversation_id}: completed_position matched but retry key exists — continuing (count=${retryCount})`);
-          // Fall through to retry logic below.
+          console.log(`[RETRY] conv=${state.conversation_id}: _completed_position matched (pos=${q.position}) — continuing retry (count=${retryCount})`);
         }
         state._completed_position = q.position;
 
