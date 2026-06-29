@@ -607,143 +607,158 @@ async function fetchResponse(env, convId, state, minTimestamp) {
 async function processCloudEvents(env, convId, state) {
   const seen = new Set((state.seen_event_ids || []).map(String));
   try {
-    // Use min_timestamp pagination so events 101+ stream to UI over multiple polls.
-    // events/search max limit=100, no offset support — paginate via timestamps.
-    const minTs = state._last_event_ts || '';
-    const url = minTs
-      ? `/api/v1/conversation/${convId}/events/search?limit=100&min_timestamp=${encodeURIComponent(minTs)}`
-      : `/api/v1/conversation/${convId}/events/search?limit=100`;
-    const data = await cloudGet(env, url);
-    const list = Array.isArray(data) ? data : (data.events || data.items || []);
-    // Update _last_event_ts for next poll's pagination (persisted via writeState).
-    // Skip trailing MessageEvents: they're the final response for the CURRENT turn.
-    // If _last_event_ts includes the MessageEvent's timestamp, the snapshot on the
-    // next poll equals it, and the strict-after filter in fetchResponse kills it.
-    // Advance only to the last NON-MessageEvent timestamp (tool events, etc.).
-    if (list.length) {
-      let lastTs = '';
+    // Paginate through ALL pages (not just the first 100). events/search max
+    // limit=100, no offset support — use min_timestamp cursor. Without this,
+    // _last_event_ts gets stuck on page 1 when the previous turn produced
+    // 100+ events, and the current turn's events are never seen.
+    let minTs = state._last_event_ts || '';
+    for (let page = 0; page < 10; page++) {
+      const url = minTs
+        ? `/api/v1/conversation/${convId}/events/search?limit=100&min_timestamp=${encodeURIComponent(minTs)}`
+        : `/api/v1/conversation/${convId}/events/search?limit=100`;
+      const data = await cloudGet(env, url);
+      const list = Array.isArray(data) ? data : (data.events || data.items || []);
+      if (!list.length) break;
+
+      // Update _last_event_ts for next poll's pagination (persisted via writeState).
+      // Skip trailing MessageEvents: they're the final response for the CURRENT turn.
+      // If _last_event_ts includes the MessageEvent's timestamp, the snapshot on the
+      // next poll equals it, and the strict-after filter in fetchResponse kills it.
+      // Advance only to the last NON-MessageEvent timestamp (tool events, etc.).
+      // NOTE: pagination cursor (minTs) advances using the ACTUAL last event's
+      // timestamp (including MessageEvents), so we don't re-fetch the same page.
+      // But _last_event_ts (persisted) only advances to non-MessageEvents.
+      let lastNonMsgTs = '';
       for (let i = list.length - 1; i >= 0; i--) {
         const kind = list[i].kind || list[i].type || list[i].event || '';
         if (kind !== 'MessageEvent') {
-          lastTs = list[i].timestamp || list[i].created_at || '';
+          lastNonMsgTs = list[i].timestamp || list[i].created_at || '';
           break;
         }
       }
-      if (lastTs) {
-        console.log(`[CLOUD] conv=${convId}: advancing _last_event_ts: ${state._last_event_ts} → ${String(lastTs)} (${list.length} events)`);
-        state._last_event_ts = String(lastTs);
+      if (lastNonMsgTs) {
+        console.log(`[CLOUD] conv=${convId}: advancing _last_event_ts: ${state._last_event_ts} → ${String(lastNonMsgTs)} (page ${page}, ${list.length} events)`);
+        state._last_event_ts = String(lastNonMsgTs);
       } else {
-        console.log(`[CLOUD] conv=${convId}: _last_event_ts NOT advanced (${list.length} events, all MessageEvents)`);
-      }
-    }
-    for (const evt of list) {
-      const eid = String(evt.id || evt.event_id || '');
-      const kind = evt.kind || evt.type || evt.event || '';
-      const source = evt.source || '';
-      const tool = evt.tool_name || evt.tool || evt.name || '';
-      const ts = evt.timestamp || evt.created_at || now();
-
-      // Register dedup for MessageEvents too (so fetchResponse can skip old
-      // ones when looking for the current turn's response). Without this, when
-      // a new prompt is sent to an existing conversation, fetchResponse finds
-      // the previous turn's MessageEvent and returns it — skipping the new one.
-      if (kind === 'MessageEvent') {
-        if (eid && seen.has(eid)) continue;  // skip already-seen
-        if (eid) seen.add(eid);  // register for future dedup
-        continue;  // don't process as UI event
+        console.log(`[CLOUD] conv=${convId}: _last_event_ts NOT advanced (page ${page}, ${list.length} events, all MessageEvents)`);
       }
 
-      // Track already-seen events by ID (registered AFTER MessageEvent skip)
-      if (eid && seen.has(eid)) continue;
-      if (eid) seen.add(eid);
+      // Process events on this page
+      for (const evt of list) {
+        const eid = String(evt.id || evt.event_id || '');
+        const kind = evt.kind || evt.type || evt.event || '';
+        const source = evt.source || '';
+        const tool = evt.tool_name || evt.tool || evt.name || '';
+        const ts = evt.timestamp || evt.created_at || now();
 
-      // AgentStateChangeEvent
-      if (kind === 'AgentStateChangeEvent') {
-        const agentState = evt.agent_state || evt.state || '';
-        if (agentState) {
-          const label = {
-            thinking: '🤔 Thinking...',
-            running: '▶️ Running...',
-            completed: '✅ Done',
-            paused: '⏸ Paused',
-            awaiting_user_input: '💬 Waiting for input...',
-            failed: '❌ Failed',
-          }[agentState] || `▶️ ${agentState}`;
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[STATUS] ${label}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+        // Register dedup for MessageEvents too (so fetchResponse can skip old
+        // ones when looking for the current turn's response). Without this, when
+        // a new prompt is sent to an existing conversation, fetchResponse finds
+        // the previous turn's MessageEvent and returns it — skipping the new one.
+        if (kind === 'MessageEvent') {
+          if (eid && seen.has(eid)) continue;  // skip already-seen
+          if (eid) seen.add(eid);  // register for future dedup
+          continue;  // don't process as UI event
         }
-        continue;
-      }
 
-      // ActionEvent (tool invocations)
-      if (kind === 'ActionEvent') {
-        let action = evt.action || evt.content || evt.message || {};
-        if (typeof action === 'string') {
-          try { action = JSON.parse(action); } catch { action = { content: action }; }
-        }
-        const cmd = (action.command || action.cmd || '').trim();
-        const path = action.path || action.file || '';
-        const query = action.query || '';
+        // Track already-seen events by ID (registered AFTER MessageEvent skip)
+        if (eid && seen.has(eid)) continue;
+        if (eid) seen.add(eid);
 
-        if (tool.includes('bash') || tool.includes('terminal') || tool.includes('execute')) {
-          const snippet = cmd.slice(0, 200).replace(/\n/g, ' ').trim();
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[TERMINAL] ${snippet}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
-        } else if (tool.includes('file_editor') || tool.includes('str_replace')) {
-          let eventText = '';
-          if (cmd === 'view') eventText = `Reading ${path}`;
-          else if (cmd === 'create') eventText = `Creating ${path}`;
-          else if (cmd === 'undo_edit') eventText = `Undoing ${path}`;
-          else eventText = `Editing ${path}`;
-          const prefix = cmd === 'view' ? '[READ]' : '[EDIT]';
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: `${prefix} ${eventText}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
-        } else if (tool.includes('tavily') || tool.includes('search')) {
-          const q = query || cmd || '';
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[SEARCH] Searching: ${q.slice(0, 150)}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
-        } else if (tool.includes('browser') || tool.includes('navigate')) {
-          const url = action.url || cmd || '';
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[BROWSER] Navigate: ${url.slice(0, 150)}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
-        } else {
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[TOOL] ${tool}: ${JSON.stringify(action).slice(0, 120)}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
-        }
-        continue;
-      }
-
-      // ObservationEvent (tool results)
-      if (kind === 'ObservationEvent') {
-        let obs = evt.observation || evt.output || evt.content || {};
-        if (typeof obs === 'string') {
-          try { obs = JSON.parse(obs); } catch { obs = { output: obs }; }
-        }
-        const stdout = safeStr(obs.stdout || obs.output || obs.content || '', 200);
-        const stderr = safeStr(obs.stderr || '', 200);
-        if (tool.includes('bash') || tool.includes('terminal') || tool.includes('execute')) {
-          const out = stdout || stderr;
-          if (out) {
-            const tag = stderr ? '[WARN]' : '[OUT]';
-            state.messages.push({ id: nextMsgId(state), role: 'event', content: `${tag} ${out}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+        // AgentStateChangeEvent
+        if (kind === 'AgentStateChangeEvent') {
+          const agentState = evt.agent_state || evt.state || '';
+          if (agentState) {
+            const label = {
+              thinking: '🤔 Thinking...',
+              running: '▶️ Running...',
+              completed: '✅ Done',
+              paused: '⏸ Paused',
+              awaiting_user_input: '💬 Waiting for input...',
+              failed: '❌ Failed',
+            }[agentState] || `▶️ ${agentState}`;
+            state.messages.push({ id: nextMsgId(state), role: 'event', content: `[STATUS] ${label}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
           }
-        } else if (tool.includes('file_editor') || tool.includes('str_replace')) {
-          const diff = obs.diff || '';
-          if (diff) {
-            state.messages.push({ id: nextMsgId(state), role: 'event', content: `[FILE] Diff (${String(diff).length} chars)`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
-          }
+          continue;
         }
-        continue;
+
+        // ActionEvent (tool invocations)
+        if (kind === 'ActionEvent') {
+          let action = evt.action || evt.content || evt.message || {};
+          if (typeof action === 'string') {
+            try { action = JSON.parse(action); } catch { action = { content: action }; }
+          }
+          const cmd = (action.command || action.cmd || '').trim();
+          const path = action.path || action.file || '';
+          const query = action.query || '';
+
+          if (tool.includes('bash') || tool.includes('terminal') || tool.includes('execute')) {
+            const snippet = cmd.slice(0, 200).replace(/\n/g, ' ').trim();
+            state.messages.push({ id: nextMsgId(state), role: 'event', content: `[TERMINAL] ${snippet}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+          } else if (tool.includes('file_editor') || tool.includes('str_replace')) {
+            let eventText = '';
+            if (cmd === 'view') eventText = `Reading ${path}`;
+            else if (cmd === 'create') eventText = `Creating ${path}`;
+            else if (cmd === 'undo_edit') eventText = `Undoing ${path}`;
+            else eventText = `Editing ${path}`;
+            const prefix = cmd === 'view' ? '[READ]' : '[EDIT]';
+            state.messages.push({ id: nextMsgId(state), role: 'event', content: `${prefix} ${eventText}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+          } else if (tool.includes('tavily') || tool.includes('search')) {
+            const q = query || cmd || '';
+            state.messages.push({ id: nextMsgId(state), role: 'event', content: `[SEARCH] Searching: ${q.slice(0, 150)}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+          } else if (tool.includes('browser') || tool.includes('navigate')) {
+            const url = action.url || cmd || '';
+            state.messages.push({ id: nextMsgId(state), role: 'event', content: `[BROWSER] Navigate: ${url.slice(0, 150)}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+          } else {
+            state.messages.push({ id: nextMsgId(state), role: 'event', content: `[TOOL] ${tool}: ${JSON.stringify(action).slice(0, 120)}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+          }
+          continue;
+        }
+
+        // ObservationEvent (tool results)
+        if (kind === 'ObservationEvent') {
+          let obs = evt.observation || evt.output || evt.content || {};
+          if (typeof obs === 'string') {
+            try { obs = JSON.parse(obs); } catch { obs = { output: obs }; }
+          }
+          const stdout = safeStr(obs.stdout || obs.output || obs.content || '', 200);
+          const stderr = safeStr(obs.stderr || '', 200);
+          if (tool.includes('bash') || tool.includes('terminal') || tool.includes('execute')) {
+            const out = stdout || stderr;
+            if (out) {
+              const tag = stderr ? '[WARN]' : '[OUT]';
+              state.messages.push({ id: nextMsgId(state), role: 'event', content: `${tag} ${out}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+            }
+          } else if (tool.includes('file_editor') || tool.includes('str_replace')) {
+            const diff = obs.diff || '';
+            if (diff) {
+              state.messages.push({ id: nextMsgId(state), role: 'event', content: `[FILE] Diff (${String(diff).length} chars)`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+            }
+          }
+          continue;
+        }
+
+        // ToolEvent / GenericEvent fallback
+        if (kind === 'ToolEvent' || kind === 'tool') {
+          const input = evt.input || evt.arguments || evt.text || '';
+          const summary = input ? (typeof input === 'string' ? input.slice(0, 100) : JSON.stringify(input).slice(0, 100)) : '';
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[TOOL] ${tool}: ${summary}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+          continue;
+        }
+        if (kind === 'GenericEvent' || kind === 'generic') {
+          const text = evt.text || evt.message || evt.content || '';
+          if (text && text.trim()) {
+            state.messages.push({ id: nextMsgId(state), role: 'event', content: `[INFO] ${String(text).trim().slice(0, 200)}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+          }
+          continue;
+        }
       }
 
-      // ToolEvent / GenericEvent fallback
-      if (kind === 'ToolEvent' || kind === 'tool') {
-        const input = evt.input || evt.arguments || evt.text || '';
-        const summary = input ? (typeof input === 'string' ? input.slice(0, 100) : JSON.stringify(input).slice(0, 100)) : '';
-        state.messages.push({ id: nextMsgId(state), role: 'event', content: `[TOOL] ${tool}: ${summary}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
-        continue;
-      }
-      if (kind === 'GenericEvent' || kind === 'generic') {
-        const text = evt.text || evt.message || evt.content || '';
-        if (text && text.trim()) {
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[INFO] ${String(text).trim().slice(0, 200)}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
-        }
-        continue;
-      }
+      // Advance pagination cursor using the ACTUAL last event's timestamp
+      // (including MessageEvents) so we don't re-fetch the same page.
+      const lastEvtTs = list[list.length - 1].timestamp || list[list.length - 1].created_at || '';
+      if (!lastEvtTs || String(lastEvtTs) === String(minTs)) break;
+      minTs = String(lastEvtTs);
     }
   } catch (_) {}
 
