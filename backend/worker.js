@@ -564,9 +564,12 @@ async function fetchResponse(env, convId, state) {
     // not from the beginning. This avoids fetching 100s of old events and hitting
     // the 20-page cap. processCloudEvents runs before this is called, so
     // _last_event_ts is already at the newest processed event.
+    // Only fetch 1 page — events/search ignores min_timestamp, so pagination
+    // just loops the same 100 events. The response is extracted via
+    // pollConversation which uses conv.updated_at as a time window.
     let minTs = state._last_event_ts || '';
 
-    for (let page = 0; page < 20; page++) {  // max 20 pages = 2000 events
+    for (let page = 0; page < 1; page++) {
       const url = minTs
         ? `/api/v1/conversation/${convId}/events/search?limit=100&min_timestamp=${encodeURIComponent(minTs)}`
         : `/api/v1/conversation/${convId}/events/search?limit=100`;
@@ -683,8 +686,12 @@ async function processCloudEvents(env, convId, state) {
   try {
     // Paginate through ALL pages (not just the first 100). events/search max
     // limit=100, no offset support — use min_timestamp cursor.
+    // Only fetch 1 page — events/search ignores min_timestamp, so
+    // pagination just re-fetches the same events. 100 events per poll
+    // is sufficient for UI enrichment. The response is extracted via
+    // pollConversation using the updated_at window.
     let minTs = state._last_event_ts || '';
-    for (let page = 0; page < 10; page++) {
+    for (let page = 0; page < 1; page++) {
       const url = minTs
         ? `/api/v1/conversation/${convId}/events/search?limit=100&min_timestamp=${encodeURIComponent(minTs)}`
         : `/api/v1/conversation/${convId}/events/search?limit=100`;
