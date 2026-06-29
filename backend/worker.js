@@ -488,20 +488,25 @@ async function pollConversation(env, convId, state) {
   return { status: execStatus || 'pending', sandbox_id: sandboxId };
 }
 
-async function fetchResponse(env, convId, state, minTimestamp) {
+async function fetchResponse(env, convId, state) {
   // Paginate events/search to handle 100+ events.
   // events/search does NOT support offset (returns 422), max limit=100.
   //
-  // minTimestamp is set by the caller to the snapshot of _last_event_ts taken
-  // BEFORE processCloudEvents runs. Events with timestamp <= minTimestamp are
-  // from previous conversation turns and are skipped. Only events AFTER the
-  // cutoff are candidates — this is the dedup mechanism for reused conversations.
+  // Uses _last_response_ts as cutoff. Only MessageEvents with timestamp
+  // STRICTLY AFTER _last_response_ts are considered new. This avoids the
+  // pagination-stuck-at-100-events issue (fetchResponse fetches ALL pages
+  // from the beginning) and doesn't depend on _last_event_ts staying unstuck.
   //
   // Without this, fetchResponse returns the previous turn's MessageEvent instead
   // of waiting for the current turn to finish.
   try {
-    let minTs = String(minTimestamp || '');
-    console.log(`[FETCH] conv=${convId}: calling fetchResponse (minTimestamp=${JSON.stringify(minTimestamp)}, minTs=${minTs}, _last_event_ts=${state._last_event_ts})`);
+    // Use _last_response_ts as cutoff. Only MessageEvents with timestamp
+    // STRICTLY AFTER _last_response_ts are considered new. This avoids the
+    // pagination-stuck-at-100-events issue (fetchResponse fetches ALL pages),
+    // and doesn't depend on _last_event_ts staying un-stuck.
+    const cutoffTs = state._last_response_ts || '';
+    console.log(`[FETCH] conv=${convId}: calling fetchResponse (cutoff=${cutoffTs}, _last_event_ts=${state._last_event_ts})`);
+    let minTs = '';
 
     for (let page = 0; page < 10; page++) {  // max 10 pages = 1000 events
       const url = minTs
@@ -517,22 +522,13 @@ async function fetchResponse(env, convId, state, minTimestamp) {
         const kind = evt.kind || evt.type || evt.event || '';
         const source = evt.source || '';
 
-        // Skip old MessageEvents: the API's min_timestamp uses inclusive (>=),
-        // so events at the boundary (previous turn's response) are still returned.
-        // We need a strict-after check here: only events timestamp > minTimestamp
-        // are genuinely new from the current turn.
-        if (minTimestamp && kind === 'MessageEvent' && source !== 'user') {
+        if (kind === 'MessageEvent' && source !== 'user') {
+          // Skip old responses: only events timestamp > last_response_ts are new
           const msgTs = evt.timestamp || evt.created_at || '';
-          const strMsgTs = String(msgTs);
-          const strMinTs = String(minTimestamp);
-          if (msgTs && strMsgTs <= strMinTs) {
-            console.log(`[FETCH] conv=${convId}: strict-after SKIPPING MessageEvent at ts=${strMsgTs} (cutoff=${strMinTs})`);
+          if (cutoffTs && msgTs && String(msgTs) <= String(cutoffTs)) {
+            console.log(`[FETCH] conv=${convId}: SKIPPING old MessageEvent at ts=${String(msgTs)} (last_response=${cutoffTs})`);
             continue;
           }
-          console.log(`[FETCH] conv=${convId}: strict-after PASSED MessageEvent at ts=${strMsgTs} (cutoff=${strMinTs})`);
-        }
-
-        if (kind === 'MessageEvent' && source !== 'user') {
           const msg = evt.llm_message || evt.message || evt.content || {};
           let text = '';
           if (typeof msg === 'string' && msg.trim()) {
@@ -591,8 +587,17 @@ async function fetchResponse(env, convId, state, minTimestamp) {
 
       // Advance to next page using the last event's timestamp
       const lastTs = list[list.length - 1].timestamp || list[list.length - 1].created_at || '';
-      if (!lastTs || String(lastTs) === minTs) break;  // no more events or stuck
-      minTs = String(lastTs);
+      if (!lastTs) break;
+      const strLast = String(lastTs);
+      if (minTs && strLast === String(minTs)) {
+        // Bump by 1ms to escape timestamp clusters (100+ events at same ts)
+        const d = new Date(strLast);
+        if (!isNaN(d.getTime())) {
+          minTs = new Date(d.getTime() + 1).toISOString();
+          continue;
+        }
+      }
+      minTs = strLast;
     }
     console.log(`[FETCH] conv=${convId}: no MessageEvent after ${page} pages`);
   } catch (_) {}
@@ -608,9 +613,7 @@ async function processCloudEvents(env, convId, state) {
   const seen = new Set((state.seen_event_ids || []).map(String));
   try {
     // Paginate through ALL pages (not just the first 100). events/search max
-    // limit=100, no offset support — use min_timestamp cursor. Without this,
-    // _last_event_ts gets stuck on page 1 when the previous turn produced
-    // 100+ events, and the current turn's events are never seen.
+    // limit=100, no offset support — use min_timestamp cursor.
     let minTs = state._last_event_ts || '';
     for (let page = 0; page < 10; page++) {
       const url = minTs
@@ -620,27 +623,11 @@ async function processCloudEvents(env, convId, state) {
       const list = Array.isArray(data) ? data : (data.events || data.items || []);
       if (!list.length) break;
 
-      // Update _last_event_ts for next poll's pagination (persisted via writeState).
-      // Skip trailing MessageEvents: they're the final response for the CURRENT turn.
-      // If _last_event_ts includes the MessageEvent's timestamp, the snapshot on the
-      // next poll equals it, and the strict-after filter in fetchResponse kills it.
-      // Advance only to the last NON-MessageEvent timestamp (tool events, etc.).
-      // NOTE: pagination cursor (minTs) advances using the ACTUAL last event's
-      // timestamp (including MessageEvents), so we don't re-fetch the same page.
-      // But _last_event_ts (persisted) only advances to non-MessageEvents.
-      let lastNonMsgTs = '';
-      for (let i = list.length - 1; i >= 0; i--) {
-        const kind = list[i].kind || list[i].type || list[i].event || '';
-        if (kind !== 'MessageEvent') {
-          lastNonMsgTs = list[i].timestamp || list[i].created_at || '';
-          break;
-        }
-      }
-      if (lastNonMsgTs) {
-        console.log(`[CLOUD] conv=${convId}: advancing _last_event_ts: ${state._last_event_ts} → ${String(lastNonMsgTs)} (page ${page}, ${list.length} events)`);
-        state._last_event_ts = String(lastNonMsgTs);
-      } else {
-        console.log(`[CLOUD] conv=${convId}: _last_event_ts NOT advanced (page ${page}, ${list.length} events, all MessageEvents)`);
+      // Update _last_event_ts for the next page/next poll.
+      const lastTs = list[list.length - 1].timestamp || list[list.length - 1].created_at || '';
+      if (lastTs) {
+        console.log(`[CLOUD] conv=${convId}: advancing _last_event_ts: ${state._last_event_ts} → ${String(lastTs)} (page ${page}, ${list.length} events)`);
+        state._last_event_ts = String(lastTs);
       }
 
       // Process events on this page
@@ -756,9 +743,22 @@ async function processCloudEvents(env, convId, state) {
 
       // Advance pagination cursor using the ACTUAL last event's timestamp
       // (including MessageEvents) so we don't re-fetch the same page.
+      // When lastTs === minTs (100+ events share the same timestamp cluster),
+      // bump forward by 1ms to break out of the cluster. Events at the exact
+      // boundary are skipped for this poll, but processCloudEvents is just UI
+      // progress — next poll picks them up via seen_event_ids dedup.
       const lastEvtTs = list[list.length - 1].timestamp || list[list.length - 1].created_at || '';
-      if (!lastEvtTs || String(lastEvtTs) === String(minTs)) break;
-      minTs = String(lastEvtTs);
+      if (!lastEvtTs) break;
+      const strLast = String(lastEvtTs);
+      if (minTs && strLast === String(minTs)) {
+        const d = new Date(strLast);
+        if (!isNaN(d.getTime())) {
+          minTs = new Date(d.getTime() + 1).toISOString();
+          // The API might return 0 events after the bump — break if so
+          continue;
+        }
+      }
+      minTs = strLast;
     }
   } catch (_) {}
 
@@ -932,6 +932,7 @@ function emptyState(repo, branch, mode) {
     last_event_index: 0,
     last_event_timestamp: '',
     last_sent_position: -1,
+    _last_response_ts: '',
     llm_model: '',
     configured_model: '',
   };
@@ -1527,20 +1528,14 @@ async function route(method, path, url, request, env) {
         directResponse = await fetchResponse(env, state.conversation_id, state);
       }
 
-      // Snapshot _last_event_ts BEFORE processCloudEvents updates it, so
-      // fetchResponse (called later in the retry handler) can exclude events
-      // already seen on previous polls — only events AFTER this cut are new.
-      const _lastEventTs = state._last_event_ts;
-      console.log(`[POLL] conv=${state.conversation_id}: snapshot _lastEventTs=${_lastEventTs} BEFORE processCloudEvents`);
-
       // Process events for UI enrichment (tool calls, status changes).
       await processCloudEvents(env, state.conversation_id, state);
-      console.log(`[POLL] conv=${state.conversation_id}: AFTER processCloudEvents _last_event_ts=${state._last_event_ts}`);
 
       if (directResponse) {
         // Agent message found via events — skip status API entirely.
         convStatus = 'completed';
         state.messages.push({ id: nextMsgId(state), role: 'assistant', content: directResponse, timestamp: now() });
+        state._last_response_ts = now();
         q.position++;
         q.done = Math.min(q.position, q.total);
         skipFutureCancelled(q);
@@ -1651,11 +1646,8 @@ async function route(method, path, url, request, env) {
           const elapsed = rState.started_at ? (Date.now() - rState.started_at) / 1000 : 0;
 
           if (elapsed >= waitSec) {
-            console.log(`[RETRY] conv=${state.conversation_id}: attempt ${retryCount} firing (elapsed=${elapsed.toFixed(1)}s, waitSec=${waitSec}s, _lastEventTs=${_lastEventTs})`);
-            // Time to do this attempt — try both events/search AND ZIP
-            // Pass _lastEventTs (snapshot before processCloudEvents) so only
-            // genuinely new events (after the cutoff) are considered.
-            retryResponse = await fetchResponse(env, state.conversation_id, state, _lastEventTs);
+            console.log(`[RETRY] conv=${state.conversation_id}: attempt ${retryCount} firing (elapsed=${elapsed.toFixed(1)}s, waitSec=${waitSec}s)`);
+            retryResponse = await fetchResponse(env, state.conversation_id, state);
             if (!retryResponse) {
               retryResponse = await fetchResponseFromZip(env, state.conversation_id, state);
             }
@@ -1696,6 +1688,7 @@ async function route(method, path, url, request, env) {
           // Clean up retry state
           try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
           state.messages.push({ id: nextMsgId(state), role: 'assistant', content: retryResponse, timestamp: now() });
+          state._last_response_ts = now();
 
           // Advance queue
           q.position++;
