@@ -1629,17 +1629,20 @@ async function route(method, path, url, request, env) {
         // retry logic below which handles timing/count/backoff.
         // NO retry key KV read here — Cloudflare KV is eventually consistent
         // and the key might not be visible yet, causing premature queue advance.
-        // The 12-attempt cap in the retry loop prevents infinite loops.
         if (state._completed_position === q.position) {
           console.log(`[RETRY] conv=${state.conversation_id}: _completed_position matched (pos=${q.position}) — continuing retry (count=${retryCount})`);
         }
         state._completed_position = q.position;
 
-        if (retryCount < 12) {
-          // Increasing delay per attempt: 5s, 10s, 15s, 20s, 30s... up to 60s
-          const delays = [5, 10, 15, 20, 30, 30, 40, 40, 50, 50, 60, 60];
-          const waitSec = delays[retryCount] || 60;
-          const elapsed = rState.started_at ? (Date.now() - rState.started_at) / 1000 : 0;
+        // Time-based retry window: up to MAX_RETRY_SECONDS total (~2 hours).
+        // Exponential backoff: 5s, 10s, 20s, 40s... capped at 120s between attempts.
+        // Agents can run for 60+ minutes, so a fixed attempt count is too short.
+        const MAX_RETRY_SECONDS = 7200;  // 2 hours
+        const elapsed = rState.started_at ? (Date.now() - rState.started_at) / 1000 : 0;
+
+        if (elapsed < MAX_RETRY_SECONDS) {
+          // Backoff: start at 5s, double each attempt, cap at 120s
+          const waitSec = Math.min(120, 5 * Math.pow(2, Math.min(retryCount, 8)));
 
           if (elapsed >= waitSec) {
             console.log(`[RETRY] conv=${state.conversation_id}: attempt ${retryCount} firing (elapsed=${elapsed.toFixed(1)}s, waitSec=${waitSec}s)`);
@@ -1671,13 +1674,18 @@ async function route(method, path, url, request, env) {
             convStatus = 'pending';
           }
         } else {
-          // 12+ attempts over ~5min — give up
-          console.log(`[RETRY] conv=${state.conversation_id}: all 12 attempts exhausted (retryCount=${retryCount}) — giving up`);
+          // elapsed >= MAX_RETRY_SECONDS (~2 hours) — give up
+          console.log(`[RETRY] conv=${state.conversation_id}: retry window exhausted (elapsed=${elapsed.toFixed(0)}s, retryCount=${retryCount}) — giving up`);
           rState = { count: 0, started_at: 0 };
+          // Delete retry key so next poll doesn't restart the cycle
+          try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
         }
-        if (!rState.started_at) rState.started_at = Date.now();
+        if (!rState.started_at && elapsed < MAX_RETRY_SECONDS) rState.started_at = Date.now();
         // Persist retry state to SEPARATE key (survives main state write failure)
-        try { await env.VIBECODE.put(`retry:${state.conversation_id}`, JSON.stringify(rState)); } catch (_) {}
+        // Only write if we're still within the retry window
+        if (elapsed < MAX_RETRY_SECONDS) {
+          try { await env.VIBECODE.put(`retry:${state.conversation_id}`, JSON.stringify(rState)); } catch (_) {}
+        }
 
         if (retryResponse) {
           console.log(`[RETRY] conv=${state.conversation_id}: response found (${retryResponse.length} chars) after ${retryCount} attempts`);
