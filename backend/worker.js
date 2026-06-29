@@ -474,62 +474,61 @@ async function pollConversation(env, convId, state) {
   }
 
   if (execStatus === 'completed' || execStatus === 'finished') {
-    // Events/search ignores min_timestamp cursor. Instead, use the
-    // conversation's updated_at to query a narrow time window around
-    // the completion time. This returns only the recent events (including
-    // the response) without needing pagination.
-    if (conv.updated_at) {
-      try {
-        const updatedMs = new Date(conv.updated_at).getTime();
-        if (!isNaN(updatedMs)) {
-          // Query 60s before updated_at to capture the response + recent events
-          const windowStart = new Date(updatedMs - 60000).toISOString().replace('Z', '');
-          const url = `/api/v1/conversation/${convId}/events/search?limit=200&min_timestamp=${encodeURIComponent(windowStart)}`;
-          const data = await cloudGet(env, url);
-          const list = Array.isArray(data) ? data : (data.events || data.items || []);
-          // Scan events for the agent's MessageEvent (most recent first)
-          for (let i = list.length - 1; i >= 0; i--) {
-            const evt = list[i];
-            const kind = evt.kind || evt.type || evt.event || '';
-            const source = evt.source || '';
-            if (kind === 'MessageEvent' && source !== 'user') {
-              const msg = evt.llm_message || evt.message || evt.content || {};
-              let text = '';
-              if (typeof msg === 'string' && msg.trim()) {
-                text = msg.trim();
-              } else if (Array.isArray(msg)) {
+    // events/search ignores min_timestamp entirely — returns the first 100
+    // events regardless of cursor. Use the V0 conversation endpoint which
+    // returns all events in order without pagination.
+    try {
+      const v0Url = `/api/conversations/${convId}`;
+      const v0Data = await cloudGet(env, v0Url);
+      const v0Events = Array.isArray(v0Data) ? v0Data : (v0Data.events || []);
+      if (v0Events.length) {
+        // Scan from the end for the agent's MessageEvent
+        for (let i = v0Events.length - 1; i >= 0; i--) {
+          const evt = v0Events[i];
+          const kind = evt.kind || evt.type || evt.event || '';
+          const source = evt.source || '';
+          if (kind === 'MessageEvent' && source !== 'user') {
+            const msg = evt.llm_message || evt.message || evt.content || {};
+            let text = '';
+            if (typeof msg === 'string' && msg.trim()) {
+              text = msg.trim();
+            } else if (Array.isArray(msg)) {
+              const parts = [];
+              for (const block of msg) {
+                if (block && typeof block === 'object') {
+                  const t = block.text || block.content || '';
+                  if (t && String(t).trim()) parts.push(String(t).trim());
+                } else if (typeof block === 'string' && block.trim()) {
+                  parts.push(block.trim());
+                }
+              }
+              if (parts.length) text = parts.join('\n');
+            } else if (typeof msg === 'object') {
+              const content = msg.content || [];
+              if (Array.isArray(content)) {
                 const parts = [];
-                for (const block of msg) {
-                  if (block && typeof block === 'object') {
-                    const t = block.text || block.content || '';
-                    if (t && String(t).trim()) parts.push(String(t).trim());
-                  } else if (typeof block === 'string' && block.trim()) {
-                    parts.push(block.trim());
+                for (const block of content) {
+                  if (block?.type === 'text' && block.text?.trim()) {
+                    parts.push(block.text.trim());
                   }
                 }
                 if (parts.length) text = parts.join('\n');
-              } else if (typeof msg === 'object') {
-                const content = msg.content || [];
-                if (Array.isArray(content)) {
-                  const parts = [];
-                  for (const block of content) {
-                    if (block?.type === 'text' && block.text?.trim()) {
-                      parts.push(block.text.trim());
-                    }
-                  }
-                  if (parts.length) text = parts.join('\n');
-                } else if (typeof content === 'string' && content.trim()) {
-                  text = content.trim();
-                }
+              } else if (typeof content === 'string' && content.trim()) {
+                text = content.trim();
               }
-              if (text) {
-                console.log(`[POLL] conv=${convId}: found response via updated_at window (${text.length} chars)`);
-                return { status: 'completed', response: text, sandbox_id: sandboxId };
-              }
+            }
+            if (text) {
+              console.log(`[POLL] conv=${convId}: found response via V0 API (${text.length} chars, ${v0Events.length} total events)`);
+              return { status: 'completed', response: text, sandbox_id: sandboxId };
             }
           }
         }
-      } catch (_) {}
+        console.log(`[POLL] conv=${convId}: V0 has ${v0Events.length} events but no agent MessageEvent found`);
+      } else {
+        console.log(`[POLL] conv=${convId}: V0 API returned 0 events`);
+      }
+    } catch (e) {
+      console.log(`[POLL] conv=${convId}: V0 API failed: ${e.message}`);
     }
     console.log(`[POLL] conv=${convId}: completed but no response found (updated_at=${conv.updated_at})`);
     return { status: 'completed', response: null, sandbox_id: sandboxId };
