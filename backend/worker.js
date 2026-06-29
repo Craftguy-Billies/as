@@ -1560,9 +1560,15 @@ async function route(method, path, url, request, env) {
       const sendErr = await sendMessage(env, state.conversation_id, prompt, state.sandbox_id);
       if (sendErr) {
         console.error(`sendMessage follow-up error: ${sendErr}`);
-        state.conversation_id = null;
-        state._last_event_ts = "";
-        state.sandbox_id = null;
+        // 429 rate limit: keep conversation_id and retry next poll.
+        // Clearing it causes a new conv attempt every poll (also 429).
+        if (String(sendErr).includes('429') || String(sendErr).includes('rate')) {
+          console.log(`[POLL] repo=${repo}: rate limited — keeping conv ${state.conversation_id} for retry`);
+        } else {
+          state.conversation_id = null;
+          state._last_event_ts = "";
+          state.sandbox_id = null;
+        }
         await writeState(env, repo, state);
       } else {
         state.last_sent_position = q.position;
