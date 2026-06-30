@@ -1161,6 +1161,9 @@ async function route(method, path, url, request, env) {
       state._completed_position = undefined;  // prevents stale check match on next poll
       if (state.conversation_id) {
         try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
+        state.conversation_id = null;
+        state._last_event_ts = "";
+        state.sandbox_id = null;
       }
     }
     await writeState(env, repo, state);
@@ -1197,6 +1200,9 @@ async function route(method, path, url, request, env) {
       // prematurely. Delete it so the retry starts fresh.
       if (state.conversation_id) {
         try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
+        state.conversation_id = null;
+        state._last_event_ts = "";
+        state.sandbox_id = null;
       }
     }
     state.queue.prompts.push(...prompts);
@@ -1425,7 +1431,7 @@ async function route(method, path, url, request, env) {
 
     // Queue naturally completed — reset to clean idle state so the app
     // doesn't show stale "1/1 done" after the task finishes.
-    if (!hasPending && q.total > 0) {
+    if (!hasPending && q.total > 0 && !state.conversation_id) {
       q.position = 0;
       q.total = 0;
       q.done = 0;
@@ -1486,11 +1492,13 @@ async function route(method, path, url, request, env) {
           state._last_event_ts = '';  // reset event pagination for new conversation
           if (result.sandbox_id) state.sandbox_id = result.sandbox_id;
           state.last_sent_position = q.position;  // sent via initial_message
+          try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
           convStatus = 'starting';
         } else if (result.start_task_id) {
           state.start_task_id = result.start_task_id;
           state._last_event_ts = '';  // reset event pagination for new conversation
           state.last_sent_position = q.position;  // will be sent when conv resolves
+          try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
           convStatus = 'starting';
         }
 
@@ -1611,6 +1619,7 @@ async function route(method, path, url, request, env) {
             console.error(`sendMessage follow-up error: ${sendErr}`);
           } else {
             state.last_sent_position = q.position;
+            try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
             state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
             state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
           }
@@ -1644,6 +1653,7 @@ async function route(method, path, url, request, env) {
               console.error(`sendMessage error at pos ${q.position}: ${sendErr}`);
             } else {
               state.last_sent_position = q.position;
+              try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
               state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
               state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
             }
@@ -1762,6 +1772,7 @@ async function route(method, path, url, request, env) {
               console.error(`sendMessage error at pos ${q.position}: ${sendErr}`);
             } else {
               state.last_sent_position = q.position;
+              try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
               state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
               state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
             }
@@ -1791,6 +1802,7 @@ async function route(method, path, url, request, env) {
               console.error(`sendMessage error at pos ${q.position}: ${sendErr}`);
             } else {
               state.last_sent_position = q.position;
+              try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
               state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
               state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
             }
