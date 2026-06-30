@@ -1504,6 +1504,7 @@ async function route(method, path, url, request, env) {
       // Reset timer too; next task will set its own.
       state._run_started_at = undefined;
       state._error_retry = 0;  // reset retry counter for next batch
+      state.last_sent_position = -1;
       // Persist so next poll sees clean state.
       await writeState(env, repo, state);
       // Delete lsp key since batch is done; prevents stale values from
