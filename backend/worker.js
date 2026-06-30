@@ -557,6 +557,11 @@ async function pollConversation(env, convId, state) {
                 }
               }
               if (text) {
+                // Skip events older than last consumed response (prevents
+                // sending stale response to a new prompt)
+                const msgTs = evt.timestamp || evt.created_at || '';
+                const cutoff = state._last_response_ts || '';
+                if (cutoff && msgTs && String(msgTs) <= String(cutoff)) continue;
                 console.log(`[POLL] conv=${convId}: found response via timestamp__gte (${text.length} chars, page ${page})`);
                 return { status: 'completed', response: text, sandbox_id: sandboxId };
               }
@@ -1635,6 +1640,10 @@ async function route(method, path, url, request, env) {
           state.sandbox_id = null;
         }
         await writeState(env, repo, state);
+        // Return early — don't fall through to polling block. Otherwise
+        // fetchResponse finds old events and advances queue with stale data
+        // (user's message was never sent).
+        return buildStateResponse(state, q, hasPending, repo, mode, state.conversation_id ? 'pending' : 'idle');
       } else {
         state.last_sent_position = q.position;
         state.messages.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
