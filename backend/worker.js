@@ -1211,9 +1211,6 @@ async function route(method, path, url, request, env) {
       state._error_retry = 0;  // reset retry counter for new batch
       if (state.conversation_id) {
         try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
-        state.conversation_id = null;
-        state._last_event_ts = "";
-        state.sandbox_id = null;
       }
     }
     await writeState(env, repo, state);
@@ -1251,9 +1248,6 @@ async function route(method, path, url, request, env) {
       // prematurely. Delete it so the retry starts fresh.
       if (state.conversation_id) {
         try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
-        state.conversation_id = null;
-        state._last_event_ts = "";
-        state.sandbox_id = null;
       }
     }
     state.queue.prompts.push(...prompts);
@@ -1648,6 +1642,7 @@ async function route(method, path, url, request, env) {
         // Write last_sent_position to SEPARATE small KV key FIRST
         try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
         await writeState(env, repo, state);
+        return buildStateResponse(state, q, hasPending, repo, mode, 'running');
       }
     }
 
