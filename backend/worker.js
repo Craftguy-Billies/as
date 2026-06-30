@@ -84,8 +84,9 @@ async function readState(env, repo) {
 
 async function writeState(env, repo, state) {
   // Trim state before writing to KV to stay under limits.
-  if (state.messages && state.messages.length > 500) {
-    state.messages = state.messages.slice(-400);
+  // High enough for 300+ tool call tasks without trimming early events.
+  if (state.messages && state.messages.length > 5000) {
+    state.messages = state.messages.slice(-4000);
   }
   if (state.event_kinds && Object.keys(state.event_kinds).length > 1000) {
     state.event_kinds = {};
@@ -241,7 +242,7 @@ async function getDefaultBranch(repo) {
 // Cloud conversation create (with initial_message)
 // ---------------------------------------------------------------------------
 
-async function createConversation(env, prompt, repo, branch, mode) {
+async function createConversation(env, prompt, repo, branch, mode, state) {
   // Build prompt with repo context (matching chat_service.py)
   let fullPrompt = prompt;
   const effectiveBranch = branch || (repo ? (await getDefaultBranch(repo)) : '') || 'main';
@@ -287,6 +288,23 @@ async function createConversation(env, prompt, repo, branch, mode) {
       `3. READ-ONLY: Do NOT edit, create, or delete any files ` +
       `other than .agents_tmp/PLAN.md.\n\n` +
       `Task: ${prompt}`;
+  }
+
+  // Inject previous chat context when creating a new conversation.
+  // User + assistant messages only, last 5 exchanges max.
+  if (state && state.messages && state.messages.length > 0) {
+    const exchanges = [];
+    for (const m of state.messages) {
+      const role = m.role || '';
+      if (role !== 'user' && role !== 'assistant') continue;
+      const content = (m.content || '').trim();
+      if (!content) continue;
+      exchanges.push(`${role === 'user' ? 'User' : 'Assistant'}: ${content.slice(0, 2000)}`);
+    }
+    if (exchanges.length > 10) exchanges.splice(0, exchanges.length - 10);
+    if (exchanges.length > 0) {
+      fullPrompt = `[Previous conversation context:]\n${exchanges.join('\n\n')}\n\n---\n\n${fullPrompt}`;
+    }
   }
 
   const cfg = await readConfig(env);
@@ -437,7 +455,31 @@ async function sendMessage(env, convId, prompt, sandboxId) {
         const r = await fetch(`${CLOUD_API}/api/v1/sandboxes/${sandboxId}/resume`, {
           method: 'POST', headers: await cloudHeaders(env),
         });
-        if (r.ok) continue;  // retry send-message
+        if (!r.ok) {
+          const txt = await r.text().catch(() => '');
+          lastErr = `${r.status}:${txt.slice(0, 200)}`;
+          break;
+        }
+        // Poll sandbox status until RUNNING (up to ~20s, every 2s).
+        // Without this, send-message retry immediately gets another 409
+        // because the sandbox is still STARTING.
+        const deadline = Date.now() + 20000;
+        while (Date.now() < deadline) {
+          await sleep(2000);
+          try {
+            const sr = await fetch(
+              `${CLOUD_API}/api/v1/sandboxes/search?sandbox_id=${sandboxId}`,
+              { headers: await cloudHeaders(env) }
+            );
+            if (sr.ok) {
+              const sd = await sr.json();
+              const list = Array.isArray(sd) ? sd : (sd.items || []);
+              const status = (list[0] && list[0].status) || '';
+              if (status === 'RUNNING') break;  // sandbox ready, retry send-message
+            }
+          } catch (_) {}
+        }
+        continue;  // retry send-message
       } catch (_) {}
     }
     const text = await resp.text();
@@ -483,7 +525,7 @@ async function pollConversation(env, convId, state) {
       if (!isNaN(updatedMs)) {
         // Query from 60s before updated_at — captures the current turn's events
         const windowStart = new Date(updatedMs - 60000).toISOString();
-        let pageUrl = `/api/v1/conversation/${convId}/events/search?limit=100&timestamp__gte=${encodeURIComponent(windowStart)}&sort_order=timestamp`;
+        let pageUrl = `/api/v1/conversation/${convId}/events/search?limit=100&timestamp__gte=${encodeURIComponent(windowStart)}&sort_order=TIMESTAMP`;
         for (let page = 0; page < 10; page++) {
           const data = await cloudGet(env, pageUrl);
           const items = data.items || data.events || (Array.isArray(data) ? data : []);
@@ -761,6 +803,12 @@ async function processCloudEvents(env, convId, state) {
           } else if (tool.includes('browser') || tool.includes('navigate')) {
             const url = action.url || cmd || '';
             state.messages.push({ id: nextMsgId(state), role: 'event', content: `[BROWSER] Navigate: ${url.slice(0, 150)}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
+          } else if (tool === 'finish' || tool === 'completed') {
+            // Store finish message as potential response fallback (for cases
+            // where no MessageEvent was emitted). Skip creating a subtask event.
+            const finishMsg = action.message || action.content || '';
+            if (finishMsg) state._finish_message = finishMsg;
+            continue;
           } else {
             state.messages.push({ id: nextMsgId(state), role: 'event', content: `[TOOL] ${tool}: ${JSON.stringify(action).slice(0, 120)}`, kind: 'SystemEvent', timestamp: typeof ts === 'number' ? ts : now() });
           }
@@ -1054,6 +1102,7 @@ async function route(method, path, url, request, env) {
       state.last_sent_position = -1;
       state._batch_skip = undefined;
       state._run_started_at = undefined;
+      state._error_retry = 0;  // reset retry counter for next batch
       await writeState(env, repo, state);
     }
     return json({ ok: true, message: `Batch cancelled for ${repo}. Chat history preserved.` });
@@ -1158,7 +1207,8 @@ async function route(method, path, url, request, env) {
       state.queue.done = 0;
       state.last_sent_position = -1;
       state._run_started_at = undefined;
-      state._completed_position = undefined;  // prevents stale check match on next poll
+      state._completed_position = undefined;
+      state._error_retry = 0;  // reset retry counter for new batch
       if (state.conversation_id) {
         try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
         state.conversation_id = null;
@@ -1194,7 +1244,8 @@ async function route(method, path, url, request, env) {
       state.queue.done = 0;
       state.last_sent_position = -1;
       state._run_started_at = undefined;  // reset timer for new batch
-      state._completed_position = undefined;  // prevents stale check match on next poll
+      state._completed_position = undefined;
+      state._error_retry = 0;  // reset retry counter for new batch
       // Stale retry state from previous batch (same conversation_id) would cause
       // the poll handler to find an old MessageEvent and advance the queue
       // prematurely. Delete it so the retry starts fresh.
@@ -1269,6 +1320,7 @@ async function route(method, path, url, request, env) {
       state.queue.modes = [];
       state.last_sent_position = -1;
       state._run_started_at = undefined;
+      state._error_retry = 0;  // reset retry counter for next batch
     }
     await writeState(env, repo, state);
     return json({ ok: true });
@@ -1421,6 +1473,17 @@ async function route(method, path, url, request, env) {
     }
 
     const q = state.queue;
+
+    // Restore last_sent_position from the tiny lsp KV key if writeState
+    // failed after a successful sendMessage (see line 1622).
+    const storedLsp = await env.VIBECODE.get(`lsp:${repo}`).catch(() => null);
+    if (storedLsp !== null) {
+      const lspVal = parseInt(storedLsp, 10);
+      if (!isNaN(lspVal) && lspVal > state.last_sent_position && lspVal <= q.position) {
+        state.last_sent_position = lspVal;
+      }
+    }
+
     // Migration: old code set q.cancelled=true on conv failure, locking the
     // queue. If cancelled but has pending work, clear stale flag and retry.
     let hasPending = q.position < q.total && !q.cancelled;
@@ -1441,8 +1504,12 @@ async function route(method, path, url, request, env) {
       state._batch_skip = undefined;
       // Reset timer too; next task will set its own.
       state._run_started_at = undefined;
+      state._error_retry = 0;  // reset retry counter for next batch
       // Persist so next poll sees clean state.
       await writeState(env, repo, state);
+      // Delete lsp key since batch is done; prevents stale values from
+      // corrupting last_sent_position on the next batch.
+      try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
     }
     let convStatus = 'idle';
 
@@ -1486,7 +1553,7 @@ async function route(method, path, url, request, env) {
       const prompt = q.prompts[q.position];
       const promptMode = q.modes[q.position] || mode;
       try {
-        const result = await createConversation(env, prompt, repo, state.branch, promptMode);
+        const result = await createConversation(env, prompt, repo, state.branch, promptMode, state);
         if (result.conversation_id) {
           state.conversation_id = result.conversation_id;
           state._last_event_ts = '';  // reset event pagination for new conversation
@@ -1602,6 +1669,13 @@ async function route(method, path, url, request, env) {
 
       // Process events for UI enrichment (tool calls, status changes).
       await processCloudEvents(env, state.conversation_id, state);
+
+      // Fallback: if fetchResponse found no MessageEvent but the finish
+      // tool has a message, use it as the response.
+      if (!directResponse && state._finish_message) {
+        directResponse = state._finish_message;
+        delete state._finish_message;
+      }
 
       if (directResponse) {
         // Agent message found via events — skip status API entirely.
@@ -1812,21 +1886,59 @@ async function route(method, path, url, request, env) {
           return buildStateResponse(state, q, stillPending, repo, mode, stillPending ? 'running' : 'idle');
         }
       } else if (pollResult.status === 'failed') {
-        // Agent execution failed — conversation is dead.
         const errMsg = pollResult.error || 'unknown error';
-        state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] Agent failed: ${errMsg.slice(0, 200)}`, kind: 'ErrorEvent', timestamp: now() });
-        q.position++;
-        q.done = Math.min(q.position, q.total);
-        skipFutureCancelled(q);
+
+        // Auto-retry: up to 5 times on the SAME conversation. Only create a
+        // new conversation (re-send prompt) after all retries exhausted.
+        state._error_retry = state._error_retry || 0;
+
+        // Already exhausted — create new conversation (re-send prompt).
+        if (state._error_retry >= 5) {
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[STATUS] Agent failed — creating new conversation...`, kind: 'SystemEvent', timestamp: now() });
+          state._error_retry = 0;
+          state._retry_at = undefined;
+          state.conversation_id = null;
+          state._last_event_ts = "";
+          state.sandbox_id = null;
+          state.last_sent_position = -1;
+          state.start_task_id = null;
+          state._run_started_at = undefined;
+          try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
+          await writeState(env, repo, state);
+          return buildStateResponse(state, q, true, repo, mode, 'starting');
+        }
+
+        // 20-second delay between retries (only applies after first retry).
+        if (state._error_retry > 0 && state._retry_at && Date.now() < state._retry_at) {
+          return buildStateResponse(state, q, true, repo, mode, convStatus);
+        }
+
+        // This retry fires now.
+        state._error_retry++;
+        state._retry_at = Date.now() + 20000;
+        console.log(`[AUTO-RETRY] Agent failed (attempt ${state._error_retry}/5): ${errMsg.slice(0, 100)}`);
+        state.messages.push({ id: nextMsgId(state), role: 'event', content: `[STATUS] Agent failed — retrying (${state._error_retry}/5)...`, kind: 'SystemEvent', timestamp: now() });
+        // Send "continue" to the same conversation to nudge the agent.
+        // Don't clear conversation_id, don't advance q.position.
+        if (state.conversation_id) {
+          const continueErr = await sendMessage(env, state.conversation_id, "continue", state.sandbox_id);
+          if (continueErr) {
+            console.log(`[AUTO-RETRY] sendMessage(continue) error: ${continueErr}`);
+          }
+        }
+        await writeState(env, repo, state);
+        return buildStateResponse(state, q, true, repo, mode, convStatus);
+      } else if (pollResult.status === 'error') {
         state.conversation_id = null;
         state._last_event_ts = "";
         state.sandbox_id = null;
         state.last_sent_position = -1;
         state.start_task_id = null;
         state._run_started_at = undefined;
+        // Delete lsp since we're starting fresh with a new conversation
+        try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
         await writeState(env, repo, state);
-        const fp = q.position < q.total && !q.cancelled;
-        return buildStateResponse(state, q, fp, repo, mode, 'idle');
+        return buildStateResponse(state, q, true, repo, mode, 'starting');
       } else if (pollResult.status === 'error') {
         // Cloud API returned error (e.g., items:[null]) — conversation is dead.
         const errMsg = pollResult.error || 'unknown error';
@@ -1850,7 +1962,10 @@ async function route(method, path, url, request, env) {
         // 2. send-message failed
         // 3. Agent stuck in idle (bug #14698)
         // → Try sending the current prompt AND force /run
-        if (convStatus !== 'starting') {
+        // Only send if NOT already sent (last_sent_position check prevents
+        // duplicate when pollConversation returns 'idle' before the Cloud API
+        // updates status to 'running' after the first sendMessage at line 1597).
+        if (convStatus !== 'starting' && state.last_sent_position < q.position) {
           const currentPrompt = q.prompts[q.position];
           const sendErr = await sendMessage(env, state.conversation_id, currentPrompt, state.sandbox_id);
           if (sendErr) {
