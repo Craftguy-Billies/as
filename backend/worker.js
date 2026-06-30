@@ -1105,6 +1105,7 @@ async function route(method, path, url, request, env) {
       state.queue.done = 0;
       state.queue.cancelled = false;
       state.last_sent_position = -1;
+      try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
       state._batch_skip = undefined;
       state._run_started_at = undefined;
       state._error_retry = 0;  // reset retry counter for next batch
@@ -1211,6 +1212,7 @@ async function route(method, path, url, request, env) {
       state.queue.position = 0;
       state.queue.done = 0;
       state.last_sent_position = -1;
+      try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
       state._run_started_at = undefined;
       state._completed_position = undefined;
       state._error_retry = 0;  // reset retry counter for new batch
@@ -1245,6 +1247,7 @@ async function route(method, path, url, request, env) {
       state.queue.position = 0;
       state.queue.done = 0;
       state.last_sent_position = -1;
+      try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
       state._run_started_at = undefined;  // reset timer for new batch
       state._completed_position = undefined;
       state._error_retry = 0;  // reset retry counter for new batch
