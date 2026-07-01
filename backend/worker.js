@@ -608,6 +608,8 @@ async function fetchResponse(env, convId, state) {
     // the 20-page cap. processCloudEvents runs before this is called, so
     // _last_event_ts is already at the newest processed event.
     let minTs = state._last_event_ts || '';
+    let bestText = null;  // newest MessageEvent text across all pages
+    let bestTs = '';
 
     for (let page = 0; page < 20; page++) {
       const url = minTs
@@ -619,8 +621,6 @@ async function fetchResponse(env, convId, state) {
       if (!list.length) { console.log(`[FETCH] conv=${convId}: page ${page} empty — breaking`); break; }
 
       // Check each event in this batch (reversed = most recent first)
-      let bestText = null;  // newest MessageEvent text across all pages
-      let bestTs = '';
       for (let i = list.length - 1; i >= 0; i--) {
         const evt = list[i];
         const kind = evt.kind || evt.type || evt.event || '';
