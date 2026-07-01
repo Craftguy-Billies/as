@@ -44,12 +44,16 @@ class VibeCodeApp extends StatefulWidget {
 
 class _VibeCodeAppState extends State<VibeCodeApp> {
   final _navKey = GlobalKey<NavigatorState>();
+  late final TaskProvider _taskProvider;
 
   @override
   void initState() {
     super.initState();
+    _taskProvider = TaskProvider(widget.api, widget.prefs);
+
     final ns = widget.ns;
     if (ns != null) {
+      _taskProvider.setNotificationService(ns);
       ns.onTaskTap = (taskId) {
         _navKey.currentState?.pushNamed('/tasks/$taskId');
       };
@@ -73,7 +77,7 @@ class _VibeCodeAppState extends State<VibeCodeApp> {
     return MultiProvider(
       providers: [
         Provider.value(value: widget.prefs),
-        ChangeNotifierProvider(create: (_) => TaskProvider(widget.api, widget.prefs)),
+        ChangeNotifierProvider.value(value: _taskProvider),
         ChangeNotifierProvider(create: (_) => SettingsProvider(widget.api, widget.prefs)),
         ChangeNotifierProvider(create: (_) => ChatProvider(widget.api)),
       ],

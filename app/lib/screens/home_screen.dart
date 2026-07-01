@@ -16,18 +16,53 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final _promptCtrl = TextEditingController();
   final _repoCtrl = TextEditingController();
   final _branchCtrl = TextEditingController();
   // _mode removed (always 'code')
   bool _sending = false;
+  Timer? _autoRefreshTimer;
+  bool _isVisible = true;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
     WidgetsBinding.instance.addPostFrameCallback((_) => _init());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _autoRefreshTimer?.cancel();
+    _promptCtrl.dispose();
+    _repoCtrl.dispose();
+    _branchCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _isVisible = true;
+      _startAutoRefresh();
+      // Refresh task list when app returns to foreground
+      context.read<TaskProvider>().refreshTasks();
+    } else if (state == AppLifecycleState.paused) {
+      _isVisible = false;
+      _autoRefreshTimer?.cancel();
+    }
+  }
+
+  void _startAutoRefresh() {
+    _autoRefreshTimer?.cancel();
+    _autoRefreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (_isVisible && mounted) {
+        context.read<TaskProvider>().refreshTasks();
+      }
+    });
   }
 
   Future<void> _init() async {
@@ -81,22 +116,17 @@ class _HomeScreenState extends State<HomeScreen> {
           await settings.testConnection().timeout(const Duration(seconds: 12));
           if (mounted && settings.connected == true) {
             await context.read<TaskProvider>().loadTasks();
+            _startAutoRefresh();
           }
         } catch (_) {
           if (mounted && settings.connected == null) {
             settings.markDisconnected();
           }
         }
+      } else if (settings.connected == true) {
+        _startAutoRefresh();
       }
     } catch (_) {}
-  }
-
-  @override
-  void dispose() {
-    _promptCtrl.dispose();
-    _repoCtrl.dispose();
-    _branchCtrl.dispose();
-    super.dispose();
   }
 
   Future<void> _sendPrompt() async {
@@ -356,7 +386,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
           // Task list
           Expanded(
-            child: taskProv.loading
+            child: taskProv.loading && !taskProv.refreshing
                 ? const Center(child: CircularProgressIndicator())
                 : taskProv.tasks.isEmpty
                     ? Center(
@@ -378,7 +408,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       )
                     : RefreshIndicator(
-                        onRefresh: () => taskProv.loadTasks(),
+                        onRefresh: () => taskProv.refreshTasks(),
                         child: ListView.builder(
                           padding: const EdgeInsets.symmetric(vertical: 8),
                           itemCount: taskProv.tasks.length,

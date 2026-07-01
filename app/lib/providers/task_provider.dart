@@ -4,13 +4,16 @@ import '../models/task.dart';
 import '../models/event.dart';
 import '../services/api_service.dart';
 import '../services/preferences_service.dart';
+import '../services/notification_service.dart';
 
 class TaskProvider extends ChangeNotifier {
   final ApiService _api;
   final PreferencesService _prefs;
+  NotificationService? _notificationService;
 
   List<Task> _tasks = [];
   bool _loading = false;
+  bool _refreshing = false;
   String? _error;
 
   // Live feed state
@@ -23,7 +26,14 @@ class TaskProvider extends ChangeNotifier {
   int _consecutiveFailures = 0;
   static const int _maxFailures = 5;
 
+  // De-duplicate notifications for the same task
+  final Set<String> _notifiedTasks = {};
+
   TaskProvider(this._api, this._prefs);
+
+  void setNotificationService(NotificationService ns) {
+    _notificationService = ns;
+  }
 
   @override
   void dispose() {
@@ -39,6 +49,7 @@ class TaskProvider extends ChangeNotifier {
   List<Task> get tasks => _tasks;
   List<AgentEvent> get events => _events;
   bool get loading => _loading;
+  bool get refreshing => _refreshing;
   String? get error => _error;
   String? get currentTaskId => _currentTaskId;
   bool get autoScroll => _autoScroll;
@@ -60,6 +71,30 @@ class TaskProvider extends ChangeNotifier {
     }
 
     _loading = false;
+    _safeNotify();
+  }
+
+  /// Pull-to-refresh: same as loadTasks but uses _refreshing flag
+  /// so the UI doesn't replace the list with a full-screen spinner.
+  Future<void> refreshTasks() async {
+    _refreshing = true;
+    _error = null;
+    _safeNotify();
+
+    try {
+      _tasks = await _api.listTasks();
+      // Check for already-completed tasks and notify if new
+      for (final task in _tasks) {
+        if ((task.isCompleted || task.isFailed) && !_notifiedTasks.contains(task.id)) {
+          _notifiedTasks.add(task.id);
+          _fireNotificationForTask(task);
+        }
+      }
+    } catch (e) {
+      _error = ApiService.friendlyError(e);
+    }
+
+    _refreshing = false;
     _safeNotify();
   }
 
@@ -112,11 +147,29 @@ class TaskProvider extends ChangeNotifier {
     try {
       await _api.deleteAllTasks();
       _tasks.clear();
+      _notifiedTasks.clear();
       _safeNotify();
     } catch (e) {
       _error = ApiService.friendlyError(e);
       _safeNotify();
     }
+  }
+
+  void _fireNotificationForTask(Task task) {
+    final ns = _notificationService;
+    if (ns == null) {
+      debugPrint('[TASK_PROV] No notification service wired');
+      return;
+    }
+    final isComplete = task.isCompleted || task.status == 'completed';
+    final title = isComplete ? '✅ Task Complete' : '❌ Task Failed';
+    final body = isComplete
+        ? task.prompt.length > 80
+            ? '${task.prompt.substring(0, 80)}...'
+            : task.prompt
+        : task.errorMessage ?? 'Task failed';
+    debugPrint('[TASK_PROV] Firing notification for task ${task.id}: $title');
+    ns.showTaskCompleteNotification(taskId: task.id, title: title, body: body);
   }
 
   // --- Live Feed ---
@@ -211,6 +264,15 @@ class TaskProvider extends ChangeNotifier {
       }
 
       if (taskStatus == 'completed' || taskStatus == 'failed') {
+        // Fire notification BEFORE loadTasks — only once per task
+        if (!_notifiedTasks.contains(taskId)) {
+          _notifiedTasks.add(taskId);
+          final task = _tasks.where((t) => t.id == taskId).firstOrNull;
+          if (task != null) {
+            final updatedTask = task.copyWith(status: taskStatus);
+            _fireNotificationForTask(updatedTask);
+          }
+        }
         stopPolling();
         await loadTasks();
       }
