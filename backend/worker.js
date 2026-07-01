@@ -1925,8 +1925,8 @@ async function route(method, path, url, request, env) {
         const elapsed = rState.started_at ? (Date.now() - rState.started_at) / 1000 : 0;
 
         if (elapsed < MAX_RETRY_SECONDS) {
-          // Backoff: start at 5s, double each attempt, cap at 120s
-          const waitSec = Math.min(120, 5 * Math.pow(2, Math.min(retryCount, 8)));
+          // Backoff: start at 30s, double each attempt, cap at 120s
+          const waitSec = Math.min(120, 30 * Math.pow(2, Math.min(retryCount, 2)));
 
           if (elapsed >= waitSec) {
             console.log(`[RETRY] conv=${state.conversation_id}: attempt ${retryCount} firing (elapsed=${elapsed.toFixed(1)}s, waitSec=${waitSec}s)`);
@@ -2040,6 +2040,11 @@ async function route(method, path, url, request, env) {
         // new conversation (re-send prompt) after all retries exhausted.
         state._error_retry = state._error_retry || 0;
 
+        // Initialize cooldown timer on first entry too — no immediate retry.
+        if (!state._retry_at) {
+          state._retry_at = Date.now() + 30000;
+        }
+
         // Already exhausted — create new conversation (re-send prompt).
         if (state._error_retry >= 5) {
           state.messages.push({ id: nextMsgId(state), role: 'event', content: `[STATUS] Agent failed — creating new conversation...`, kind: 'SystemEvent', timestamp: now() });
@@ -2056,14 +2061,14 @@ async function route(method, path, url, request, env) {
           return buildStateResponse(state, q, true, repo, mode, 'starting');
         }
 
-        // 20-second delay between retries (only applies after first retry).
-        if (state._error_retry > 0 && state._retry_at && Date.now() < state._retry_at) {
+        // 30-second delay between retries (applies from the first retry too).
+        if (state._retry_at && Date.now() < state._retry_at) {
           return buildStateResponse(state, q, true, repo, mode, convStatus);
         }
 
         // This retry fires now.
         state._error_retry++;
-        state._retry_at = Date.now() + 20000;
+        state._retry_at = Date.now() + 30000;
         console.log(`[AUTO-RETRY] Agent failed (attempt ${state._error_retry}/5): ${errMsg.slice(0, 100)}`);
         state.messages.push({ id: nextMsgId(state), role: 'event', content: `[STATUS] Agent failed — retrying (${state._error_retry}/5)...`, kind: 'SystemEvent', timestamp: now() });
         // Send "continue" to the same conversation to nudge the agent.

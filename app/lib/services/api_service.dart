@@ -214,7 +214,7 @@ class ApiService {
         : Uri.parse('$_url/api/chat');
     final resp = await http
         .get(uri)
-        .timeout(const Duration(seconds: 30));
+        .timeout(const Duration(seconds: 60));
     if (resp.statusCode != 200) {
       throw Exception(_parseError(resp.statusCode, resp.body));
     }
