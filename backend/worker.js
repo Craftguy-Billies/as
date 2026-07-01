@@ -291,7 +291,8 @@ async function createConversation(env, prompt, repo, branch, mode, state) {
   }
 
   // Inject previous chat context when creating a new conversation.
-  // User + assistant messages only, last 5 exchanges max.
+  // Include user/assistant exchanges (last 30, 5000 chars each) plus
+  // a concise tool-activity summary reconstructed from SystemEvents.
   if (state && state.messages && state.messages.length > 0) {
     const exchanges = [];
     for (const m of state.messages) {
@@ -299,11 +300,46 @@ async function createConversation(env, prompt, repo, branch, mode, state) {
       if (role !== 'user' && role !== 'assistant') continue;
       const content = (m.content || '').trim();
       if (!content) continue;
-      exchanges.push(`${role === 'user' ? 'User' : 'Assistant'}: ${content.slice(0, 2000)}`);
+      exchanges.push(`${role === 'user' ? 'User' : 'Assistant'}: ${content.slice(0, 5000)}`);
     }
-    if (exchanges.length > 10) exchanges.splice(0, exchanges.length - 10);
-    if (exchanges.length > 0) {
-      fullPrompt = `[Previous conversation context:]\n${exchanges.join('\n\n')}\n\n---\n\n${fullPrompt}`;
+    if (exchanges.length > 30) exchanges.splice(0, exchanges.length - 30);
+
+    // Build a tool-activity summary from SystemEvent entries.
+    // These contain [EDIT], [READ], [TERMINAL], [FILE], [BROWSER],
+    // [SEARCH], [OUT], [WARN], [INFO] prefixes recorded by processCloudEvents.
+    const toolLines = [];
+    const seenToolKeys = new Set();
+    for (const m of state.messages) {
+      const text = (m.content || '').trim();
+      if (!text) continue;
+      // Only SystemEvent entries carry tool activity.
+      // The first token (e.g. "[EDIT]") identifies the type.
+      const prefix = text.match(/^\[([A-Z]+)\]/)?.[1];
+      if (!prefix) continue;
+      // Dedup identical lines that appear more than once.
+      if (seenToolKeys.has(text)) continue;
+      seenToolKeys.add(text);
+      // Collect: file reads/edits, terminal commands, browser activity,
+      // search queries, file diffs, build output.
+      if (prefix === 'EDIT' || prefix === 'READ' || prefix === 'CREATE' ||
+          prefix === 'FILE' || prefix === 'BROWSER' || prefix === 'SEARCH' ||
+          prefix === 'TOOL') {
+        toolLines.push(`  • ${text}`);
+      }
+    }
+    // Keep at most the last 50 tool entries to avoid bloating the prompt.
+    if (toolLines.length > 50) toolLines.splice(0, toolLines.length - 50);
+
+    if (exchanges.length > 0 || toolLines.length > 0) {
+      let ctx = '[Previous conversation context:]\n';
+      if (exchanges.length > 0) {
+        ctx += exchanges.join('\n\n');
+      }
+      if (toolLines.length > 0) {
+        ctx += '\n\n[Tool activity in previous conversation:]\n';
+        ctx += toolLines.join('\n');
+      }
+      fullPrompt = `${ctx}\n\n---\n\n${fullPrompt}`;
     }
   }
 
@@ -1126,6 +1162,8 @@ async function route(method, path, url, request, env) {
       state._run_started_at = undefined;
       state._error_retry = 0;  // reset retry counter for next batch
       state._send_retry = 0;
+      state._create_retry_at = undefined;
+      state._send_retry_at = undefined;
       await writeState(env, repo, state);
     }
     return json({ ok: true, message: `Batch cancelled for ${repo}. Chat history preserved.` });
@@ -1234,6 +1272,8 @@ async function route(method, path, url, request, env) {
       state._completed_position = undefined;
       state._error_retry = 0;  // reset retry counter for new batch
       state._send_retry = 0;
+      state._create_retry_at = undefined;
+      state._send_retry_at = undefined;
       if (state.conversation_id) {
         try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
       }
@@ -1277,6 +1317,8 @@ async function route(method, path, url, request, env) {
       state._completed_position = undefined;
       state._error_retry = 0;  // reset retry counter for new batch
       state._send_retry = 0;
+      state._create_retry_at = undefined;
+      state._send_retry_at = undefined;
       // Stale retry state from previous batch (same conversation_id) would cause
       // the poll handler to find an old MessageEvent and advance the queue
       // prematurely. Delete it so the retry starts fresh.
@@ -1357,6 +1399,8 @@ async function route(method, path, url, request, env) {
       state._run_started_at = undefined;
       state._error_retry = 0;  // reset retry counter for next batch
       state._send_retry = 0;
+      state._create_retry_at = undefined;
+      state._send_retry_at = undefined;
     }
     await writeState(env, repo, state);
     return json({ ok: true });
@@ -1551,6 +1595,8 @@ async function route(method, path, url, request, env) {
       state._run_started_at = undefined;
       state._error_retry = 0;  // reset retry counter for next batch
       state._send_retry = 0;
+      state._create_retry_at = undefined;
+      state._send_retry_at = undefined;
       state.last_sent_position = -1;
       // Persist so next poll sees clean state.
       await writeState(env, repo, state);
@@ -1597,72 +1643,87 @@ async function route(method, path, url, request, env) {
 
     // --- Phase: create conversation if queue has work ---
     if (hasPending && !state.conversation_id && !state.start_task_id) {
-      const prompt = q.prompts[q.position];
-      const promptMode = q.modes[q.position] || mode;
-      try {
-        const result = await createConversation(env, prompt, repo, state.branch, promptMode, state);
-        if (result.conversation_id) {
-          state.conversation_id = result.conversation_id;
-          state._last_event_ts = '';  // reset event pagination for new conversation
-          if (result.sandbox_id) state.sandbox_id = result.sandbox_id;
-          state.last_sent_position = q.position;  // sent via initial_message
-          try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
-          convStatus = 'starting';
-        } else if (result.start_task_id) {
-          state.start_task_id = result.start_task_id;
-          state._last_event_ts = '';  // reset event pagination for new conversation
-          state.last_sent_position = q.position;  // will be sent when conv resolves
-          try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
-          convStatus = 'starting';
-        }
-
-        // Save LLM model info
-        const cfg = await readConfig(env);
-        state.llm_model = cfg.model || '';
-        state.configured_model = cfg.model || '';
-
-        // Reset elapsed timer for this new conversation
-        state._run_started_at = now();
-
-        // Add user message to local state
-        state.messages.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
-        state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent is starting up... (0s)', kind: 'SystemEvent', timestamp: now() });
-
-        await writeState(env, repo, state);
-      } catch (e) {
-        console.error(`Create conv error: ${e.message}`);
-        // Don't cancel the queue — let the next poll retry.
-        // Track failures — after 3, skip this prompt to keep queue draining.
-        const maxCrash = 3;
-        const crashKey = `crash:${repo}:${q.position}`;
-        let crashCount = 0;
+      // Don't retry createConversation more often than every 30s.
+      // Rate-limited (429) calls should not spike the API or burn crash budget.
+      if (state._create_retry_at && Date.now() < state._create_retry_at) {
+        convStatus = 'pending';
+      } else {
+        const prompt = q.prompts[q.position];
+        const promptMode = q.modes[q.position] || mode;
         try {
-          const raw = await env.VIBECODE.get(crashKey);
-          if (raw) crashCount = parseInt(raw, 10) || 0;
-        } catch (_) {}
-        crashCount++;
-        if (crashCount >= maxCrash) {
-          // Skip this prompt — move to next
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] Skipping prompt #${q.position + 1}: agent stopped responding.`, kind: 'ErrorEvent', timestamp: now() });
-          state.messages.push({ id: nextMsgId(state), role: 'assistant', content: `[Skipped: agent failed to start]`, timestamp: now() });
-          q.position++;
-          q.done = Math.min(q.position, q.total);
-          state.conversation_id = null;
-          state._last_event_ts = "";
-          state.sandbox_id = null;
-          state.last_sent_position = -1;
-          state._run_started_at = undefined;
-          // Clean up crash counter
-          try { await env.VIBECODE.delete(crashKey); } catch (_) {}
-        } else {
-          try { await env.VIBECODE.put(crashKey, String(crashCount), { expirationTtl: 120 }); } catch (_) {}
-          // Only push error once per batch to avoid spamming
-          const lastMsg = state.messages[state.messages.length - 1];
-          if (!lastMsg || !lastMsg.content?.includes('starting agent')) {
-            state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] Failed to start agent (attempt ${crashCount}/${maxCrash}).`, kind: 'ErrorEvent', timestamp: now() });
+          const result = await createConversation(env, prompt, repo, state.branch, promptMode, state);
+          if (result.conversation_id) {
+            state.conversation_id = result.conversation_id;
+            state._last_event_ts = '';  // reset event pagination for new conversation
+            if (result.sandbox_id) state.sandbox_id = result.sandbox_id;
+            state.last_sent_position = q.position;  // sent via initial_message
+            try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
+            convStatus = 'starting';
+          } else if (result.start_task_id) {
+            state.start_task_id = result.start_task_id;
+            state._last_event_ts = '';  // reset event pagination for new conversation
+            state.last_sent_position = q.position;  // will be sent when conv resolves
+            try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
+            convStatus = 'starting';
           }
+
+          // Save LLM model info
+          const cfg = await readConfig(env);
+          state.llm_model = cfg.model || '';
+          state.configured_model = cfg.model || '';
+
+          // Reset elapsed timer for this new conversation
+          state._run_started_at = now();
+
+          // Add user message to local state
+          state.messages.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent is starting up... (0s)', kind: 'SystemEvent', timestamp: now() });
+
+          await writeState(env, repo, state);
+        } catch (e) {
+          console.error(`Create conv error: ${e.message}`);
+
+          // --- Rate limit (429): back off 60s, DON'T increment crash counter ---
+          if (String(e.message).includes('429') || String(e.message).includes('rate')) {
+            state._create_retry_at = Date.now() + 60000;
+            console.log(`[POLL] repo=${repo}: createConversation rate limited — retrying after 60s`);
+          } else {
+            // Don't cancel the queue — let the next poll retry.
+            // Track failures — after 3, skip this prompt to keep queue draining.
+            const maxCrash = 3;
+            const crashKey = `crash:${repo}:${q.position}`;
+            let crashCount = 0;
+            try {
+              const raw = await env.VIBECODE.get(crashKey);
+              if (raw) crashCount = parseInt(raw, 10) || 0;
+            } catch (_) {}
+            crashCount++;
+            state._create_retry_at = Date.now() + 30000;
+            if (crashCount >= maxCrash) {
+              // Skip this prompt — move to next
+              state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] Skipping prompt #${q.position + 1}: agent stopped responding.`, kind: 'ErrorEvent', timestamp: now() });
+              state.messages.push({ id: nextMsgId(state), role: 'assistant', content: `[Skipped: agent failed to start]`, timestamp: now() });
+              q.position++;
+              q.done = Math.min(q.position, q.total);
+              state.conversation_id = null;
+              state._last_event_ts = "";
+              state.sandbox_id = null;
+              state.last_sent_position = -1;
+              state._run_started_at = undefined;
+              state._create_retry_at = undefined;
+              // Clean up crash counter
+              try { await env.VIBECODE.delete(crashKey); } catch (_) {}
+            } else {
+              try { await env.VIBECODE.put(crashKey, String(crashCount), { expirationTtl: 120 }); } catch (_) {}
+              // Only push error once per batch to avoid spamming
+              const lastMsg = state.messages[state.messages.length - 1];
+              if (!lastMsg || !lastMsg.content?.includes('starting agent')) {
+                state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] Failed to start agent (attempt ${crashCount}/${maxCrash}).`, kind: 'ErrorEvent', timestamp: now() });
+              }
+            }
+          }
+          await writeState(env, repo, state);
         }
-        await writeState(env, repo, state);
       }
     }
 
@@ -1674,41 +1735,58 @@ async function route(method, path, url, request, env) {
     // duplicate sendMessage (next poll reads last_sent_position=-1 from stale
     // state and fires again).
     if (hasPending && state.conversation_id && state.last_sent_position < q.position) {
-      const prompt = q.prompts[q.position];
-      const sendErr = await sendMessage(env, state.conversation_id, prompt, state.sandbox_id);
-      if (sendErr) {
-        console.error(`sendMessage follow-up error: ${sendErr}`);
-        // 429 rate limit: keep conversation_id and retry next poll.
-        // Clearing it causes a new conv attempt every poll (also 429).
-        if (String(sendErr).includes('429') || String(sendErr).includes('rate')) {
-          console.log(`[POLL] repo=${repo}: rate limited — keeping conv ${state.conversation_id} for retry`);
-          state._send_retry = 0;  // reset on rate limit (transient)
-        } else {
-          // Non-429 errors: retry up to 3 times before creating a new
-          // conversation. Transient network blips shouldn't lose context.
-          state._send_retry = (state._send_retry || 0) + 1;
-          console.log(`[POLL] repo=${repo}: sendMessage error (retry ${state._send_retry}/3)`);
-          if (state._send_retry >= 3) {
-            state._send_retry = 0;
-            state.conversation_id = null;
-            state._last_event_ts = "";
-            state.sandbox_id = null;
-          }
-        }
-        await writeState(env, repo, state);
-        // Return early — don't fall through to polling block. Otherwise
-        // fetchResponse finds old events and advances queue with stale data
-        // (user's message was never sent).
-        return buildStateResponse(state, q, hasPending, repo, mode, state.conversation_id ? 'pending' : 'idle');
+      // Don't retry sendMessage more often than every 30s.
+      // Add _send_retry_at delay to prevent 30s of rapid-fire retries
+      // when Cloud API is returning 5xx or network is flaky.
+      if (state._send_retry_at && Date.now() < state._send_retry_at) {
+        convStatus = 'pending';
       } else {
-        state.last_sent_position = q.position;
-        state._send_retry = 0;  // reset on successful send
-        state.messages.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
-        state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
-        // Write last_sent_position to SEPARATE small KV key FIRST
-        try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
-        await writeState(env, repo, state);
-        return buildStateResponse(state, q, hasPending, repo, mode, 'running');
+        const prompt = q.prompts[q.position];
+        const sendErr = await sendMessage(env, state.conversation_id, prompt, state.sandbox_id);
+        if (sendErr) {
+          console.error(`sendMessage follow-up error: ${sendErr}`);
+          // 429 rate limit: keep conversation_id and retry next poll.
+          // Clearing it causes a new conv attempt every poll (also 429).
+          if (String(sendErr).includes('429') || String(sendErr).includes('rate')) {
+            console.log(`[POLL] repo=${repo}: rate limited — keeping conv ${state.conversation_id} for retry`);
+            state._send_retry = 0;  // reset on rate limit (transient)
+      state._create_retry_at = undefined;
+      state._send_retry_at = undefined;
+            state._send_retry_at = Date.now() + 60000;
+          } else {
+            // Non-429 errors: retry up to 3 times before creating a new
+            // conversation. Transient network blips shouldn't lose context.
+            state._send_retry = (state._send_retry || 0) + 1;
+            state._send_retry_at = Date.now() + 30000;
+            console.log(`[POLL] repo=${repo}: sendMessage error (retry ${state._send_retry}/3, backoff 30s)`);
+            if (state._send_retry >= 3) {
+              state._send_retry = 0;
+      state._create_retry_at = undefined;
+      state._send_retry_at = undefined;
+              state._send_retry_at = undefined;
+              state.conversation_id = null;
+              state._last_event_ts = "";
+              state.sandbox_id = null;
+            }
+          }
+          await writeState(env, repo, state);
+          // Return early — don't fall through to polling block. Otherwise
+          // fetchResponse finds old events and advances queue with stale data
+          // (user's message was never sent).
+          return buildStateResponse(state, q, hasPending, repo, mode, state.conversation_id ? 'pending' : 'idle');
+        } else {
+          state.last_sent_position = q.position;
+          state._send_retry = 0;  // reset on successful send
+      state._create_retry_at = undefined;
+      state._send_retry_at = undefined;
+          state._send_retry_at = undefined;
+          state.messages.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+          // Write last_sent_position to SEPARATE small KV key FIRST
+          try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
+          await writeState(env, repo, state);
+          return buildStateResponse(state, q, hasPending, repo, mode, 'running');
+        }
       }
     }
 
