@@ -22,13 +22,14 @@ from models import (
     LLMConfigRequest,
     GitConfigRequest,
     FCMTokenRequest,
+    ReplyRequest,
     TaskResponse,
     EventResponse,
     HealthResponse,
     TasksListResponse,
     EventsListResponse,
 )
-from agent_runner import get_llm_config, set_llm_config, AgentConfig, get_git_config, set_git_config
+from agent_runner import get_llm_config, set_llm_config, AgentConfig, get_git_config, set_git_config, send_reply_sync
 from worker import start_worker, stop_worker
 from fcm_service import init_firebase
 
@@ -430,6 +431,40 @@ async def retry_task(task_id: str):
         )
         await db.commit()
     return {"status": "queued", "task_id": task_id}
+
+
+# ---------------------------------------------------------------------------
+# Reply to task
+# ---------------------------------------------------------------------------
+
+@app.post("/api/tasks/{task_id}/reply")
+async def reply_to_task(task_id: str, req: ReplyRequest):
+    """Send a follow-up message to an existing task's conversation.
+
+    Looks up the task's conversation_id and sends the message via the
+    OpenHands Cloud API send-message endpoint. The message is sent to
+    the same AI agent conversation.
+    """
+    async with get_db_ctx() as db:
+        cursor = await db.execute(
+            "SELECT conversation_id FROM tasks WHERE id = ?",
+            (task_id,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        conversation_id = row["conversation_id"]
+        if not conversation_id:
+            raise HTTPException(status_code=400, detail="Task has no active conversation")
+
+    result = send_reply_sync(conversation_id, req.message)
+    if result["status"] == "failed":
+        raise HTTPException(
+            status_code=502,
+            detail=result.get("error_message", "Failed to send reply"),
+        )
+    return {"status": "sent", "conversation_id": conversation_id}
 
 
 @app.delete("/api/tasks")

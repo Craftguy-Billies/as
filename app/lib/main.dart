@@ -25,18 +25,30 @@ void main() async {
   final api = ApiService();
   api.setBaseUrl(prefs.serverUrl);
   NotificationService? ns;
+  TaskProvider taskProvider = TaskProvider(api, prefs);
   if (!kIsWeb) {
     ns = NotificationService(api);
-    try { await ns.initialize(); } catch (_) {}
+    try {
+      await ns.initialize();
+      taskProvider.setNotificationService(ns);
+    } catch (_) {}
   }
-  runApp(VibeCodeApp(api: api, prefs: prefs, ns: ns));
+  try { await taskProvider.loadTasks(); } catch (_) {}
+  runApp(VibeCodeApp(api: api, prefs: prefs, ns: ns, taskProvider: taskProvider));
 }
 
 class VibeCodeApp extends StatefulWidget {
   final ApiService api;
   final PreferencesService prefs;
   final NotificationService? ns;
-  const VibeCodeApp({super.key, required this.api, required this.prefs, this.ns});
+  final TaskProvider taskProvider;
+  const VibeCodeApp({
+    super.key,
+    required this.api,
+    required this.prefs,
+    this.ns,
+    required this.taskProvider,
+  });
 
   @override
   State<VibeCodeApp> createState() => _VibeCodeAppState();
@@ -73,7 +85,7 @@ class _VibeCodeAppState extends State<VibeCodeApp> {
     return MultiProvider(
       providers: [
         Provider.value(value: widget.prefs),
-        ChangeNotifierProvider(create: (_) => TaskProvider(widget.api, widget.prefs)),
+        ChangeNotifierProvider.value(value: widget.taskProvider),
         ChangeNotifierProvider(create: (_) => SettingsProvider(widget.api, widget.prefs)),
         ChangeNotifierProvider(create: (_) => ChatProvider(widget.api)),
       ],

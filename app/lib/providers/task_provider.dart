@@ -4,14 +4,19 @@ import '../models/task.dart';
 import '../models/event.dart';
 import '../services/api_service.dart';
 import '../services/preferences_service.dart';
+import '../services/notification_service.dart';
 
 class TaskProvider extends ChangeNotifier {
   final ApiService _api;
   final PreferencesService _prefs;
+  NotificationService? _notificationService;
 
   List<Task> _tasks = [];
   bool _loading = false;
   String? _error;
+
+  // Tracks task IDs we've already sent notifications for
+  final Set<String> _notifiedTasks = {};
 
   // Live feed state
   List<AgentEvent> _events = [];
@@ -24,6 +29,10 @@ class TaskProvider extends ChangeNotifier {
   static const int _maxFailures = 5;
 
   TaskProvider(this._api, this._prefs);
+
+  void setNotificationService(NotificationService ns) {
+    _notificationService = ns;
+  }
 
   @override
   void dispose() {
@@ -55,12 +64,40 @@ class TaskProvider extends ChangeNotifier {
 
     try {
       _tasks = await _api.listTasks(status: statusFilter);
+      checkCompletedTasks();
     } catch (e) {
       _error = ApiService.friendlyError(e);
     }
 
     _loading = false;
     _safeNotify();
+  }
+
+  /// Show local notifications for newly completed/failed tasks.
+  void checkCompletedTasks() {
+    final ns = _notificationService;
+    if (ns == null) return;
+
+    for (final task in _tasks) {
+      if (task.isCompleted && !_notifiedTasks.contains(task.id)) {
+        _notifiedTasks.add(task.id);
+        ns.showTaskCompleteNotification(
+          taskId: task.id,
+          title: '✅ Task Complete',
+          body: task.prompt.length > 80
+              ? '${task.prompt.substring(0, 80)}...'
+              : task.prompt,
+        );
+      }
+      if (task.isFailed && !_notifiedTasks.contains(task.id)) {
+        _notifiedTasks.add(task.id);
+        ns.showTaskCompleteNotification(
+          taskId: task.id,
+          title: '❌ Task Failed',
+          body: task.errorMessage ?? 'Task failed',
+        );
+      }
+    }
   }
 
   Future<Task?> createPrompt({

@@ -198,6 +198,45 @@ def _serialize_cloud_event(event: dict, index: int) -> dict:
     }
 
 
+def send_reply_sync(conversation_id: str, message: str) -> dict:
+    """Send a follow-up user message to an existing OpenHands Cloud conversation.
+
+    Uses POST /api/v1/app-conversations/{conversation_id}/send-message.
+    Verified against the OpenHands Cloud OpenAPI spec (see chat_service._send_message).
+
+    Returns dict with 'status' ('sent' or 'failed') and optional 'error_message'.
+    """
+    api_key = os.getenv("OPENHANDS_CLOUD_API_KEY", "")
+    if not api_key:
+        return {"status": "failed", "error_message": "OPENHANDS_CLOUD_API_KEY not set"}
+
+    headers = _get_headers()
+    body = {
+        "role": "user",
+        "content": [{"type": "text", "text": message}],
+        "run": True,
+    }
+    try:
+        resp = httpx.post(
+            f"{CLOUD_API_URL}/api/v1/app-conversations/{conversation_id}/send-message",
+            headers=headers,
+            json=body,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return {"status": "sent"}
+    except httpx.HTTPStatusError as e:
+        return {
+            "status": "failed",
+            "error_message": f"API error {e.response.status_code}: {e.response.text[:200]}",
+        }
+    except Exception as e:
+        return {
+            "status": "failed",
+            "error_message": f"{type(e).__name__}: {str(e)}",
+        }
+
+
 def _build_prompt_text(prompt: str, repo: str, branch: str, mode: str) -> str:
     """Build the full prompt text with repo context and mode instructions."""
     base = (

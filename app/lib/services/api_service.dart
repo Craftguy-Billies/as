@@ -390,4 +390,18 @@ class ApiService {
     }
     return [];
   }
+
+  /// Send a follow-up message to an existing task's conversation.
+  Future<bool> sendReply(String taskId, String message) async {
+    try {
+      final resp = await http.post(
+        Uri.parse('$_url/api/tasks/$taskId/reply'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({'message': message}),
+      ).timeout(const Duration(seconds: 15));
+      return resp.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
 }

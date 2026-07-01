@@ -33,6 +33,10 @@ class FCMTokenRequest(BaseModel):
     token: str = Field(..., min_length=1)
 
 
+class ReplyRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=10000)
+
+
 class TaskResponse(BaseModel):
     id: str
     prompt: str
