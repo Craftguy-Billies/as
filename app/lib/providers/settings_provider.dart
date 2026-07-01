@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import '../services/api_service.dart';
 import '../services/preferences_service.dart';
 
+/// Global key for navigation from notifications / auto-refresh
+final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
+
 class SettingsProvider extends ChangeNotifier {
   final ApiService _api;
   final PreferencesService _prefs;
@@ -15,6 +18,9 @@ class SettingsProvider extends ChangeNotifier {
     _serverUrl = _prefs.serverUrl;
     if (_serverUrl != null) {
       _api.setBaseUrl(_serverUrl!);
+      // Auto-test connection so isSetup returns true without user tapping "Connect" again
+      debugPrint('[SETTINGS] Server URL found, auto-testing connection...');
+      WidgetsBinding.instance.addPostFrameCallback((_) => testConnection());
     }
   }
 

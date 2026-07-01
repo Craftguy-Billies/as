@@ -57,11 +57,13 @@ class TaskProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
+      debugPrint('[TASK_PROV] loadTasks() fetching tasks...');
       _tasks = await _api.listTasks(status: statusFilter);
+      debugPrint('[TASK_PROV] loadTasks() got ${_tasks.length} tasks');
       checkCompletedTasks();
     } catch (e) {
+      debugPrint('[TASK_PROV] loadTasks() ERROR: $e');
       _error = e.toString();
-      debugPrint('loadTasks error: $e');
     }
 
     _loading = false;
@@ -75,11 +77,13 @@ class TaskProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
+      debugPrint('[TASK_PROV] refreshTasks() fetching tasks...');
       _tasks = await _api.listTasks();
+      debugPrint('[TASK_PROV] refreshTasks() got ${_tasks.length} tasks');
       checkCompletedTasks();
     } catch (e) {
+      debugPrint('[TASK_PROV] refreshTasks() ERROR: $e');
       _error = e.toString();
-      debugPrint('refreshTasks error: $e');
     }
 
     _refreshing = false;
@@ -126,6 +130,7 @@ class TaskProvider extends ChangeNotifier {
   void checkCompletedTasks() {
     for (final task in _tasks) {
       if (task.isCompleted && !_notifiedTasks.contains(task.id)) {
+        debugPrint('[TASK_PROV] checkCompletedTasks() completed: ${task.id} "${task.prompt.substring(0, task.prompt.length.clamp(0, 40))}"');
         _notifiedTasks.add(task.id);
         final promptPreview =
             task.prompt.length > 80
@@ -138,6 +143,7 @@ class TaskProvider extends ChangeNotifier {
         );
       }
       if (task.isFailed && !_notifiedTasks.contains(task.id)) {
+        debugPrint('[TASK_PROV] checkCompletedTasks() failed: ${task.id} "${task.errorMessage ?? "no error msg"}"');
         _notifiedTasks.add(task.id);
         _notificationService?.showTaskCompleteNotification(
           taskId: task.id,
@@ -208,8 +214,14 @@ class TaskProvider extends ChangeNotifier {
   /// Fire a local notification for a completed/failed task.
   /// Uses task data from the in-memory _tasks list (not dependent on API).
   void _notifyTaskCompletion(String taskId, String status) {
-    if (_notifiedTasks.contains(taskId)) return;
-    if (_notificationService == null) return;
+    if (_notifiedTasks.contains(taskId)) {
+      debugPrint('[TASK_PROV] _notifyTaskCompletion() SKIP: already notified task=$taskId');
+      return;
+    }
+    if (_notificationService == null) {
+      debugPrint('[TASK_PROV] _notifyTaskCompletion() SKIP: notificationService is null!');
+      return;
+    }
 
     final task = _tasks.where((t) => t.id == taskId).firstOrNull;
     final prompt = task?.prompt ?? 'Task';
@@ -219,17 +231,22 @@ class TaskProvider extends ChangeNotifier {
     _notifiedTasks.add(taskId);
 
     if (status == 'completed') {
+      debugPrint('[TASK_PROV] _notifyTaskCompletion() FIRING ✅ notification for task=$taskId prompt="$promptPreview"');
       _notificationService!.showTaskCompleteNotification(
         taskId: taskId,
         title: '✅ Task Complete',
         body: promptPreview,
       );
     } else if (status == 'failed') {
+      final errMsg = task?.errorMessage ?? 'Task failed';
+      debugPrint('[TASK_PROV] _notifyTaskCompletion() FIRING ❌ notification for task=$taskId error="$errMsg"');
       _notificationService!.showTaskCompleteNotification(
         taskId: taskId,
         title: '❌ Task Failed',
-        body: task?.errorMessage ?? 'Task failed',
+        body: errMsg,
       );
+    } else {
+      debugPrint('[TASK_PROV] _notifyTaskCompletion() SKIP: unknown status=$status');
     }
   }
 
@@ -237,6 +254,7 @@ class TaskProvider extends ChangeNotifier {
     if (_currentTaskId == null) return;
     try {
       final lastTs = _prefs.lastSeenTimestamp;
+      debugPrint('[TASK_PROV] _fetchEvents() polling task=$_currentTaskId since=$lastTs');
       final data = await _api.getEvents(
         _currentTaskId!,
         sinceTimestamp: lastTs,
@@ -245,7 +263,9 @@ class TaskProvider extends ChangeNotifier {
       final newEvents = (data['events'] as List)
           .map((e) => AgentEvent.fromJson(e as Map<String, dynamic>))
           .toList();
-      final taskStatus = data['task_status'] as String;
+      final taskStatus = data['task_status'] as String?;
+
+      debugPrint('[TASK_PROV] _fetchEvents() got ${newEvents.length} events, task_status=$taskStatus');
 
       if (newEvents.isNotEmpty) {
         _events = [..._events, ...newEvents];
@@ -259,15 +279,17 @@ class TaskProvider extends ChangeNotifier {
       // Check if task completed — fire notification DIRECTLY from events API
       // data, NOT dependent on loadTasks() succeeding.
       if (taskStatus == 'completed' || taskStatus == 'failed') {
+        debugPrint('[TASK_PROV] _fetchEvents() task $taskStatus DETECTED!');
         // Fire notification immediately using in-memory task data
-        _notifyTaskCompletion(_currentTaskId!, taskStatus);
+        // taskStatus is non-null here (checked against two string literals above)
+        _notifyTaskCompletion(_currentTaskId!, taskStatus!);
 
         // Notify listener callback if registered
         if (onTaskCompleted != null) {
           final task = _tasks.where((t) => t.id == _currentTaskId).firstOrNull;
           onTaskCompleted!(
             _currentTaskId!,
-            taskStatus,
+            taskStatus!,
             task?.prompt ?? 'Task',
           );
         }
@@ -275,11 +297,16 @@ class TaskProvider extends ChangeNotifier {
         // Stop polling AFTER notification is fired, so if loadTasks() fails,
         // the notification is still shown.
         stopPolling();
+        debugPrint('[TASK_PROV] _fetchEvents() polling stopped, refreshing task list...');
         // Refresh task list (best-effort UI update)
         await loadTasks();
+      } else if (taskStatus == null) {
+        debugPrint('[TASK_PROV] _fetchEvents() task_status is null (task still running or no status yet)');
+      } else {
+        debugPrint('[TASK_PROV] _fetchEvents() task still $taskStatus, continuing poll');
       }
     } catch (e) {
-      debugPrint('_fetchEvents error: $e');
+      debugPrint('[TASK_PROV] _fetchEvents() ERROR: $e');
     }
   }
 

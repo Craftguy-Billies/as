@@ -38,10 +38,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      // Refresh immediately when returning to foreground
+      debugPrint('[HOME] App resumed — triggering immediate refresh');
       context.read<TaskProvider>().refreshTasks();
       _startAutoRefresh();
     } else if (state == AppLifecycleState.paused) {
+      debugPrint('[HOME] App paused — stopping auto-refresh timer');
       _autoRefreshTimer?.cancel();
       _autoRefreshTimer = null;
     }
@@ -49,10 +50,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   void _startAutoRefresh() {
     _autoRefreshTimer?.cancel();
+    debugPrint('[HOME] Starting auto-refresh timer (5s interval)');
     // Refresh every 5 seconds while on home screen — GET /api/tasks is
     // read-only (zero KV writes), so this costs nothing in quota.
     _autoRefreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (mounted) {
+        debugPrint('[HOME] Auto-refresh tick — calling refreshTasks()');
         context.read<TaskProvider>().refreshTasks();
       }
     });
@@ -224,7 +227,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     : Stack(
                         children: [
                           RefreshIndicator(
-                            onRefresh: () => taskProv.loadTasks(),
+                            onRefresh: () => taskProv.refreshTasks(),
                             child: ListView.builder(
                               padding: const EdgeInsets.symmetric(vertical: 8),
                               itemCount: taskProv.tasks.length,
