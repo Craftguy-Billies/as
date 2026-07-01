@@ -122,8 +122,9 @@ class NotificationService {
               allowFreeFormInput: true,
             ),
           ],
-          showsUserInterface: true,
-          cancelNotification: true,
+          showsUserInterface: false,
+          cancelNotification: false,
+          semanticAction: SemanticAction.reply,
         ),
         // Open action
         const AndroidNotificationAction(
@@ -131,6 +132,7 @@ class NotificationService {
           'Open',
           showsUserInterface: true,
           cancelNotification: false,
+          semanticAction: SemanticAction.none,
         ),
       ],
     );

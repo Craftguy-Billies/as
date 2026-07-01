@@ -65,47 +65,6 @@ def _get_headers() -> dict:
     }
 
 
-def send_reply_to_conversation(
-    conversation_id: str,
-    message: str,
-) -> dict:
-    """Send a follow-up user message to an existing conversation via the Cloud API.
-
-    Uses POST /api/v1/app-conversations/{conversation_id}/send-message.
-
-    Args:
-        conversation_id: The OpenHands conversation UUID.
-        message: The user's reply text.
-
-    Returns:
-        dict with success status and message.
-    """
-    api_key = os.getenv("OPENHANDS_CLOUD_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("OPENHANDS_CLOUD_API_KEY not set")
-
-    headers = _get_headers()
-    body = {
-        "role": "user",
-        "content": [
-            {
-                "type": "text",
-                "text": message,
-            }
-        ],
-        "run": True,
-    }
-
-    resp = httpx.post(
-        f"{CLOUD_API_URL}/api/v1/app-conversations/{conversation_id}/send-message",
-        headers=headers,
-        json=body,
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
 def _serialize_cloud_event(event: dict, index: int) -> dict:
     """Convert a Cloud API event into our storage format."""
     return {
@@ -141,6 +100,9 @@ def _build_prompt_text(prompt: str, repo: str, branch: str, mode: str) -> str:
 def send_reply_sync(conversation_id: str, message: str) -> dict:
     """Send a reply message to an existing OpenHands Cloud conversation.
 
+    Uses POST /api/v1/app-conversations/{conversation_id}/send-message
+    (see https://docs.openhands.dev/openhands/usage/cloud/cloud-api).
+
     Args:
         conversation_id: The OpenHands Cloud conversation ID.
         message: The message text to send.
@@ -153,13 +115,16 @@ def send_reply_sync(conversation_id: str, message: str) -> dict:
         raise RuntimeError("OPENHANDS_CLOUD_API_KEY not set")
 
     headers = _get_headers()
+    body = {
+        "role": "user",
+        "content": [{"type": "text", "text": message}],
+        "run": True,
+    }
     try:
         resp = httpx.post(
-            f"{CLOUD_API_URL}/api/v1/conversation/{conversation_id}/messages",
+            f"{CLOUD_API_URL}/api/v1/app-conversations/{conversation_id}/send-message",
             headers=headers,
-            json={
-                "content": [{"type": "text", "text": message}],
-            },
+            json=body,
             timeout=30,
         )
         resp.raise_for_status()
