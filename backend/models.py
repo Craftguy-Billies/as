@@ -18,6 +18,10 @@ class LLMConfigRequest(BaseModel):
     base_url: Optional[str] = None
 
 
+class ReplyRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=10000)
+
+
 class FCMTokenRequest(BaseModel):
     token: str = Field(..., min_length=1)
 

@@ -5,6 +5,9 @@ import '../models/event.dart';
 import '../services/api_service.dart';
 import '../services/preferences_service.dart';
 
+/// Callback when a task transitions to completed/failed during polling.
+typedef TaskStatusCallback = void Function(String taskId, String status, String prompt);
+
 class TaskProvider extends ChangeNotifier {
   final ApiService _api;
   final PreferencesService _prefs;
@@ -18,6 +21,9 @@ class TaskProvider extends ChangeNotifier {
   String? _currentTaskId;
   Timer? _pollTimer;
   bool _autoScroll = true;
+
+  /// Called when a task becomes completed or failed during polling.
+  TaskStatusCallback? onTaskCompleted;
 
   TaskProvider(this._api, this._prefs);
 
@@ -153,6 +159,15 @@ class TaskProvider extends ChangeNotifier {
         stopPolling();
         // Refresh task list
         await loadTasks();
+        // Notify listener about completion (for local notification)
+        if (onTaskCompleted != null) {
+          final task = _tasks.where((t) => t.id == _currentTaskId).firstOrNull;
+          onTaskCompleted!(
+            _currentTaskId!,
+            taskStatus,
+            task?.prompt ?? 'Task',
+          );
+        }
       }
     } catch (_) {}
   }

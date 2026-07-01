@@ -18,6 +18,7 @@ from database import get_db_ctx, init_db
 from models import (
     PromptRequest,
     LLMConfigRequest,
+    ReplyRequest,
     FCMTokenRequest,
     TaskResponse,
     EventResponse,
@@ -25,7 +26,7 @@ from models import (
     TasksListResponse,
     EventsListResponse,
 )
-from agent_runner import get_llm_config, set_llm_config, AgentConfig
+from agent_runner import get_llm_config, set_llm_config, AgentConfig, send_reply_sync
 from worker import start_worker, stop_worker
 from fcm_service import init_firebase
 
@@ -260,6 +261,34 @@ async def get_events(
         has_more=has_more,
         task_status=task["status"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Reply
+# ---------------------------------------------------------------------------
+
+@app.post("/api/tasks/{task_id}/reply")
+async def reply_to_task(task_id: str, req: ReplyRequest):
+    """Send a reply message to an existing conversation for a completed task."""
+    async with get_db_ctx() as db:
+        cursor = await db.execute(
+            "SELECT status, conversation_id FROM tasks WHERE id = ?",
+            (task_id,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        conv_id = row["conversation_id"]
+        if not conv_id:
+            raise HTTPException(status_code=400, detail="Task has no conversation (not started yet)")
+
+    # Send reply via OpenHands Cloud API
+    result = send_reply_sync(conv_id, req.message)
+    if result["status"] == "failed":
+        raise HTTPException(status_code=502, detail=result.get("error_message", "Failed to send reply"))
+
+    return {"status": "sent", "conversation_id": conv_id}
 
 
 # ---------------------------------------------------------------------------

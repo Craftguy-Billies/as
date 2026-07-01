@@ -97,6 +97,44 @@ def _build_prompt_text(prompt: str, repo: str, branch: str, mode: str) -> str:
         return base + prompt
 
 
+def send_reply_sync(conversation_id: str, message: str) -> dict:
+    """Send a reply message to an existing OpenHands Cloud conversation.
+
+    Args:
+        conversation_id: The OpenHands Cloud conversation ID.
+        message: The message text to send.
+
+    Returns:
+        dict with success status.
+    """
+    api_key = os.getenv("OPENHANDS_CLOUD_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("OPENHANDS_CLOUD_API_KEY not set")
+
+    headers = _get_headers()
+    try:
+        resp = httpx.post(
+            f"{CLOUD_API_URL}/api/v1/conversation/{conversation_id}/messages",
+            headers=headers,
+            json={
+                "content": [{"type": "text", "text": message}],
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return {"status": "sent"}
+    except httpx.HTTPStatusError as e:
+        return {
+            "status": "failed",
+            "error_message": f"API error {e.response.status_code}: {e.response.text[:200]}",
+        }
+    except Exception as e:
+        return {
+            "status": "failed",
+            "error_message": f"{type(e).__name__}: {str(e)}",
+        }
+
+
 def run_conversation_sync(
     prompt: str,
     repo: str,
