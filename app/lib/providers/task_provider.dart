@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/task.dart';
 import '../models/event.dart';
 import '../services/api_service.dart';
@@ -103,10 +104,12 @@ class TaskProvider extends ChangeNotifier {
   /// Fire local notifications for any completed/failed tasks not yet notified.
   void _checkCompletedTasks() {
     debugPrint('[TASK_PROV] _checkCompletedTasks() checking ${_tasks.length} tasks');
+    final newlyNotified = <String>[];
     for (final task in _tasks) {
       if (task.isCompleted && !_notifiedTasks.contains(task.id)) {
         debugPrint('[TASK_PROV] Found completed (unnotified): ${task.id}');
         _notifiedTasks.add(task.id);
+        newlyNotified.add(task.id);
         final preview = task.prompt.length > 80
             ? '${task.prompt.substring(0, 80)}...'
             : task.prompt;
@@ -119,12 +122,17 @@ class TaskProvider extends ChangeNotifier {
       if (task.isFailed && !_notifiedTasks.contains(task.id)) {
         debugPrint('[TASK_PROV] Found failed (unnotified): ${task.id}');
         _notifiedTasks.add(task.id);
+        newlyNotified.add(task.id);
         _notificationService?.showTaskCompleteNotification(
           taskId: task.id,
           title: '❌ Task Failed',
           body: task.errorMessage ?? 'Task failed',
         );
       }
+    }
+    // Sync to SharedPreferences so background WorkManager doesn't re-notify
+    if (newlyNotified.isNotEmpty) {
+      _persistNotifiedBgIds(newlyNotified);
     }
     debugPrint('[TASK_PROV] _checkCompletedTasks() done, _notifiedTasks=${_notifiedTasks.length}');
   }
@@ -270,6 +278,20 @@ class TaskProvider extends ChangeNotifier {
       title: status == 'completed' ? '✅ Task Complete' : '❌ Task Failed',
       body: status == 'failed' ? (task?.errorMessage ?? 'Task failed') : preview,
     );
+
+    // Sync to SharedPreferences so background WorkManager doesn't re-notify
+    _persistNotifiedBgIds([taskId]);
+  }
+
+  /// Write notified task IDs to SharedPreferences so background WorkManager
+  /// (which uses its own dedup set) doesn't re-notify the same tasks.
+  void _persistNotifiedBgIds(List<String> ids) {
+    SharedPreferences.getInstance().then((prefs) {
+      final existing = prefs.getStringList('bg_notified_tasks') ?? [];
+      final updated = {...existing, ...ids}.toList();
+      prefs.setStringList('bg_notified_tasks', updated);
+      debugPrint('[TASK_PROV] Synced ${ids.length} IDs to bg_notified_tasks (total=${updated.length})');
+    });
   }
 
   Future<void> _fetchEvents() async {
