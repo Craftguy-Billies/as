@@ -16,6 +16,7 @@ class TaskProvider extends ChangeNotifier {
 
   List<Task> _tasks = [];
   bool _loading = false;
+  bool _refreshing = false;
   String? _error;
 
   // Live feed state
@@ -39,6 +40,7 @@ class TaskProvider extends ChangeNotifier {
   List<Task> get tasks => _tasks;
   List<AgentEvent> get events => _events;
   bool get loading => _loading;
+  bool get refreshing => _refreshing;
   String? get error => _error;
   String? get currentTaskId => _currentTaskId;
   bool get autoScroll => _autoScroll;
@@ -48,6 +50,7 @@ class TaskProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Full load with loading spinner.
   Future<void> loadTasks({String? statusFilter}) async {
     _loading = true;
     _error = null;
@@ -58,9 +61,28 @@ class TaskProvider extends ChangeNotifier {
       checkCompletedTasks();
     } catch (e) {
       _error = e.toString();
+      debugPrint('loadTasks error: $e');
     }
 
     _loading = false;
+    notifyListeners();
+  }
+
+  /// Background refresh without showing full-screen spinner.
+  Future<void> refreshTasks() async {
+    _refreshing = true;
+    _error = null;
+    notifyListeners();
+
+    try {
+      _tasks = await _api.listTasks();
+      checkCompletedTasks();
+    } catch (e) {
+      _error = e.toString();
+      debugPrint('refreshTasks error: $e');
+    }
+
+    _refreshing = false;
     notifyListeners();
   }
 
@@ -183,6 +205,34 @@ class TaskProvider extends ChangeNotifier {
     }
   }
 
+  /// Fire a local notification for a completed/failed task.
+  /// Uses task data from the in-memory _tasks list (not dependent on API).
+  void _notifyTaskCompletion(String taskId, String status) {
+    if (_notifiedTasks.contains(taskId)) return;
+    if (_notificationService == null) return;
+
+    final task = _tasks.where((t) => t.id == taskId).firstOrNull;
+    final prompt = task?.prompt ?? 'Task';
+    final promptPreview =
+        prompt.length > 80 ? '${prompt.substring(0, 80)}...' : prompt;
+
+    _notifiedTasks.add(taskId);
+
+    if (status == 'completed') {
+      _notificationService!.showTaskCompleteNotification(
+        taskId: taskId,
+        title: '✅ Task Complete',
+        body: promptPreview,
+      );
+    } else if (status == 'failed') {
+      _notificationService!.showTaskCompleteNotification(
+        taskId: taskId,
+        title: '❌ Task Failed',
+        body: task?.errorMessage ?? 'Task failed',
+      );
+    }
+  }
+
   Future<void> _fetchEvents() async {
     if (_currentTaskId == null) return;
     try {
@@ -206,12 +256,13 @@ class TaskProvider extends ChangeNotifier {
         notifyListeners();
       }
 
-      // Check if task completed
+      // Check if task completed — fire notification DIRECTLY from events API
+      // data, NOT dependent on loadTasks() succeeding.
       if (taskStatus == 'completed' || taskStatus == 'failed') {
-        stopPolling();
-        // Refresh task list (also triggers notification)
-        await loadTasks();
-        // Notify listener about completion (for local notification)
+        // Fire notification immediately using in-memory task data
+        _notifyTaskCompletion(_currentTaskId!, taskStatus);
+
+        // Notify listener callback if registered
         if (onTaskCompleted != null) {
           final task = _tasks.where((t) => t.id == _currentTaskId).firstOrNull;
           onTaskCompleted!(
@@ -220,8 +271,16 @@ class TaskProvider extends ChangeNotifier {
             task?.prompt ?? 'Task',
           );
         }
+
+        // Stop polling AFTER notification is fired, so if loadTasks() fails,
+        // the notification is still shown.
+        stopPolling();
+        // Refresh task list (best-effort UI update)
+        await loadTasks();
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('_fetchEvents error: $e');
+    }
   }
 
   @override
