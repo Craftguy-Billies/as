@@ -344,11 +344,9 @@ class TaskProvider extends ChangeNotifier {
       _consecutiveFailures++;
       _feedError = ApiService.friendlyError(e);
       debugPrint('[TASK_PROV] _fetchEvents($taskId) ERROR (attempt $_consecutiveFailures/$_maxFailures): $e');
+      // Keep polling even after max failures — the timer will retry and
+      // auto-recover when the network/server comes back.
       _safeNotify();
-      if (_consecutiveFailures >= _maxFailures) {
-        debugPrint('[TASK_PROV] _fetchEvents($taskId) MAX FAILURES, stopping');
-        stopPolling();
-      }
     }
   }
 
