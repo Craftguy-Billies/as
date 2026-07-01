@@ -4,13 +4,16 @@ import '../models/task.dart';
 import '../models/event.dart';
 import '../services/api_service.dart';
 import '../services/preferences_service.dart';
+import '../services/notification_service.dart';
 
 class TaskProvider extends ChangeNotifier {
   final ApiService _api;
   final PreferencesService _prefs;
+  NotificationService? _notificationService;
 
   List<Task> _tasks = [];
   bool _loading = false;
+  bool _refreshing = false;
   String? _error;
 
   // Live feed state
@@ -23,7 +26,15 @@ class TaskProvider extends ChangeNotifier {
   int _consecutiveFailures = 0;
   static const int _maxFailures = 5;
 
+  // Track tasks already notified via local notification (prevents duplicates)
+  final Set<String> _notifiedTasks = {};
+
   TaskProvider(this._api, this._prefs);
+
+  void setNotificationService(NotificationService ns) {
+    _notificationService = ns;
+    debugPrint('[TASK_PROV] NotificationService wired');
+  }
 
   @override
   void dispose() {
@@ -39,6 +50,7 @@ class TaskProvider extends ChangeNotifier {
   List<Task> get tasks => _tasks;
   List<AgentEvent> get events => _events;
   bool get loading => _loading;
+  bool get refreshing => _refreshing;
   String? get error => _error;
   String? get currentTaskId => _currentTaskId;
   bool get autoScroll => _autoScroll;
@@ -50,17 +62,71 @@ class TaskProvider extends ChangeNotifier {
   }
 
   Future<void> loadTasks({String? statusFilter}) async {
+    debugPrint('[TASK_PROV] loadTasks() statusFilter=$statusFilter');
     _loading = true;
     _error = null;
+    _safeNotify();
 
     try {
       _tasks = await _api.listTasks(status: statusFilter);
+      debugPrint('[TASK_PROV] loadTasks() got ${_tasks.length} tasks');
+      _checkCompletedTasks();
     } catch (e) {
+      debugPrint('[TASK_PROV] loadTasks() ERROR: $e');
       _error = ApiService.friendlyError(e);
     }
 
     _loading = false;
     _safeNotify();
+  }
+
+  /// Background refresh without showing full-screen spinner.
+  Future<void> refreshTasks() async {
+    debugPrint('[TASK_PROV] refreshTasks()');
+    _refreshing = true;
+    _error = null;
+    _safeNotify();
+
+    try {
+      _tasks = await _api.listTasks();
+      debugPrint('[TASK_PROV] refreshTasks() got ${_tasks.length} tasks');
+      _checkCompletedTasks();
+    } catch (e) {
+      debugPrint('[TASK_PROV] refreshTasks() ERROR: $e');
+      _error = ApiService.friendlyError(e);
+    }
+
+    _refreshing = false;
+    _safeNotify();
+  }
+
+  /// Fire local notifications for any completed/failed tasks not yet notified.
+  void _checkCompletedTasks() {
+    debugPrint('[TASK_PROV] _checkCompletedTasks() checking ${_tasks.length} tasks');
+    for (final task in _tasks) {
+      if (task.isCompleted && !_notifiedTasks.contains(task.id)) {
+        debugPrint('[TASK_PROV] Found completed (unnotified): ${task.id}');
+        _notifiedTasks.add(task.id);
+        final preview = task.prompt.length > 80
+            ? '${task.prompt.substring(0, 80)}...'
+            : task.prompt;
+        _notificationService?.showTaskCompleteNotification(
+          taskId: task.id,
+          title: '✅ Task Complete',
+          body: preview,
+        );
+      }
+      if (task.isFailed && !_notifiedTasks.contains(task.id)) {
+        debugPrint('[TASK_PROV] Found failed (unnotified): ${task.id}');
+        _notifiedTasks.add(task.id);
+        _notificationService?.showTaskCompleteNotification(
+          taskId: task.id,
+          title: '❌ Task Failed',
+          body: task.errorMessage ?? 'Task failed',
+        );
+      }
+    }
+    debugPrint('[TASK_PROV] _checkCompletedTasks() done, _notifiedTasks=${_notifiedTasks.length}');
   }
 
   Future<Task?> createPrompt({
@@ -179,6 +245,33 @@ class TaskProvider extends ChangeNotifier {
     }
   }
 
+  /// Fire a local notification directly from events API data.
+  /// Called BEFORE stopPolling() so retries work on failure.
+  /// Called BEFORE loadTasks() so it works even if the list reload fails.
+  void _notifyTaskCompletion(String taskId, String status) {
+    if (_notifiedTasks.contains(taskId)) {
+      debugPrint('[TASK_PROV] _notifyTaskCompletion($taskId) already notified, skip');
+      return;
+    }
+    if (_notificationService == null) {
+      debugPrint('[TASK_PROV] _notifyTaskCompletion($taskId) no service, skip');
+      return;
+    }
+
+    final task = _tasks.where((t) => t.id == taskId).firstOrNull;
+    final prompt = task?.prompt ?? 'Task';
+    final preview = prompt.length > 80 ? '${prompt.substring(0, 80)}...' : prompt;
+
+    _notifiedTasks.add(taskId);
+    debugPrint('[TASK_PROV] _notifyTaskCompletion($taskId) status=$status');
+
+    _notificationService!.showTaskCompleteNotification(
+      taskId: taskId,
+      title: status == 'completed' ? '✅ Task Complete' : '❌ Task Failed',
+      body: status == 'failed' ? (task?.errorMessage ?? 'Task failed') : preview,
+    );
+  }
+
   Future<void> _fetchEvents() async {
     if (_currentTaskId == null) return;
     final taskId = _currentTaskId!; // snapshot for this fetch cycle
@@ -202,16 +295,23 @@ class TaskProvider extends ChangeNotifier {
       if (newEvents.isNotEmpty) {
         _events = [..._events, ...newEvents];
         _prefs.setLastSeenTimestamp(newEvents.last.timestamp);
+        debugPrint('[TASK_PROV] _fetchEvents($taskId) ${newEvents.length} events, status=$taskStatus');
       }
 
       // Update inline task status so list tile reflects current state
       final taskIdx = _tasks.indexWhere((t) => t.id == taskId);
       if (taskIdx != -1 && _tasks[taskIdx].status != taskStatus) {
+        debugPrint('[TASK_PROV] _fetchEvents($taskId) status: ${_tasks[taskIdx].status} -> $taskStatus');
         _tasks[taskIdx] = _tasks[taskIdx].copyWith(status: taskStatus);
       }
 
       if (taskStatus == 'completed' || taskStatus == 'failed') {
+        debugPrint('[TASK_PROV] _fetchEvents($taskId) DETECTED $taskStatus');
+        // Fire notification DIRECTLY from events API — NOT dependent on loadTasks()
+        _notifyTaskCompletion(taskId, taskStatus);
+        // Stop polling AFTER notification fires, so retry works on failure
         stopPolling();
+        // Best-effort refresh of task list (may fail, notification already fired)
         await loadTasks();
       }
 
@@ -221,8 +321,10 @@ class TaskProvider extends ChangeNotifier {
       if (_currentTaskId != taskId) return;
       _consecutiveFailures++;
       _feedError = ApiService.friendlyError(e);
+      debugPrint('[TASK_PROV] _fetchEvents($taskId) ERROR (attempt $_consecutiveFailures/$_maxFailures): $e');
       _safeNotify();
       if (_consecutiveFailures >= _maxFailures) {
+        debugPrint('[TASK_PROV] _fetchEvents($taskId) MAX FAILURES, stopping');
         stopPolling();
       }
     }

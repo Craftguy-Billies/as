@@ -16,18 +16,54 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final _promptCtrl = TextEditingController();
   final _repoCtrl = TextEditingController();
   final _branchCtrl = TextEditingController();
   // _mode removed (always 'code')
   bool _sending = false;
+  Timer? _autoRefreshTimer;
 
   @override
   void initState() {
     super.initState();
-
+    WidgetsBinding.instance.addObserver(this);
+    _startAutoRefresh();
     WidgetsBinding.instance.addPostFrameCallback((_) => _init());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _autoRefreshTimer?.cancel();
+    _autoRefreshTimer = null;
+    _promptCtrl.dispose();
+    _repoCtrl.dispose();
+    _branchCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      debugPrint('[HOME] App resumed — refreshing tasks');
+      context.read<TaskProvider>().refreshTasks();
+      _startAutoRefresh();
+    } else if (state == AppLifecycleState.paused) {
+      debugPrint('[HOME] App paused — stopping auto-refresh');
+      _autoRefreshTimer?.cancel();
+      _autoRefreshTimer = null;
+    }
+  }
+
+  void _startAutoRefresh() {
+    _autoRefreshTimer?.cancel();
+    _autoRefreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (mounted) {
+        context.read<TaskProvider>().refreshTasks();
+      }
+    });
+    debugPrint('[HOME] Auto-refresh timer started (5s interval)');
   }
 
   Future<void> _init() async {
@@ -91,13 +127,7 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (_) {}
   }
 
-  @override
-  void dispose() {
-    _promptCtrl.dispose();
-    _repoCtrl.dispose();
-    _branchCtrl.dispose();
-    super.dispose();
-  }
+
 
   Future<void> _sendPrompt() async {
     final prompt = _promptCtrl.text.trim();
@@ -356,7 +386,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
           // Task list
           Expanded(
-            child: taskProv.loading
+            child: taskProv.loading && taskProv.tasks.isEmpty
                 ? const Center(child: CircularProgressIndicator())
                 : taskProv.tasks.isEmpty
                     ? Center(
@@ -377,24 +407,38 @@ class _HomeScreenState extends State<HomeScreen> {
                           ],
                         ),
                       )
-                    : RefreshIndicator(
-                        onRefresh: () => taskProv.loadTasks(),
-                        child: ListView.builder(
-                          padding: const EdgeInsets.symmetric(vertical: 8),
-                          itemCount: taskProv.tasks.length,
-                          itemBuilder: (context, i) {
-                            final task = taskProv.tasks[i];
-                            return TaskTile(
-                              task: task,
-                              onTap: () =>
-                                  Navigator.pushNamed(context, '/tasks/${task.id}'),
-                              onDelete: () => taskProv.deleteTask(task.id),
-                              onRetry: task.isFailed
-                                  ? () => taskProv.retryTask(task.id)
-                                  : null,
-                            );
-                          },
-                        ),
+                    : Stack(
+                        children: [
+                          RefreshIndicator(
+                            onRefresh: () => taskProv.loadTasks(),
+                            child: ListView.builder(
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              itemCount: taskProv.tasks.length,
+                              itemBuilder: (context, i) {
+                                final task = taskProv.tasks[i];
+                                return TaskTile(
+                                  task: task,
+                                  onTap: () =>
+                                      Navigator.pushNamed(context, '/tasks/${task.id}'),
+                                  onDelete: () => taskProv.deleteTask(task.id),
+                                  onRetry: task.isFailed
+                                      ? () => taskProv.retryTask(task.id)
+                                      : null,
+                                );
+                              },
+                            ),
+                          ),
+                          if (taskProv.refreshing)
+                            const Positioned(
+                              top: 0, left: 0, right: 0,
+                              child: LinearProgressIndicator(
+                                backgroundColor: Colors.transparent,
+                                minHeight: 2,
+                                valueColor:
+                                    AlwaysStoppedAnimation<Color>(Color(0xFF7C3AED)),
+                              ),
+                            ),
+                        ],
                       ),
           ),
         ],

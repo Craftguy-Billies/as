@@ -5,6 +5,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'services/api_service.dart';
 import 'services/preferences_service.dart';
 import 'services/notification_service.dart';
+import 'services/background_service.dart';
 import 'providers/task_provider.dart';
 import 'providers/settings_provider.dart';
 import 'screens/home_screen.dart';
@@ -18,25 +19,35 @@ import 'providers/chat_provider.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   if (!kIsWeb) {
-    try { await Firebase.initializeApp(); } catch (e) { debugPrint('Firebase init failed: $e'); }
+    try { await Firebase.initializeApp(); } catch (e) { debugPrint('[MAIN] Firebase init failed: $e'); }
   }
   final prefs = PreferencesService();
   try { await prefs.init(); } catch (_) { /* prefs unavailable — defaults used */ }
   final api = ApiService();
   api.setBaseUrl(prefs.serverUrl);
+
+  // Initialize background service (WorkManager) for periodic task polling
+  await initBackgroundService();
+
   NotificationService? ns;
+  TaskProvider? taskProvider;
   if (!kIsWeb) {
     ns = NotificationService(api);
-    try { await ns.initialize(); } catch (_) {}
+    try { await ns.initialize(); } catch (e) { debugPrint('Notification init failed: $e'); }
+    taskProvider = TaskProvider(api, prefs);
+    taskProvider.setNotificationService(ns);
+  } else {
+    taskProvider = TaskProvider(api, prefs);
   }
-  runApp(VibeCodeApp(api: api, prefs: prefs, ns: ns));
+  runApp(VibeCodeApp(api: api, prefs: prefs, ns: ns, taskProvider: taskProvider));
 }
 
 class VibeCodeApp extends StatefulWidget {
   final ApiService api;
   final PreferencesService prefs;
   final NotificationService? ns;
-  const VibeCodeApp({super.key, required this.api, required this.prefs, this.ns});
+  final TaskProvider taskProvider;
+  const VibeCodeApp({super.key, required this.api, required this.prefs, this.ns, required this.taskProvider});
 
   @override
   State<VibeCodeApp> createState() => _VibeCodeAppState();
@@ -73,7 +84,7 @@ class _VibeCodeAppState extends State<VibeCodeApp> {
     return MultiProvider(
       providers: [
         Provider.value(value: widget.prefs),
-        ChangeNotifierProvider(create: (_) => TaskProvider(widget.api, widget.prefs)),
+        ChangeNotifierProvider.value(value: widget.taskProvider),
         ChangeNotifierProvider(create: (_) => SettingsProvider(widget.api, widget.prefs)),
         ChangeNotifierProvider(create: (_) => ChatProvider(widget.api)),
       ],
