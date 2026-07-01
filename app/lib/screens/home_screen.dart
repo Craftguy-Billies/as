@@ -58,9 +58,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   void _startAutoRefresh() {
     _autoRefreshTimer?.cancel();
-    _autoRefreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+    _autoRefreshTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+      if (!mounted) return;
+      final taskProv = context.read<TaskProvider>();
+      await taskProv.refreshTasks();
+      // Recovery: if we were stuck on "Cannot connect" but refreshTasks()
+      // succeeded (no error), re-test connection to restore the UI.
       if (mounted) {
-        context.read<TaskProvider>().refreshTasks();
+        final settings = context.read<SettingsProvider>();
+        if (settings.connected == false && taskProv.error == null) {
+          debugPrint('[HOME] refreshTasks succeeded while disconnected — recovering connection state');
+          await settings.testConnection();
+        }
       }
     });
     debugPrint('[HOME] Auto-refresh timer started (5s interval)');
