@@ -26,7 +26,7 @@ from models import (
     TasksListResponse,
     EventsListResponse,
 )
-from agent_runner import get_llm_config, set_llm_config, AgentConfig, send_reply_sync
+from agent_runner import get_llm_config, set_llm_config, AgentConfig, send_reply_to_conversation, send_reply_sync
 from worker import start_worker, stop_worker
 from fcm_service import init_firebase
 
@@ -264,34 +264,6 @@ async def get_events(
 
 
 # ---------------------------------------------------------------------------
-# Reply
-# ---------------------------------------------------------------------------
-
-@app.post("/api/tasks/{task_id}/reply")
-async def reply_to_task(task_id: str, req: ReplyRequest):
-    """Send a reply message to an existing conversation for a completed task."""
-    async with get_db_ctx() as db:
-        cursor = await db.execute(
-            "SELECT status, conversation_id FROM tasks WHERE id = ?",
-            (task_id,),
-        )
-        row = await cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Task not found")
-
-        conv_id = row["conversation_id"]
-        if not conv_id:
-            raise HTTPException(status_code=400, detail="Task has no conversation (not started yet)")
-
-    # Send reply via OpenHands Cloud API
-    result = send_reply_sync(conv_id, req.message)
-    if result["status"] == "failed":
-        raise HTTPException(status_code=502, detail=result.get("error_message", "Failed to send reply"))
-
-    return {"status": "sent", "conversation_id": conv_id}
-
-
-# ---------------------------------------------------------------------------
 # FCM Token
 # ---------------------------------------------------------------------------
 
@@ -306,6 +278,35 @@ async def register_fcm_token(req: FCMTokenRequest):
         )
         await db.commit()
     return {"status": "registered"}
+
+
+# ---------------------------------------------------------------------------
+# Reply to task
+# ---------------------------------------------------------------------------
+
+@app.post("/api/tasks/{task_id}/reply")
+async def reply_to_task(task_id: str, req: ReplyRequest):
+    """Send a reply message to an existing task's conversation."""
+    async with get_db_ctx() as db:
+        cursor = await db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        task = await cursor.fetchone()
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        conversation_id = task["conversation_id"]
+        if not conversation_id:
+            raise HTTPException(status_code=400, detail="Task has no active conversation")
+
+    try:
+        result = send_reply_sync(
+            conversation_id=conversation_id,
+            message=req.message,
+        )
+        logger.info(f"Reply sent to task {task_id}, conversation {conversation_id}: {result}")
+        return {"status": "sent", "conversation_id": conversation_id}
+    except Exception as e:
+        logger.error(f"Failed to send reply for task {task_id}: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to send reply: {str(e)}")
 
 
 # ---------------------------------------------------------------------------

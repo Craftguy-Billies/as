@@ -4,6 +4,7 @@ import '../models/task.dart';
 import '../models/event.dart';
 import '../services/api_service.dart';
 import '../services/preferences_service.dart';
+import '../services/notification_service.dart';
 
 /// Callback when a task transitions to completed/failed during polling.
 typedef TaskStatusCallback = void Function(String taskId, String status, String prompt);
@@ -11,6 +12,7 @@ typedef TaskStatusCallback = void Function(String taskId, String status, String 
 class TaskProvider extends ChangeNotifier {
   final ApiService _api;
   final PreferencesService _prefs;
+  NotificationService? _notificationService;
 
   List<Task> _tasks = [];
   bool _loading = false;
@@ -25,7 +27,14 @@ class TaskProvider extends ChangeNotifier {
   /// Called when a task becomes completed or failed during polling.
   TaskStatusCallback? onTaskCompleted;
 
+  // Keep track of tasks we already notified about
+  final Set<String> _notifiedTasks = {};
+
   TaskProvider(this._api, this._prefs);
+
+  void setNotificationService(NotificationService ns) {
+    _notificationService = ns;
+  }
 
   List<Task> get tasks => _tasks;
   List<AgentEvent> get events => _events;
@@ -46,6 +55,7 @@ class TaskProvider extends ChangeNotifier {
 
     try {
       _tasks = await _api.listTasks(status: statusFilter);
+      checkCompletedTasks();
     } catch (e) {
       _error = e.toString();
     }
@@ -86,6 +96,48 @@ class TaskProvider extends ChangeNotifier {
     } catch (e) {
       _error = e.toString();
       notifyListeners();
+    }
+  }
+
+  /// Check all loaded tasks for completion and show local notifications
+  /// for any that haven't been notified yet.
+  void checkCompletedTasks() {
+    for (final task in _tasks) {
+      if (task.isCompleted && !_notifiedTasks.contains(task.id)) {
+        _notifiedTasks.add(task.id);
+        final promptPreview =
+            task.prompt.length > 80
+                ? '${task.prompt.substring(0, 80)}...'
+                : task.prompt;
+        _notificationService?.showTaskCompleteNotification(
+          taskId: task.id,
+          title: '✅ Task Complete',
+          body: promptPreview,
+        );
+      }
+      if (task.isFailed && !_notifiedTasks.contains(task.id)) {
+        _notifiedTasks.add(task.id);
+        _notificationService?.showTaskCompleteNotification(
+          taskId: task.id,
+          title: '❌ Task Failed',
+          body: task.errorMessage ?? 'Task failed',
+        );
+      }
+    }
+  }
+
+  /// Process any pending replies from notification actions and send them
+  /// to the backend.
+  Future<void> processPendingReplies() async {
+    final ns = _notificationService;
+    if (ns == null) return;
+    final replies = await ns.getPendingReplies();
+    for (final reply in replies) {
+      final taskId = reply['taskId'] ?? '';
+      final message = reply['message'] ?? '';
+      if (taskId.isNotEmpty && message.isNotEmpty) {
+        await _api.sendReply(taskId, message);
+      }
     }
   }
 
@@ -157,7 +209,7 @@ class TaskProvider extends ChangeNotifier {
       // Check if task completed
       if (taskStatus == 'completed' || taskStatus == 'failed') {
         stopPolling();
-        // Refresh task list
+        // Refresh task list (also triggers notification)
         await loadTasks();
         // Notify listener about completion (for local notification)
         if (onTaskCompleted != null) {

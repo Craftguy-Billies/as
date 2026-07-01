@@ -22,7 +22,6 @@ class NotificationService {
   NotificationService(this._api);
 
   Future<void> initialize() async {
-    // Initialize local notifications
     const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
     const iosSettings = DarwinInitializationSettings(
       requestAlertPermission: true,
@@ -79,7 +78,7 @@ class NotificationService {
         });
       }
 
-      // Foreground data messages -> show local notification
+      // Foreground messages (from FCM)
       FirebaseMessaging.onMessage.listen(_handleFcmMessage);
 
       // Background tap on FCM notification
@@ -162,6 +161,14 @@ class NotificationService {
     await _localNotifications.cancel(id: taskId.hashCode);
   }
 
+  /// Return pending replies stored from notification-triggered sends.
+  /// Kept for compatibility with TaskProvider.processPendingReplies().
+  Future<List<Map<String, String>>> getPendingReplies() async {
+    // The flutter_local_notifications plugin handles reply delivery
+    // synchronously via _handleNotificationResponse, so no pending store needed.
+    return [];
+  }
+
   /// Handle notification action responses (reply, open).
   void _handleNotificationResponse(NotificationResponse response) {
     final taskId = response.payload;
@@ -219,7 +226,6 @@ class NotificationService {
 
   /// Navigate to the live feed screen for a task.
   void _navigateToTask(String taskId) {
-    // Use the global navigator key to navigate
     final context = _navigatorKey.currentContext;
     if (context != null) {
       Navigator.pushNamed(context, '/tasks/$taskId');

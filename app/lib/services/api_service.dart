@@ -121,17 +121,6 @@ class ApiService {
         .toList();
   }
 
-  Future<void> sendReply(String taskId, String message) async {
-    final resp = await http.post(
-      Uri.parse('$_url/api/tasks/$taskId/reply'),
-      headers: {'Content-Type': 'application/json'},
-      body: json.encode({'message': message}),
-    );
-    if (resp.statusCode != 200) {
-      throw Exception('Failed to send reply: ${resp.statusCode} ${resp.body}');
-    }
-  }
-
   Future<void> registerFcmToken(String token) async {
     await http.post(
       Uri.parse('$_url/api/fcm-token'),
@@ -162,5 +151,18 @@ class ApiService {
       if (resp.statusCode == 200) return json.decode(resp.body);
     } catch (_) {}
     return null;
+  }
+
+  Future<bool> sendReply(String taskId, String message) async {
+    try {
+      final resp = await http.post(
+        Uri.parse('$_url/api/tasks/$taskId/reply'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({'message': message}),
+      );
+      return resp.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
   }
 }

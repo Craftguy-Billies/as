@@ -18,18 +18,28 @@ void main() async {
   final api = ApiService();
   if (prefs.serverUrl != null) { api.setBaseUrl(prefs.serverUrl!); }
   final ns = NotificationService(api); await ns.initialize();
-  runApp(VibeCodeApp(api: api, prefs: prefs, notificationService: ns));
+
+  // Setup task provider with notification service
+  final taskProvider = TaskProvider(api, prefs);
+  taskProvider.setNotificationService(ns);
+
+  // Process any pending replies from notification actions
+  await taskProvider.processPendingReplies();
+  await taskProvider.loadTasks();
+
+  runApp(VibeCodeApp(api: api, prefs: prefs, taskProvider: taskProvider, notificationService: ns));
 }
 
 class VibeCodeApp extends StatelessWidget {
   final ApiService api;
   final PreferencesService prefs;
+  final TaskProvider taskProvider;
   final NotificationService notificationService;
-
   const VibeCodeApp({
     super.key,
     required this.api,
     required this.prefs,
+    required this.taskProvider,
     required this.notificationService,
   });
 
@@ -37,24 +47,7 @@ class VibeCodeApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
-        ChangeNotifierProvider(
-          create: (_) {
-            final tp = TaskProvider(api, prefs);
-            // Wire up notification on task completion
-            tp.onTaskCompleted = (taskId, status, prompt) {
-              if (status == 'completed') {
-                notificationService.showTaskCompleteNotification(
-                  taskId: taskId,
-                  title: '✅ Task Complete',
-                  body: prompt.length > 80
-                      ? '${prompt.substring(0, 80)}...'
-                      : prompt,
-                );
-              }
-            };
-            return tp;
-          },
-        ),
+        ChangeNotifierProvider.value(value: taskProvider),
         ChangeNotifierProvider(create: (_) => SettingsProvider(api, prefs)),
       ],
       child: MaterialApp(
