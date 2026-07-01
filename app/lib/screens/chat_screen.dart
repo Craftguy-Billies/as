@@ -17,7 +17,7 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
+class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final _inputCtrl = TextEditingController();
   final _repoCtrl = TextEditingController();
   final _branchCtrl = TextEditingController();
@@ -38,6 +38,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // Desktop: Enter → send (via onSubmitted), Shift+Enter → newline
     // Phone:  Send button → send, no physical Enter key
     _inputFocusNode.onKeyEvent = (node, event) {
@@ -212,7 +213,15 @@ class _ChatScreenState extends State<ChatScreen> {
     _repoDebounceTimer?.cancel();
     _scrollCtrl.dispose();
     _inputFocusNode.dispose();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted) {
+      context.read<ChatProvider>().refreshMessages();
+    }
   }
 
   void _send() {

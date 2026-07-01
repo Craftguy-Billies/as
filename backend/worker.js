@@ -619,6 +619,8 @@ async function fetchResponse(env, convId, state) {
       if (!list.length) { console.log(`[FETCH] conv=${convId}: page ${page} empty — breaking`); break; }
 
       // Check each event in this batch (reversed = most recent first)
+      let bestText = null;  // newest MessageEvent text across all pages
+      let bestTs = '';
       for (let i = list.length - 1; i >= 0; i--) {
         const evt = list[i];
         const kind = evt.kind || evt.type || evt.event || '';
@@ -665,13 +667,20 @@ async function fetchResponse(env, convId, state) {
             }
           }
           if (text) {
-            console.log(`[FETCH] conv=${convId}: found MessageEvent (${text.length} chars) after ${page} pages`);
-            return text;
+            // Don't return yet — keep scanning for newer events.
+            // If this MessageEvent is newer than our best so far, track it.
+            if (!bestTs || strMsgTs > bestTs) {
+              bestText = text;
+              bestTs = strMsgTs;
+              console.log(`[FETCH] conv=${convId}: tracking MessageEvent (${text.length} chars, ts=${strMsgTs})`);
+            }
+            continue;
           }
         }
 
         // Case 2: FinishAction — agent finished with message (no MessageEvent emitted).
         // Format: kind="FinishAction" or ActionEvent with action/tool_name="finish".
+        // FinishAction is always the terminal event — return it immediately.
         const isFinish =
           kind === 'FinishAction' ||
           (kind === 'ActionEvent' && (evt.action === 'finish' || evt.tool_name === 'finish' || evt.name === 'finish'));
@@ -710,6 +719,13 @@ async function fetchResponse(env, convId, state) {
         }
       }
       minTs = strLast;
+    }
+    // After scanning all pages, return the newest non-user MessageEvent (if any).
+    // This avoids returning an early "I'll implement this..." thought from page 0
+    // instead of the final response on a later page.
+    if (bestText) {
+      console.log(`[FETCH] conv=${convId}: returning newest MessageEvent (${bestText.length} chars, ts=${bestTs})`);
+      return bestText;
     }
     console.log(`[FETCH] conv=${convId}: no MessageEvent after ${page} pages`);
   } catch (_) {}
@@ -1109,6 +1125,7 @@ async function route(method, path, url, request, env) {
       state._batch_skip = undefined;
       state._run_started_at = undefined;
       state._error_retry = 0;  // reset retry counter for next batch
+      state._send_retry = 0;
       await writeState(env, repo, state);
     }
     return json({ ok: true, message: `Batch cancelled for ${repo}. Chat history preserved.` });
@@ -1216,11 +1233,19 @@ async function route(method, path, url, request, env) {
       state._run_started_at = undefined;
       state._completed_position = undefined;
       state._error_retry = 0;  // reset retry counter for new batch
+      state._send_retry = 0;
       if (state.conversation_id) {
         try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
       }
     }
-    await writeState(env, repo, state);
+    // Write to KV directly (not writeState) so we can detect failure and
+    // return an error to the client — if the queue state wasn't persisted,
+    // the message is lost forever (next poll reads old state from KV).
+    try {
+      await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
+    } catch (_) {
+      return error('Failed to persist queue state', 500);
+    }
     return json({ status: 'queued', position: state.queue.position, total: state.queue.total });
   }
 
@@ -1251,6 +1276,7 @@ async function route(method, path, url, request, env) {
       state._run_started_at = undefined;  // reset timer for new batch
       state._completed_position = undefined;
       state._error_retry = 0;  // reset retry counter for new batch
+      state._send_retry = 0;
       // Stale retry state from previous batch (same conversation_id) would cause
       // the poll handler to find an old MessageEvent and advance the queue
       // prematurely. Delete it so the retry starts fresh.
@@ -1263,7 +1289,14 @@ async function route(method, path, url, request, env) {
     state.queue.total = state.queue.prompts.length;
     state.queue.cancelled = false;
 
-    await writeState(env, repo, state);
+    // Write to KV directly (not writeState) so we can detect failure and
+    // return an error to the client — if the queue state wasn't persisted,
+    // the message is lost forever (next poll reads old state from KV).
+    try {
+      await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
+    } catch (_) {
+      return error('Failed to persist queue state', 500);
+    }
     return json({ status: 'queued', position: state.queue.position, total: state.queue.total });
   }
 
@@ -1323,6 +1356,7 @@ async function route(method, path, url, request, env) {
       state.last_sent_position = -1;
       state._run_started_at = undefined;
       state._error_retry = 0;  // reset retry counter for next batch
+      state._send_retry = 0;
     }
     await writeState(env, repo, state);
     return json({ ok: true });
@@ -1486,6 +1520,15 @@ async function route(method, path, url, request, env) {
       }
     }
 
+    // Restore _last_response_ts from tiny lrt key if the main state write
+    // failed after a response was found (prevents re-consuming old events).
+    if (state.conversation_id) {
+      const storedLrt = await env.VIBECODE.get(`lrt:${state.conversation_id}`).catch(() => null);
+      if (storedLrt && (!state._last_response_ts || storedLrt > state._last_response_ts)) {
+        state._last_response_ts = storedLrt;
+      }
+    }
+
     // Migration: old code set q.cancelled=true on conv failure, locking the
     // queue. If cancelled but has pending work, clear stale flag and retry.
     let hasPending = q.position < q.total && !q.cancelled;
@@ -1507,6 +1550,7 @@ async function route(method, path, url, request, env) {
       // Reset timer too; next task will set its own.
       state._run_started_at = undefined;
       state._error_retry = 0;  // reset retry counter for next batch
+      state._send_retry = 0;
       state.last_sent_position = -1;
       // Persist so next poll sees clean state.
       await writeState(env, repo, state);
@@ -1638,10 +1682,18 @@ async function route(method, path, url, request, env) {
         // Clearing it causes a new conv attempt every poll (also 429).
         if (String(sendErr).includes('429') || String(sendErr).includes('rate')) {
           console.log(`[POLL] repo=${repo}: rate limited — keeping conv ${state.conversation_id} for retry`);
+          state._send_retry = 0;  // reset on rate limit (transient)
         } else {
-          state.conversation_id = null;
-          state._last_event_ts = "";
-          state.sandbox_id = null;
+          // Non-429 errors: retry up to 3 times before creating a new
+          // conversation. Transient network blips shouldn't lose context.
+          state._send_retry = (state._send_retry || 0) + 1;
+          console.log(`[POLL] repo=${repo}: sendMessage error (retry ${state._send_retry}/3)`);
+          if (state._send_retry >= 3) {
+            state._send_retry = 0;
+            state.conversation_id = null;
+            state._last_event_ts = "";
+            state.sandbox_id = null;
+          }
         }
         await writeState(env, repo, state);
         // Return early — don't fall through to polling block. Otherwise
@@ -1650,6 +1702,7 @@ async function route(method, path, url, request, env) {
         return buildStateResponse(state, q, hasPending, repo, mode, state.conversation_id ? 'pending' : 'idle');
       } else {
         state.last_sent_position = q.position;
+        state._send_retry = 0;  // reset on successful send
         state.messages.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
         state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
         // Write last_sent_position to SEPARATE small KV key FIRST
@@ -1690,6 +1743,8 @@ async function route(method, path, url, request, env) {
         convStatus = 'completed';
         state.messages.push({ id: nextMsgId(state), role: 'assistant', content: directResponse, timestamp: now() });
         state._last_response_ts = new Date().toISOString();
+        // Persist to separate tiny key — survives main state write failures.
+        try { await env.VIBECODE.put(`lrt:${state.conversation_id}`, state._last_response_ts); } catch (_) {}
         q.position++;
         q.done = Math.min(q.position, q.total);
         skipFutureCancelled(q);
@@ -1724,6 +1779,8 @@ async function route(method, path, url, request, env) {
           // Mark response timestamp so fetchResponse/pollConversation
           // don't re-consume this response on the next poll.
           state._last_response_ts = new Date().toISOString();
+          // Persist to separate tiny key — survives main state write failures.
+          try { await env.VIBECODE.put(`lrt:${state.conversation_id}`, state._last_response_ts); } catch (_) {}
           // Advance queue
           q.position++;
           q.done = Math.min(q.position, q.total);
@@ -1842,6 +1899,8 @@ async function route(method, path, url, request, env) {
           try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
           state.messages.push({ id: nextMsgId(state), role: 'assistant', content: retryResponse, timestamp: now() });
           state._last_response_ts = new Date().toISOString();
+          // Persist to separate tiny key — survives main state write failures.
+          try { await env.VIBECODE.put(`lrt:${state.conversation_id}`, state._last_response_ts); } catch (_) {}
 
           // Advance queue
           q.position++;
