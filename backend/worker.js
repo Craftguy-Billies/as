@@ -1721,6 +1721,9 @@ async function route(method, path, url, request, env) {
         state._pending_response = undefined;
 
         if (responseText) {
+          // Mark response timestamp so fetchResponse/pollConversation
+          // don't re-consume this response on the next poll.
+          state._last_response_ts = new Date().toISOString();
           // Advance queue
           q.position++;
           q.done = Math.min(q.position, q.total);
