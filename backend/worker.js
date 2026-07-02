@@ -1623,6 +1623,28 @@ async function route(method, path, url, request, env) {
       }
     }
 
+    // Restore q.position and q.done from tiny keys if writeStateIfDirty
+    // failed after advancing the queue. Without this, hasPending stays true
+    // and Flutter shows "0/1 done" regression + may re-send the same prompt.
+    if (state.conversation_id) {
+      const storedQpos = await env.VIBECODE.get(`qpos:${state.conversation_id}`).catch(() => null);
+      if (storedQpos !== null) {
+        const qposVal = parseInt(storedQpos, 10);
+        if (!isNaN(qposVal) && qposVal > q.position) {
+          q.position = qposVal;
+          state._dirty = true;
+        }
+      }
+      const storedQdon = await env.VIBECODE.get(`qdon:${state.conversation_id}`).catch(() => null);
+      if (storedQdon !== null) {
+        const qdonVal = parseInt(storedQdon, 10);
+        if (!isNaN(qdonVal) && qdonVal > q.done) {
+          q.done = qdonVal;
+          state._dirty = true;
+        }
+      }
+    }
+
     // Migration: old code set q.cancelled=true on conv failure, locking the
     // queue. If cancelled but has pending work, clear stale flag and retry.
     let hasPending = q.position < q.total && !q.cancelled;
@@ -1902,6 +1924,13 @@ async function route(method, path, url, request, env) {
         state._dirty = true;
         q.done = Math.min(q.position, q.total);
         state._dirty = true;
+        // Persist queue position and done to tiny keys. If writeStateIfDirty
+        // fails below, q.position and q.done regress to stale KV values on the
+        // next poll — causing hasPending to be true again, Flutter to show
+        // "0/1 done" after already showing "1/1 done", and potentially
+        // re-sending the same prompt via send-follow-up (duplicate agent work).
+        try { await env.VIBECODE.put(`qpos:${state.conversation_id}`, String(q.position), {expirationTtl: 86400}); } catch (_) {}
+        try { await env.VIBECODE.put(`qdon:${state.conversation_id}`, String(q.done), {expirationTtl: 86400}); } catch (_) {}
         skipFutureCancelled(q);
         const stillPending = q.position < q.total && !q.cancelled;
         if (stillPending) {
@@ -1957,6 +1986,10 @@ async function route(method, path, url, request, env) {
         state._dirty = true;
           q.done = Math.min(q.position, q.total);
         state._dirty = true;
+          // Persist queue position and done to tiny keys (same reason as
+          // fetchResponse path — prevents "0/1 done" regression on write failure).
+          try { await env.VIBECODE.put(`qpos:${state.conversation_id}`, String(q.position), {expirationTtl: 86400}); } catch (_) {}
+          try { await env.VIBECODE.put(`qdon:${state.conversation_id}`, String(q.done), {expirationTtl: 86400}); } catch (_) {}
           skipFutureCancelled(q);
           // Recompute hasPending after queue advance for accurate batch.running
           const stillPending = q.position < q.total && !q.cancelled;
