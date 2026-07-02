@@ -2229,8 +2229,10 @@ async function route(method, path, url, request, env) {
           state.messages.push({ id: nextMsgId(state), role: 'event', content: `[STATUS] Working... (${elapsedStr})`, kind: 'SystemEvent', timestamp: now() });
           state._dirty = true;
         }
-        // No KV write for heartbeat — elapsed is computed per-poll from _run_started_at.
-        // fetchResponse NOT called — all events fetched atomically at completion.
+        // Persist events and seen_event_ids so the next poll doesn't re-process
+        // the same tool events from processCloudEvents (called above). Without
+        // this, state.messages accumulates duplicates on every poll cycle.
+        await writeStateIfDirty(env, repo, state);
         return buildStateResponse(state, q, hasPending, repo, mode, convStatus);
       }
     }
