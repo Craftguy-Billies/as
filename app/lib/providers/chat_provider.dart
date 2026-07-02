@@ -246,6 +246,11 @@ class ChatProvider extends ChangeNotifier {
           }
         }
         for (final m in _messages) {
+          // Skip stale heartbeats — same reason as poll merge.
+          if (m.role == 'event' && m.content.contains('[STATUS]') &&
+              (m.content.contains('Working') || m.content.contains('working'))) {
+            continue;
+          }
           if (seen.add(m.dedupKey)) {
             merged.add(m);
           }
@@ -446,6 +451,15 @@ class ChatProvider extends ChangeNotifier {
           }
           // Phase 2: client messages only if not covered by server
           for (final m in _messages) {
+            // Skip stale heartbeats from local cache — the worker sends
+            // fresh ones during running phase and filters them when a
+            // response arrives. Without this, heartbeats from a previous
+            // running phase survive in the local cache and reappear after
+            // auto-refresh even though the agent has already completed.
+            if (m.role == 'event' && m.content.contains('[STATUS]') &&
+                (m.content.contains('Working') || m.content.contains('working'))) {
+              continue;
+            }
             if (seen.add(m.dedupKey)) {
               merged.add(m);
             }
@@ -661,6 +675,11 @@ class ChatProvider extends ChangeNotifier {
           }
         }
         for (final m in _messages) {
+          // Skip stale heartbeats — same reason as poll merge.
+          if (m.role == 'event' && m.content.contains('[STATUS]') &&
+              (m.content.contains('Working') || m.content.contains('working'))) {
+            continue;
+          }
           if (seen.add(m.dedupKey)) {
             merged.add(m);
           }
