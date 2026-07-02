@@ -107,6 +107,13 @@ async function writeState(env, repo, state) {
   }
 }
 
+/** Write state to KV only if the dirty flag is set. Resets the flag. */
+async function writeStateIfDirty(env, repo, state) {
+  if (!state._dirty) return;
+  state._dirty = false;
+  await writeState(env, repo, state);
+}
+
 function buildStateResponse(state, q, hasPending, repo, mode, convStatus) {
   // Dedup messages: skip consecutive event messages with identical content
   // (cold start can reprocess events, creating duplicates in memory)
@@ -786,6 +793,9 @@ async function processCloudEvents(env, convId, state) {
       const data = await cloudGet(env, url);
       const list = Array.isArray(data) ? data : (data.events || data.items || []);
       if (!list.length) break;
+
+      // We have events — state will be modified below.
+      state._dirty = true;
 
       // Update _last_event_ts for the next page/next poll.
       const lastTs = list[list.length - 1].timestamp || list[list.length - 1].created_at || '';
@@ -1599,7 +1609,7 @@ async function route(method, path, url, request, env) {
       state._send_retry_at = undefined;
       state.last_sent_position = -1;
       // Persist so next poll sees clean state.
-      await writeState(env, repo, state);
+      await writeStateIfDirty(env, repo, state);
       // Delete lsp key since batch is done; prevents stale values from
       // corrupting last_sent_position on the next batch.
       try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
@@ -1619,6 +1629,7 @@ async function route(method, path, url, request, env) {
         const result = await pollForConvId(env, state.start_task_id);
         if (result) {
           state.conversation_id = result.conversation_id;
+          state._dirty = true;
           state._last_event_ts = '';  // reset event pagination for new conversation
           if (result.sandbox_id) state.sandbox_id = result.sandbox_id;
           state.start_task_id = null;
@@ -1638,7 +1649,7 @@ async function route(method, path, url, request, env) {
         state.start_task_id = null;
         try { await env.VIBECODE.delete(stKey); } catch (_) {}
       }
-      await writeState(env, repo, state);
+      await writeStateIfDirty(env, repo, state);
     }
 
     // --- Phase: create conversation if queue has work ---
@@ -1654,6 +1665,7 @@ async function route(method, path, url, request, env) {
           const result = await createConversation(env, prompt, repo, state.branch, promptMode, state);
           if (result.conversation_id) {
             state.conversation_id = result.conversation_id;
+            state._dirty = true;
             state._last_event_ts = '';  // reset event pagination for new conversation
             if (result.sandbox_id) state.sandbox_id = result.sandbox_id;
             state.last_sent_position = q.position;  // sent via initial_message
@@ -1678,8 +1690,9 @@ async function route(method, path, url, request, env) {
           // Add user message to local state
           state.messages.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
           state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent is starting up... (0s)', kind: 'SystemEvent', timestamp: now() });
+          state._dirty = true;
 
-          await writeState(env, repo, state);
+          await writeStateIfDirty(env, repo, state);
         } catch (e) {
           console.error(`Create conv error: ${e.message}`);
 
@@ -1704,8 +1717,11 @@ async function route(method, path, url, request, env) {
               state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] Skipping prompt #${q.position + 1}: agent stopped responding.`, kind: 'ErrorEvent', timestamp: now() });
               state.messages.push({ id: nextMsgId(state), role: 'assistant', content: `[Skipped: agent failed to start]`, timestamp: now() });
               q.position++;
+        state._dirty = true;
               q.done = Math.min(q.position, q.total);
+        state._dirty = true;
               state.conversation_id = null;
+      state._dirty = true;
               state._last_event_ts = "";
               state.sandbox_id = null;
               state.last_sent_position = -1;
@@ -1722,7 +1738,7 @@ async function route(method, path, url, request, env) {
               }
             }
           }
-          await writeState(env, repo, state);
+          await writeStateIfDirty(env, repo, state);
         }
       }
     }
@@ -1765,26 +1781,29 @@ async function route(method, path, url, request, env) {
       state._send_retry_at = undefined;
               state._send_retry_at = undefined;
               state.conversation_id = null;
+      state._dirty = true;
               state._last_event_ts = "";
               state.sandbox_id = null;
             }
           }
-          await writeState(env, repo, state);
+          await writeStateIfDirty(env, repo, state);
           // Return early — don't fall through to polling block. Otherwise
           // fetchResponse finds old events and advances queue with stale data
           // (user's message was never sent).
           return buildStateResponse(state, q, hasPending, repo, mode, state.conversation_id ? 'pending' : 'idle');
         } else {
           state.last_sent_position = q.position;
+          state._dirty = true;
           state._send_retry = 0;  // reset on successful send
       state._create_retry_at = undefined;
       state._send_retry_at = undefined;
           state._send_retry_at = undefined;
           state.messages.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
           state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+          state._dirty = true;
           // Write last_sent_position to SEPARATE small KV key FIRST
           try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
-          await writeState(env, repo, state);
+          await writeStateIfDirty(env, repo, state);
           return buildStateResponse(state, q, hasPending, repo, mode, 'running');
         }
       }
@@ -1793,7 +1812,9 @@ async function route(method, path, url, request, env) {
     const skipFutureCancelled = (q) => {
       while (state._batch_skip && state._batch_skip[q.position]) {
         q.position++;
+        state._dirty = true;
         q.done = Math.min(q.position, q.total);
+        state._dirty = true;
       }
     };
 
@@ -1820,11 +1841,14 @@ async function route(method, path, url, request, env) {
         // Agent message found via events — skip status API entirely.
         convStatus = 'completed';
         state.messages.push({ id: nextMsgId(state), role: 'assistant', content: directResponse, timestamp: now() });
+        state._dirty = true;
         state._last_response_ts = new Date().toISOString();
         // Persist to separate tiny key — survives main state write failures.
         try { await env.VIBECODE.put(`lrt:${state.conversation_id}`, state._last_response_ts); } catch (_) {}
         q.position++;
+        state._dirty = true;
         q.done = Math.min(q.position, q.total);
+        state._dirty = true;
         skipFutureCancelled(q);
         const stillPending = q.position < q.total && !q.cancelled;
         if (stillPending) {
@@ -1834,12 +1858,14 @@ async function route(method, path, url, request, env) {
             console.error(`sendMessage follow-up error: ${sendErr}`);
           } else {
             state.last_sent_position = q.position;
+          state._dirty = true;
             try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
             state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
             state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+          state._dirty = true;
           }
         }
-        await writeState(env, repo, state);
+        await writeStateIfDirty(env, repo, state);
         return buildStateResponse(state, q, stillPending, repo, mode, stillPending ? 'running' : 'idle');
       }
 
@@ -1861,7 +1887,9 @@ async function route(method, path, url, request, env) {
           try { await env.VIBECODE.put(`lrt:${state.conversation_id}`, state._last_response_ts); } catch (_) {}
           // Advance queue
           q.position++;
+        state._dirty = true;
           q.done = Math.min(q.position, q.total);
+        state._dirty = true;
           skipFutureCancelled(q);
           // Recompute hasPending after queue advance for accurate batch.running
           const stillPending = q.position < q.total && !q.cancelled;
@@ -1873,12 +1901,14 @@ async function route(method, path, url, request, env) {
               console.error(`sendMessage error at pos ${q.position}: ${sendErr}`);
             } else {
               state.last_sent_position = q.position;
+          state._dirty = true;
               try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
               state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
               state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+          state._dirty = true;
             }
           }
-          await writeState(env, repo, state);
+          await writeStateIfDirty(env, repo, state);
           return buildStateResponse(state, q, stillPending);
         }
 
@@ -1982,7 +2012,9 @@ async function route(method, path, url, request, env) {
 
           // Advance queue
           q.position++;
+        state._dirty = true;
           q.done = Math.min(q.position, q.total);
+        state._dirty = true;
           skipFutureCancelled(q);
           const stillPending = q.position < q.total && !q.cancelled;
 
@@ -1994,18 +2026,20 @@ async function route(method, path, url, request, env) {
               console.error(`sendMessage error at pos ${q.position}: ${sendErr}`);
             } else {
               state.last_sent_position = q.position;
+          state._dirty = true;
               try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
               state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
               state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+          state._dirty = true;
             }
           }
 
-          await writeState(env, repo, state);
+          await writeStateIfDirty(env, repo, state);
           return buildStateResponse(state, q, stillPending, repo, mode, stillPending ? 'running' : 'idle');
         } else if (convStatus === 'pending') {
           // Still waiting for ZIP to generate — return current state, retry next poll
           // Write main state too so _completed_position is saved
-          await writeState(env, repo, state);
+          await writeStateIfDirty(env, repo, state);
           return buildStateResponse(state, q, true, repo, mode, 'pending');
         } else {
           // All retries exhausted — give up
@@ -2013,7 +2047,9 @@ async function route(method, path, url, request, env) {
 
           // Advance queue
           q.position++;
+        state._dirty = true;
           q.done = Math.min(q.position, q.total);
+        state._dirty = true;
           skipFutureCancelled(q);
           const stillPending = q.position < q.total && !q.cancelled;
 
@@ -2024,13 +2060,15 @@ async function route(method, path, url, request, env) {
               console.error(`sendMessage error at pos ${q.position}: ${sendErr}`);
             } else {
               state.last_sent_position = q.position;
+          state._dirty = true;
               try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
               state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
               state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+          state._dirty = true;
             }
           }
 
-          await writeState(env, repo, state);
+          await writeStateIfDirty(env, repo, state);
           return buildStateResponse(state, q, stillPending, repo, mode, stillPending ? 'running' : 'idle');
         }
       } else if (pollResult.status === 'failed') {
@@ -2051,13 +2089,14 @@ async function route(method, path, url, request, env) {
           state._error_retry = 0;
           state._retry_at = undefined;
           state.conversation_id = null;
+      state._dirty = true;
           state._last_event_ts = "";
           state.sandbox_id = null;
           state.last_sent_position = -1;
           state.start_task_id = null;
           state._run_started_at = undefined;
           try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
-          await writeState(env, repo, state);
+          await writeStateIfDirty(env, repo, state);
           return buildStateResponse(state, q, true, repo, mode, 'starting');
         }
 
@@ -2079,10 +2118,11 @@ async function route(method, path, url, request, env) {
             console.log(`[AUTO-RETRY] sendMessage(continue) error: ${continueErr}`);
           }
         }
-        await writeState(env, repo, state);
+        await writeStateIfDirty(env, repo, state);
         return buildStateResponse(state, q, true, repo, mode, convStatus);
       } else if (pollResult.status === 'error') {
         state.conversation_id = null;
+      state._dirty = true;
         state._last_event_ts = "";
         state.sandbox_id = null;
         state.last_sent_position = -1;
@@ -2090,22 +2130,25 @@ async function route(method, path, url, request, env) {
         state._run_started_at = undefined;
         // Delete lsp since we're starting fresh with a new conversation
         try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
-        await writeState(env, repo, state);
+        await writeStateIfDirty(env, repo, state);
         return buildStateResponse(state, q, true, repo, mode, 'starting');
       } else if (pollResult.status === 'error') {
         // Cloud API returned error (e.g., items:[null]) — conversation is dead.
         const errMsg = pollResult.error || 'unknown error';
         state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] ${errMsg.slice(0, 200)}`, kind: 'ErrorEvent', timestamp: now() });
         q.position++;
+        state._dirty = true;
         q.done = Math.min(q.position, q.total);
+        state._dirty = true;
         skipFutureCancelled(q);
         state.conversation_id = null;
+      state._dirty = true;
         state._last_event_ts = "";
         state.sandbox_id = null;
         state.last_sent_position = -1;
         state.start_task_id = null;
         state._run_started_at = undefined;
-        await writeState(env, repo, state);
+        await writeStateIfDirty(env, repo, state);
         const fp2 = q.position < q.total && !q.cancelled;
         return buildStateResponse(state, q, fp2, repo, mode, 'idle');
       } else if (pollResult.status === 'idle' || (pollResult.status === 'completed' && !pollResult.response)) {
@@ -2146,7 +2189,7 @@ async function route(method, path, url, request, env) {
             }
           } catch (_) {}
         }
-        await writeState(env, repo, state);
+        await writeStateIfDirty(env, repo, state);
         return buildStateResponse(state, q, hasPending, repo, mode, convStatus);
       } else {
         // Still running — show elapsed timer, updated in-memory every poll.
@@ -2154,7 +2197,8 @@ async function route(method, path, url, request, env) {
         const nowMs = Date.now();
         if (!state._run_started_at) {
           state._run_started_at = nowMs;
-          await writeState(env, repo, state);  // persist the start timestamp once
+          state._dirty = true;
+          await writeStateIfDirty(env, repo, state);  // persist the start timestamp once
         }
         const elapsed = Math.floor((nowMs - state._run_started_at) / 1000);
         const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m${elapsed % 60}s`;
@@ -2176,6 +2220,7 @@ async function route(method, path, url, request, env) {
         }
         if (!foundHb) {
           state.messages.push({ id: nextMsgId(state), role: 'event', content: `[STATUS] Working... (${elapsedStr})`, kind: 'SystemEvent', timestamp: now() });
+          state._dirty = true;
         }
         // No KV write for heartbeat — elapsed is computed per-poll from _run_started_at.
         // fetchResponse NOT called — all events fetched atomically at completion.
