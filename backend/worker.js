@@ -1588,6 +1588,28 @@ async function route(method, path, url, request, env) {
       if (storedLrt && (!state._last_response_ts || storedLrt > state._last_response_ts)) {
         state._last_response_ts = storedLrt;
       }
+      // If writeStateIfDirty failed after a response was found but before
+      // the assistant message was persisted to KV, recover from the tiny
+      // rspt key. Without this, the response is silently lost.
+      if (state._last_response_ts) {
+        const storedRspt = await env.VIBECODE.get(`rspt:${state.conversation_id}`).catch(() => null);
+        if (storedRspt) {
+          let alreadyInMessages = false;
+          if (state.messages) {
+            for (const m of state.messages) {
+              if (m.role === 'assistant' && m.content === storedRspt) {
+                alreadyInMessages = true;
+                break;
+              }
+            }
+          }
+          if (!alreadyInMessages) {
+            state.messages.push({ id: nextMsgId(state), role: 'assistant', content: storedRspt, timestamp: now() });
+            state._dirty = true;
+          }
+          try { await env.VIBECODE.delete(`rspt:${state.conversation_id}`).catch(() => {}); } catch (_) {}
+        }
+      }
     }
 
     // Migration: old code set q.cancelled=true on conv failure, locking the
@@ -1861,6 +1883,10 @@ async function route(method, path, url, request, env) {
         state._last_response_ts = new Date().toISOString();
         // Persist to separate tiny key — survives main state write failures.
         try { await env.VIBECODE.put(`lrt:${state.conversation_id}`, state._last_response_ts); } catch (_) {}
+        // Save response text to a tiny key too. If writeStateIfDirty fails
+        // below, the next poll's rspt recovery (line ~1594) re-pushes the
+        // assistant message to state.messages so it's never silently lost.
+        try { await env.VIBECODE.put(`rspt:${state.conversation_id}`, directResponse, {expirationTtl: 86400}); } catch (_) {}
         q.position++;
         state._dirty = true;
         q.done = Math.min(q.position, q.total);
@@ -1901,6 +1927,20 @@ async function route(method, path, url, request, env) {
           state._last_response_ts = new Date().toISOString();
           // Persist to separate tiny key — survives main state write failures.
           try { await env.VIBECODE.put(`lrt:${state.conversation_id}`, state._last_response_ts); } catch (_) {}
+          // Save response text to a tiny key too. If writeStateIfDirty fails
+          // below, the next poll's rspt recovery re-pushes the assistant
+          // message so it's never silently lost.
+          try { await env.VIBECODE.put(`rspt:${state.conversation_id}`, responseText, {expirationTtl: 86400}); } catch (_) {}
+          // Push assistant response to state.messages (fetchResponse path
+          // also does this at line ~1881). Without this, pollConversation
+          // responses advance the queue but are never shown to the user.
+          state.messages = state.messages.filter(m =>
+            !(m.role === 'event' && typeof m.content === 'string' &&
+              m.content.includes('[STATUS]') &&
+              (m.content.includes('Working') || m.content.includes('working')))
+          );
+          state.messages.push({ id: nextMsgId(state), role: 'assistant', content: responseText, timestamp: now() });
+          state._dirty = true;
           // Advance queue
           q.position++;
         state._dirty = true;
