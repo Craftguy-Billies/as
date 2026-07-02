@@ -82,9 +82,8 @@ async function readState(env, repo) {
   try { return JSON.parse(raw); } catch { return null; }
 }
 
-async function writeState(env, repo, state) {
-  // Trim state before writing to KV to stay under limits.
-  // High enough for 300+ tool call tasks without trimming early events.
+/** Trim state in-place before writing to KV to stay under size limits. */
+function trimState(state) {
   if (state.messages && state.messages.length > 5000) {
     state.messages = state.messages.slice(-4000);
   }
@@ -100,6 +99,10 @@ async function writeState(env, repo, state) {
   if (state._batch_skip && Object.keys(state._batch_skip).length > 100) {
     state._batch_skip = undefined;
   }
+}
+
+async function writeState(env, repo, state) {
+  trimState(state);
   try {
     await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
   } catch (_) {
@@ -1291,6 +1294,8 @@ async function route(method, path, url, request, env) {
     // Write to KV directly (not writeState) so we can detect failure and
     // return an error to the client — if the queue state wasn't persisted,
     // the message is lost forever (next poll reads old state from KV).
+    // Trim first so JSON.stringify doesn't exceed CPU/memory limits.
+    trimState(state);
     try {
       await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
     } catch (_) {
@@ -1344,6 +1349,8 @@ async function route(method, path, url, request, env) {
     // Write to KV directly (not writeState) so we can detect failure and
     // return an error to the client — if the queue state wasn't persisted,
     // the message is lost forever (next poll reads old state from KV).
+    // Trim first so JSON.stringify doesn't exceed CPU/memory limits.
+    trimState(state);
     try {
       await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
     } catch (_) {
