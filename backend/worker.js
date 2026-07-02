@@ -1604,6 +1604,17 @@ async function route(method, path, url, request, env) {
             }
           }
           if (!alreadyInMessages) {
+            // Remove stale heartbeat events before pushing the recovered
+            // response — same reason as the fetchResponse/pollConversation
+            // paths: without this, the user sees both "Working..." and the
+            // response as separate entries.
+            if (state.messages) {
+              state.messages = state.messages.filter(m =>
+                !(m.role === 'event' && typeof m.content === 'string' &&
+                  m.content.includes('[STATUS]') &&
+                  (m.content.includes('Working') || m.content.includes('working')))
+              );
+            }
             state.messages.push({ id: nextMsgId(state), role: 'assistant', content: storedRspt, timestamp: now() });
             state._dirty = true;
           }
