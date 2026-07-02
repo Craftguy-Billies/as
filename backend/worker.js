@@ -1911,7 +1911,22 @@ async function route(method, path, url, request, env) {
             m.content.includes('[STATUS]') &&
             (m.content.includes('Working') || m.content.includes('working')))
         );
-        state.messages.push({ id: nextMsgId(state), role: 'assistant', content: directResponse, timestamp: now() });
+        // Skip push if the response text already exists as an assistant
+        // message. The rspt recovery (line ~1594) may have already pushed
+        // it when writeStateIfDirty failed in a previous poll, and the
+        // qpos restore (line ~1626) was also skipped (no qpos key in KV).
+        // Without this check, fetchResponse pushes a second copy, causing
+        // the user to see a duplicated AI response in the chat.
+        let alreadyPushed = false;
+        for (const m of state.messages) {
+          if (m.role === 'assistant' && m.content === directResponse) {
+            alreadyPushed = true;
+            break;
+          }
+        }
+        if (!alreadyPushed) {
+          state.messages.push({ id: nextMsgId(state), role: 'assistant', content: directResponse, timestamp: now() });
+        }
         state._dirty = true;
         state._last_response_ts = new Date().toISOString();
         // Persist to separate tiny key — survives main state write failures.
@@ -1979,7 +1994,18 @@ async function route(method, path, url, request, env) {
               m.content.includes('[STATUS]') &&
               (m.content.includes('Working') || m.content.includes('working')))
           );
-          state.messages.push({ id: nextMsgId(state), role: 'assistant', content: responseText, timestamp: now() });
+          // Dedup check: rspt recovery may have already pushed this response
+          // in the same poll. Skip push if content is already present.
+          let alreadyPushed = false;
+          for (const m of state.messages) {
+            if (m.role === 'assistant' && m.content === responseText) {
+              alreadyPushed = true;
+              break;
+            }
+          }
+          if (!alreadyPushed) {
+            state.messages.push({ id: nextMsgId(state), role: 'assistant', content: responseText, timestamp: now() });
+          }
           state._dirty = true;
           // Advance queue
           q.position++;
