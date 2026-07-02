@@ -1847,6 +1847,15 @@ async function route(method, path, url, request, env) {
       if (directResponse) {
         // Agent message found via events — skip status API entirely.
         convStatus = 'completed';
+        // Remove stale heartbeat events persisted from the running branch.
+        // Without this, user sees both "Working..." and the response as
+        // separate entries after reopen/refresh (the heartbeat was written
+        // to KV by the running branch's writeStateIfDirty).
+        state.messages = state.messages.filter(m =>
+          !(m.role === 'event' && typeof m.content === 'string' &&
+            m.content.includes('[STATUS]') &&
+            (m.content.includes('Working') || m.content.includes('working')))
+        );
         state.messages.push({ id: nextMsgId(state), role: 'assistant', content: directResponse, timestamp: now() });
         state._dirty = true;
         state._last_response_ts = new Date().toISOString();
