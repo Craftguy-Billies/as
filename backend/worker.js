@@ -1298,8 +1298,12 @@ async function route(method, path, url, request, env) {
     trimState(state);
     try {
       await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
-    } catch (_) {
-      return error('Failed to persist queue state', 500);
+    } catch (e) {
+      const status = String(e).includes('429') ? 429 : 500;
+      const msg = status === 429
+        ? 'KV rate limit exceeded — try again later'
+        : 'Failed to persist queue state';
+      return error(msg, status);
     }
     return json({ status: 'queued', position: state.queue.position, total: state.queue.total });
   }
@@ -1353,8 +1357,12 @@ async function route(method, path, url, request, env) {
     trimState(state);
     try {
       await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
-    } catch (_) {
-      return error('Failed to persist queue state', 500);
+    } catch (e) {
+      const status = String(e).includes('429') ? 429 : 500;
+      const msg = status === 429
+        ? 'KV rate limit exceeded — try again later'
+        : 'Failed to persist queue state';
+      return error(msg, status);
     }
     return json({ status: 'queued', position: state.queue.position, total: state.queue.total });
   }
