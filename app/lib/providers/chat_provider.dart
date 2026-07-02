@@ -671,6 +671,21 @@ class ChatProvider extends ChangeNotifier {
         _resetShowIndex();
         _notify();
       }
+
+      // Recover from "Lost connection" error if the API call succeeded.
+      // The error was set by the poll loop after 10 consecutive failures,
+      // but the connection may have been restored since then. Without this
+      // recovery, the user sees "Lost connection" indefinitely until they
+      // send a new message or press refresh.
+      if (_error?.contains('Lost connection') == true) {
+        _error = null;
+        _pollFailures = 0;
+        // Restart polling if there's still a queue to process
+        if (_queueTotal > 0) {
+          _startPolling(repo: serverRepo, branch: serverBranch, mode: serverMode);
+        }
+        _notify();
+      }
     } catch (e) {
       logViewer('ChatProvider.refreshMessages: $e');
     }
