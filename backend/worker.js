@@ -1248,6 +1248,11 @@ async function route(method, path, url, request, env) {
     const repo = url.searchParams.get('repo') || '';
     if (repo) {
       await env.VIBECODE.delete(`state:${repo}`);
+      // Also clean up repo-keyed tiny keys so next poll starts fresh
+      // (cid restores old conversation_id, causing new messages to be
+      //  sent to a stale conversation that may not respond).
+      try { await env.VIBECODE.delete(`cid:${repo}`).catch(() => {}); } catch (_) {}
+      try { await env.VIBECODE.delete(`lsp:${repo}`).catch(() => {}); } catch (_) {}
     } else {
       try {
         const list = await env.VIBECODE.list({ prefix: 'state:' });
