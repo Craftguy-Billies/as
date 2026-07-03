@@ -1666,6 +1666,17 @@ async function route(method, path, url, request, env) {
       }
     }
 
+    // Restore conversation_id from tiny cid key if main state write failed.
+    // Without this, createConversation fires again with the same prompt
+    // (wasted Cloud API quota and duplicate agent work).
+    if (!state.conversation_id) {
+      const storedCid = await env.VIBECODE.get(`cid:${repo}`).catch(() => null);
+      if (storedCid) {
+        state.conversation_id = storedCid;
+        state._dirty = true;
+      }
+    }
+
     // Migration: old code set q.cancelled=true on conv failure, locking the
     // queue. If cancelled but has pending work, clear stale flag and retry.
     let hasPending = q.position < q.total && !q.cancelled;
@@ -1762,6 +1773,11 @@ async function route(method, path, url, request, env) {
             if (result.sandbox_id) state.sandbox_id = result.sandbox_id;
             state.last_sent_position = q.position;  // sent via initial_message
             try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
+            // Persist conversation_id to a tiny key. If writeStateIfDirty fails
+            // below, the next poll reads OLD KV with null conversation_id —
+            // causing createConversation to fire AGAIN with the same prompt
+            // (wasted Cloud API quota and duplicate agent work).
+            try { await env.VIBECODE.put(`cid:${repo}`, result.conversation_id, {expirationTtl: 86400}); } catch (_) {}
             convStatus = 'starting';
           } else if (result.start_task_id) {
             state.start_task_id = result.start_task_id;
