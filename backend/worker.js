@@ -1301,6 +1301,17 @@ async function route(method, path, url, request, env) {
       // conversation (agent doesn't start), then after 3 retries a new
       // conversation is created and the prompt is sent AGAIN.
       try { await env.VIBECODE.delete(`cid:${repo}`).catch(() => {}); } catch (_) {}
+      // Clear conversation_id — each new batch must start with a FRESH
+      // conversation. If we don't clear it, the next poll's send-follow-up
+      // sends the prompt to the OLD (completed) conversation. The Cloud API
+      // silently accepts (200 OK) but the agent doesn't start. After 3 retries,
+      // conversation_id is cleared and createConversation creates a new one
+      // — sending the prompt AGAIN. This is the 100% confirmed root cause of
+      // "message appears in two conversations".
+      state.conversation_id = null;
+      state._dirty = true;
+      state._last_event_ts = "";
+      state.sandbox_id = null;
       state._run_started_at = undefined;
       state._completed_position = undefined;
       state._error_retry = 0;  // reset retry counter for new batch
@@ -1374,6 +1385,11 @@ async function route(method, path, url, request, env) {
       // the old conv, once to the new conv). This is the root cause of
       // "message sent to two conversations".
       try { await env.VIBECODE.delete(`cid:${repo}`).catch(() => {}); } catch (_) {}
+      // Clear conversation_id — each new batch must start fresh.
+      state.conversation_id = null;
+      state._dirty = true;
+      state._last_event_ts = "";
+      state.sandbox_id = null;
       state._run_started_at = undefined;
       state._completed_position = undefined;
       state._error_retry = 0;  // reset retry counter for new batch
