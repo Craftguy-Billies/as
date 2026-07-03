@@ -1296,6 +1296,11 @@ async function route(method, path, url, request, env) {
         try { await env.VIBECODE.delete(`qpos:${state.conversation_id}`).catch(() => {}); } catch (_) {}
         try { await env.VIBECODE.delete(`qdon:${state.conversation_id}`).catch(() => {}); } catch (_) {}
       }
+      // Delete cid tiny key — prevents stale conversation_id from being
+      // restored, which causes send-follow-up to send to a completed
+      // conversation (agent doesn't start), then after 3 retries a new
+      // conversation is created and the prompt is sent AGAIN.
+      try { await env.VIBECODE.delete(`cid:${repo}`).catch(() => {}); } catch (_) {}
       state._run_started_at = undefined;
       state._completed_position = undefined;
       state._error_retry = 0;  // reset retry counter for new batch
@@ -1359,7 +1364,17 @@ async function route(method, path, url, request, env) {
         try { await env.VIBECODE.delete(`qpos:${state.conversation_id}`).catch(() => {}); } catch (_) {}
         try { await env.VIBECODE.delete(`qdon:${state.conversation_id}`).catch(() => {}); } catch (_) {}
       }
-      state._run_started_at = undefined;  // reset timer for new batch
+      // Delete cid tiny key too — prevents stale conversation_id from
+      // being restored by cid restore (line ~1596). Without this, the
+      // next poll restores a COMPLETED conversation_id, send-follow-up
+      // tries to send the new prompt to the old conversation, the Cloud
+      // API silently accepts but the agent doesn't start. After 3 retries,
+      // send-follow-up clears conversation_id and createConversation
+      // creates a NEW conversation — sending the prompt TWICE (once to
+      // the old conv, once to the new conv). This is the root cause of
+      // "message sent to two conversations".
+      try { await env.VIBECODE.delete(`cid:${repo}`).catch(() => {}); } catch (_) {}
+      state._run_started_at = undefined;
       state._completed_position = undefined;
       state._error_retry = 0;  // reset retry counter for new batch
       state._send_retry = 0;
@@ -1736,6 +1751,8 @@ async function route(method, path, url, request, env) {
       // Delete lsp key since batch is done; prevents stale values from
       // corrupting last_sent_position on the next batch.
       try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
+      // Delete cid too — prevents stale conversation restore on next batch.
+      try { await env.VIBECODE.delete(`cid:${repo}`); } catch (_) {}
     }
     let convStatus = 'idle';
 
