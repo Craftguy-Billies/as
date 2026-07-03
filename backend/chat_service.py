@@ -2632,10 +2632,13 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     # event indexing and the final status poll). The min_timestamp filter then
     # EXCLUDES the MessageEvent and we get COMPLETED_NO_MSG.
     #
-    # Also: Cloud API may not have indexed the final assistant MessageEvent
-    # by the time status transitions to "finished". Retry with backoff to
-    # give the API time to index (same pattern as zip retry below).
-    if last_status in ("completed", "finished") and not all_new_msgs:
+    # Also: the main loop may have found a PARTIAL MessageEvent (agent still
+    # writing when the loop last polled events) but the FINAL complete
+    # MessageEvent wasn't indexed yet when status transitioned to "finished".
+    # Even if all_new_msgs is non-empty, run the desperation poll — the final
+    # complete message may have been indexed since the last events/search call.
+    # Without this, the partial text is returned as-is = "cut off in middle".
+    if last_status in ("completed", "finished"):
         _dp_max_attempts = 10
         for dp_attempt in range(_dp_max_attempts):
             try:
@@ -2697,8 +2700,11 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
     # zip download. The zip may not be immediately available after the
     # conversation finishes (race with Cloud API zip generation), so retry
     # with backoff (up to 8 attempts, ~120s total).
+    # NOTE: even if all_new_msgs is non-empty, the event-search data may be
+    # partial (early MessageEvent before the agent finished). The ZIP has
+    # the complete event log — run regardless.
     _zip_stale_found: bool = False  # track if we had to skip a stale-match MessageEvent
-    if last_status in ("completed", "finished") and not all_new_msgs:
+    if last_status in ("completed", "finished"):
         import io, re, zipfile
         _zip_exc: Exception | None = None
         _zip_last_events_file_count = 0
@@ -2756,7 +2762,11 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                         evt_ts = evt.get("timestamp", 0)
                         logger.info("ZIP_ATTEMPT %d/8: FOUND new agent MessageEvent ts=%s (len=%d)",
                                     zip_attempt + 1, evt_ts, len(raw))
-                        all_new_msgs = [raw]
+                        # Only replace if ZIP text is longer (more complete).
+                        # The event-search loop may have found a partial
+                        # MessageEvent; the ZIP's version could be older/shorter.
+                        if not all_new_msgs or len(raw) > len(all_new_msgs[0]):
+                            all_new_msgs = [raw]
                         _last_response_source = "zip"
                         # Register dedup
                         if evt_id:
