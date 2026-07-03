@@ -287,6 +287,12 @@ def _restore_from_db() -> None:
             # Migrate old "repo|mode" keys to flat "repo" keys
             _messages_by_repo = _migrate_keys(_messages_by_repo)
             _current_repo_key = data.get("current_repo_key", _repo_key(_conversation_repo))
+            # If _current_repo_key was migrated (e.g. "repo|plan" → "repo"),
+            # remap it so _msgs() doesn't create a dead key.
+            if _current_repo_key not in _messages_by_repo:
+                base = _current_repo_key.rpartition("|")[0] or "(none)"
+                if base in _messages_by_repo:
+                    _current_repo_key = base
             # Restore batch queue if server restarted mid-batch
             _batch_prompts = data.get("batch_prompts", [])
             _batch_prompt_modes = data.get("batch_prompt_modes", [])
@@ -294,6 +300,7 @@ def _restore_from_db() -> None:
             _batch_total = data.get("batch_total", 0)
             _batch_cancelled = data.get("batch_cancelled", False)
             _batch_skip_prompt = data.get("batch_skip_prompt", False)
+            _batch_started_at = data.get("batch_started_at", 0)
             # Auto-resume if server restarted mid-batch (remaining prompts in queue)
             _batch_running = _batch_position < _batch_total and len(_batch_prompts) > _batch_position
             _msg_counter = data.get("msg_counter", 0)
@@ -328,10 +335,16 @@ def _persist_to_db() -> None:
     except Exception:
         return
     try:
-        # Trim each repo's messages to prevent unbounded growth
+        # Trim each repo's messages to prevent unbounded growth.
+        # Preserve user and assistant messages; only trim event messages.
         for key in list(_messages_by_repo.keys()):
-            if len(_messages_by_repo[key]) > 500:
-                _messages_by_repo[key] = _messages_by_repo[key][-400:]
+            msgs = _messages_by_repo[key]
+            if len(msgs) > 500:
+                non_events = [m for m in msgs if m.get("role") not in ("event", "error")]
+                events = [m for m in msgs if m.get("role") in ("event", "error")]
+                if len(events) > 200:
+                    events = events[-200:]
+                _messages_by_repo[key] = non_events + events
         data = json.dumps({
             "conversation_id": _conversation_id,
             "conv_id_at_last_assistant": _conv_id_at_last_assistant,
@@ -351,6 +364,7 @@ def _persist_to_db() -> None:
             "batch_running": _batch_running,
             "batch_cancelled": _batch_cancelled,
             "batch_skip_prompt": _batch_skip_prompt,
+            "batch_started_at": _batch_started_at,
             "batch_repo": _batch_repo,
             "batch_branch": _batch_branch,
             "batch_mode": _batch_mode,
@@ -391,6 +405,7 @@ def _headers() -> dict:
 def reset() -> None:
     """Clear the current chat session AND cancel any running batch."""
     global _conversation_id, _conv_id_at_last_assistant, _conversation_repo, _conversation_branch, _conversation_mode, _conversation_llm_model, _last_event_index, _last_event_timestamp, _messages_by_repo, _event_kinds, _conversation_status, _sandbox_id, _current_repo_key
+    global _last_completed_no_msg, _last_cloud_error
     global _batch_cancelled, _batch_running, _batch_prompts, _batch_prompt_modes, _batch_position, _batch_total, _batch_skip_prompt
     with _lock:
         # Cancel running batch
@@ -421,6 +436,8 @@ def reset() -> None:
         _messages_by_repo.pop(_current_repo_key, None)  # clear current repo's history
         _current_repo_key = ""
         _conversation_status = "idle"
+        _last_completed_no_msg = False
+        _last_cloud_error = None
         _persist_to_db()
     logger.info("Chat session reset")
 
@@ -1208,6 +1225,7 @@ def _process_batch_worker() -> None:
                         _batch_prompt_modes = []
                         _batch_position = 0
                         _batch_total = 0
+                        _batch_started_at = 0
                         _persist_to_db()
                         logger.info("Batch complete (last prompt skipped)")
                         return
@@ -1220,6 +1238,7 @@ def _process_batch_worker() -> None:
                     _batch_prompt_modes = []
                     _batch_position = 0
                     _batch_total = 0
+                    _batch_started_at = 0
                     _persist_to_db()
                     logger.info("Batch complete")
                     return
@@ -1235,6 +1254,7 @@ def _process_batch_worker() -> None:
                     _batch_prompt_modes = []
                     _batch_position = 0
                     _batch_total = 0
+                    _batch_started_at = 0
                     _persist_to_db()
                     logger.warning("Batch timed out")
                     return
@@ -2473,9 +2493,13 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                     })
                     # Trim in-memory messages to prevent unbounded growth
                     # during long-running conversations (e.g. 100+ batch tasks).
-                    # Keeps latest 500, trimmed to 400 to avoid thrashing.
+                    # Preserve user and assistant messages; only trim event/error msgs.
                     if len(_msgs()) > 500:
-                        _msgs()[:] = _msgs()[-400:]
+                        non_events = [m for m in _msgs() if m.get("role") not in ("event", "error")]
+                        events = [m for m in _msgs() if m.get("role") in ("event", "error")]
+                        if len(events) > 200:
+                            events = events[-200:]
+                        _msgs()[:] = non_events + events
 
         # Advance the min_timestamp to the last event's timestamp for API-level
         # filtering on the next poll. _last_event_index is tracked for logging
