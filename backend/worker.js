@@ -1599,35 +1599,48 @@ async function route(method, path, url, request, env) {
       // If writeStateIfDirty failed after a response was found but before
       // the assistant message was persisted to KV, recover from the tiny
       // rspt key. Without this, the response is silently lost.
-      if (state._last_response_ts) {
-        const storedRspt = await env.VIBECODE.get(`rspt:${state.conversation_id}`).catch(() => null);
-        if (storedRspt) {
-          let alreadyInMessages = false;
-          if (state.messages) {
-            for (const m of state.messages) {
-              if (m.role === 'assistant' && m.content === storedRspt) {
-                alreadyInMessages = true;
-                break;
-              }
+      const storedRspt = await env.VIBECODE.get(`rspt:${state.conversation_id}`).catch(() => null);
+      if (storedRspt && state._last_response_ts) {
+        // Check if this exact response text is already in state.messages
+        // (loaded from KV). If the main state write propagated since the
+        // last poll, the response is already there — skip recovery.
+        let alreadyInMessages = false;
+        if (state.messages) {
+          for (const m of state.messages) {
+            if (m.role === 'assistant' && m.content === storedRspt) {
+              alreadyInMessages = true;
+              break;
             }
           }
-          if (!alreadyInMessages) {
-            // Remove stale heartbeat events before pushing the recovered
-            // response — same reason as the fetchResponse/pollConversation
-            // paths: without this, the user sees both "Working..." and the
-            // response as separate entries.
-            if (state.messages) {
-              state.messages = state.messages.filter(m =>
-                !(m.role === 'event' && typeof m.content === 'string' &&
-                  m.content.includes('[STATUS]') &&
-                  (m.content.includes('Working') || m.content.includes('working')))
-              );
-            }
-            state.messages.push({ id: nextMsgId(state), role: 'assistant', content: storedRspt, timestamp: now() });
-            state._dirty = true;
-          }
-          try { await env.VIBECODE.delete(`rspt:${state.conversation_id}`).catch(() => {}); } catch (_) {}
         }
+        if (!alreadyInMessages) {
+          // Remove stale heartbeat events before pushing the recovered
+          // response — same reason as the fetchResponse/pollConversation
+          // paths: without this, the user sees both "Working..." and the
+          // response as separate entries.
+          if (state.messages) {
+            state.messages = state.messages.filter(m =>
+              !(m.role === 'event' && typeof m.content === 'string' &&
+                m.content.includes('[STATUS]') &&
+                (m.content.includes('Working') || m.content.includes('working')))
+            );
+          }
+          state.messages.push({ id: nextMsgId(state), role: 'assistant', content: storedRspt, timestamp: now() });
+          state._dirty = true;
+        }
+        // Advance queue position. The rspt key exists → response was
+        // already consumed by a previous poll, even if the main state
+        // write hasn't propagated yet (KV eventual consistency).
+        // Without this, hasPending stays true and the user sees "Agent
+        // working..." on refresh even though the agent already responded.
+        if (q.position < q.total) {
+          q.position++;
+          q.done = Math.min(q.position, q.total);
+          state._dirty = true;
+          try { await env.VIBECODE.put(`qpos:${state.conversation_id}`, String(q.position), {expirationTtl: 86400}); } catch (_) {}
+          try { await env.VIBECODE.put(`qdon:${state.conversation_id}`, String(q.done), {expirationTtl: 86400}); } catch (_) {}
+        }
+        try { await env.VIBECODE.delete(`rspt:${state.conversation_id}`).catch(() => {}); } catch (_) {}
       }
     }
 
@@ -1933,30 +1946,39 @@ async function route(method, path, url, request, env) {
             m.content.includes('[STATUS]') &&
             (m.content.includes('Working') || m.content.includes('working')))
         );
-        // Skip push if the response text already exists as an assistant
-        // message. The rspt recovery (line ~1594) may have already pushed
-        // it when writeStateIfDirty failed in a previous poll, and the
-        // qpos restore (line ~1626) was also skipped (no qpos key in KV).
-        // Without this check, fetchResponse pushes a second copy, causing
-        // the user to see a duplicated AI response in the chat.
-        let alreadyPushed = false;
-        for (const m of state.messages) {
-          if (m.role === 'assistant' && m.content === directResponse) {
-            alreadyPushed = true;
-            break;
-          }
+        // Check the rspt KEY (persistent across polls), not state.messages
+        // (loaded from stale KV). If fetchResponse returns the same text as
+        // an already-written rspt key, the response was consumed by a previous
+        // poll but the main state hasn't propagated yet (KV eventual consistency
+        // delay up to 60s). Just advance the queue without pushing a duplicate.
+        const rsptKey = `rspt:${state.conversation_id}`;
+        const existingRspt = await env.VIBECODE.get(rsptKey).catch(() => null);
+        if (existingRspt === directResponse) {
+          // Response already consumed — advance queue without re-pushing
+          q.position = Math.min(q.position + 1, q.total);
+          q.done = Math.min(q.position, q.total);
+          state._last_response_ts = new Date().toISOString();
+          try { await env.VIBECODE.put(`lrt:${state.conversation_id}`, state._last_response_ts); } catch (_) {}
+          try { await env.VIBECODE.put(`qpos:${state.conversation_id}`, String(q.position), {expirationTtl: 86400}); } catch (_) {}
+          try { await env.VIBECODE.put(`qdon:${state.conversation_id}`, String(q.done), {expirationTtl: 86400}); } catch (_) {}
+          await writeStateIfDirty(env, repo, state);
+          return buildStateResponse(state, q, false, repo, mode, 'completed');
         }
-        if (!alreadyPushed) {
-          state.messages.push({ id: nextMsgId(state), role: 'assistant', content: directResponse, timestamp: now() });
-        }
+        // First time seeing this response — write rspt key BEFORE pushing
+        // to state.messages. If the main state write fails below, the next
+        // poll's rspt recovery re-pushes the response AND advances the queue
+        // (see line ~1603). The rspt key check above also prevents the next
+        // poll's fetchResponse from pushing a duplicate while the main state
+        // is still propagating (KV eventual consistency).
+        try { await env.VIBECODE.put(rsptKey, directResponse, {expirationTtl: 86400}); } catch (_) {}
+        state.messages.push({ id: nextMsgId(state), role: 'assistant', content: directResponse, timestamp: now() });
         state._dirty = true;
         state._last_response_ts = new Date().toISOString();
         // Persist to separate tiny key — survives main state write failures.
         try { await env.VIBECODE.put(`lrt:${state.conversation_id}`, state._last_response_ts); } catch (_) {}
-        // Save response text to a tiny key too. If writeStateIfDirty fails
-        // below, the next poll's rspt recovery (line ~1594) re-pushes the
-        // assistant message to state.messages so it's never silently lost.
-        try { await env.VIBECODE.put(`rspt:${state.conversation_id}`, directResponse, {expirationTtl: 86400}); } catch (_) {}
+        // rspt key was already written at line ~1973 (BEFORE state.messages
+        // push) so the next poll can dedup even before the main state write
+        // propagates. No need to write it again here.
         q.position++;
         state._dirty = true;
         q.done = Math.min(q.position, q.total);
@@ -2004,10 +2026,6 @@ async function route(method, path, url, request, env) {
           state._last_response_ts = new Date().toISOString();
           // Persist to separate tiny key — survives main state write failures.
           try { await env.VIBECODE.put(`lrt:${state.conversation_id}`, state._last_response_ts); } catch (_) {}
-          // Save response text to a tiny key too. If writeStateIfDirty fails
-          // below, the next poll's rspt recovery re-pushes the assistant
-          // message so it's never silently lost.
-          try { await env.VIBECODE.put(`rspt:${state.conversation_id}`, responseText, {expirationTtl: 86400}); } catch (_) {}
           // Push assistant response to state.messages (fetchResponse path
           // also does this at line ~1881). Without this, pollConversation
           // responses advance the queue but are never shown to the user.
@@ -2016,24 +2034,30 @@ async function route(method, path, url, request, env) {
               m.content.includes('[STATUS]') &&
               (m.content.includes('Working') || m.content.includes('working')))
           );
-          // Dedup check: rspt recovery may have already pushed this response
-          // in the same poll. Skip push if content is already present.
-          let alreadyPushed = false;
-          for (const m of state.messages) {
-            if (m.role === 'assistant' && m.content === responseText) {
-              alreadyPushed = true;
-              break;
-            }
+          // Skip push if rspt key already has this exact text (written by
+          // the fetchResponse path in a previous poll, or by the rspt
+          // recovery path). This prevents duplicates when KV is eventually
+          // consistent (main state write hasn't propagated yet).
+          const existingRspt = await env.VIBECODE.get(`rspt:${state.conversation_id}`).catch(() => null);
+          if (existingRspt === responseText) {
+            // Response already consumed by a previous poll
+            q.position = Math.min(q.position + 1, q.total);
+            q.done = Math.min(q.position, q.total);
+            try { await env.VIBECODE.put(`qpos:${state.conversation_id}`, String(q.position), {expirationTtl: 86400}); } catch (_) {}
+            try { await env.VIBECODE.put(`qdon:${state.conversation_id}`, String(q.done), {expirationTtl: 86400}); } catch (_) {}
+            await writeStateIfDirty(env, repo, state);
+            return buildStateResponse(state, q, false, repo, mode, 'completed');
           }
-          if (!alreadyPushed) {
-            state.messages.push({ id: nextMsgId(state), role: 'assistant', content: responseText, timestamp: now() });
-          }
+          state.messages.push({ id: nextMsgId(state), role: 'assistant', content: responseText, timestamp: now() });
           state._dirty = true;
           // Advance queue
           q.position++;
         state._dirty = true;
           q.done = Math.min(q.position, q.total);
         state._dirty = true;
+          // Write rspt key AFTER push so the next poll can dedup (the same
+          // pattern as the fetchResponse path at line ~1973).
+          try { await env.VIBECODE.put(`rspt:${state.conversation_id}`, responseText, {expirationTtl: 86400}); } catch (_) {}
           // Persist queue position and done to tiny keys (same reason as
           // fetchResponse path — prevents "0/1 done" regression on write failure).
           try { await env.VIBECODE.put(`qpos:${state.conversation_id}`, String(q.position), {expirationTtl: 86400}); } catch (_) {}
