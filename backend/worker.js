@@ -1279,6 +1279,7 @@ async function route(method, path, url, request, env) {
       state.queue.modes = [];
       state.queue.position = 0;
       state.queue.done = 0;
+      state.queue.cancelled = false;
       state.last_sent_position = -1;
       try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
       state._run_started_at = undefined;
@@ -1333,6 +1334,7 @@ async function route(method, path, url, request, env) {
       state.queue.modes = [];
       state.queue.position = 0;
       state.queue.done = 0;
+      state.queue.cancelled = false;
       state.last_sent_position = -1;
       try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
       state._run_started_at = undefined;  // reset timer for new batch
@@ -1630,19 +1632,20 @@ async function route(method, path, url, request, env) {
           }
           state.messages.push({ id: nextMsgId(state), role: 'assistant', content: storedRspt, timestamp: now() });
           state._dirty = true;
+          // Advance queue position — ONLY when we actually pushed the response.
+          // If alreadyInMessages is true, the main state already has the correct
+          // position (written by a previous poll). Advancing again would skip the
+          // next prompt in the queue (HIGH severity bug).
+          if (q.position < q.total) {
+            q.position++;
+            q.done = Math.min(q.position, q.total);
+            state._dirty = true;
+            try { await env.VIBECODE.put(`qpos:${state.conversation_id}`, String(q.position), {expirationTtl: 86400}); } catch (_) {}
+            try { await env.VIBECODE.put(`qdon:${state.conversation_id}`, String(q.done), {expirationTtl: 86400}); } catch (_) {}
+          }
         }
-        // Advance queue position. The rspt key exists → response was
-        // already consumed by a previous poll, even if the main state
-        // write hasn't propagated yet (KV eventual consistency).
-        // Without this, hasPending stays true and the user sees "Agent
-        // working..." on refresh even though the agent already responded.
-        if (q.position < q.total) {
-          q.position++;
-          q.done = Math.min(q.position, q.total);
-          state._dirty = true;
-          try { await env.VIBECODE.put(`qpos:${state.conversation_id}`, String(q.position), {expirationTtl: 86400}); } catch (_) {}
-          try { await env.VIBECODE.put(`qdon:${state.conversation_id}`, String(q.done), {expirationTtl: 86400}); } catch (_) {}
-        }
+        // Always try to delete rspt key (cleanup). If this fails, the next poll
+        // finds alreadyInMessages=true and skips both push and advance.
         try { await env.VIBECODE.delete(`rspt:${state.conversation_id}`).catch(() => {}); } catch (_) {}
       }
     }
@@ -1705,6 +1708,7 @@ async function route(method, path, url, request, env) {
       state._create_retry_at = undefined;
       state._send_retry_at = undefined;
       state.last_sent_position = -1;
+      state._dirty = true;  // persist all the reset changes above
       // Persist so next poll sees clean state.
       await writeStateIfDirty(env, repo, state);
       // Delete lsp key since batch is done; prevents stale values from
@@ -1976,6 +1980,7 @@ async function route(method, path, url, request, env) {
           // Response already consumed — advance queue without re-pushing
           q.position = Math.min(q.position + 1, q.total);
           q.done = Math.min(q.position, q.total);
+          state._dirty = true;
           state._last_response_ts = new Date().toISOString();
           try { await env.VIBECODE.put(`lrt:${state.conversation_id}`, state._last_response_ts); } catch (_) {}
           try { await env.VIBECODE.put(`qpos:${state.conversation_id}`, String(q.position), {expirationTtl: 86400}); } catch (_) {}
@@ -2062,6 +2067,7 @@ async function route(method, path, url, request, env) {
             // Response already consumed by a previous poll
             q.position = Math.min(q.position + 1, q.total);
             q.done = Math.min(q.position, q.total);
+            state._dirty = true;
             try { await env.VIBECODE.put(`qpos:${state.conversation_id}`, String(q.position), {expirationTtl: 86400}); } catch (_) {}
             try { await env.VIBECODE.put(`qdon:${state.conversation_id}`, String(q.done), {expirationTtl: 86400}); } catch (_) {}
             await writeStateIfDirty(env, repo, state);
