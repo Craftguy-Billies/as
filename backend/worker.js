@@ -1731,6 +1731,15 @@ async function route(method, path, url, request, env) {
       } else {
         const prompt = q.prompts[q.position];
         const promptMode = q.modes[q.position] || mode;
+
+        // Add user message to local state BEFORE createConversation.
+        // If createConversation throws (line ~1766), the catch skip path
+        // advances the queue without ever reaching line 1761 (which was
+        // inside the try block). The user's message silently disappears.
+        state.messages.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
+        state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent is starting up... (0s)', kind: 'SystemEvent', timestamp: now() });
+        state._dirty = true;
+
         try {
           const result = await createConversation(env, prompt, repo, state.branch, promptMode, state);
           if (result.conversation_id) {
@@ -1757,10 +1766,9 @@ async function route(method, path, url, request, env) {
           // Reset elapsed timer for this new conversation
           state._run_started_at = now();
 
-          // Add user message to local state
-          state.messages.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent is starting up... (0s)', kind: 'SystemEvent', timestamp: now() });
-          state._dirty = true;
+          // User message + start-up status were already pushed at line ~1739
+          // (before createConversation) so they persist even if the API call
+          // throws. No need to push them again here.
 
           await writeStateIfDirty(env, repo, state);
         } catch (e) {
@@ -1772,8 +1780,14 @@ async function route(method, path, url, request, env) {
             console.log(`[POLL] repo=${repo}: createConversation rate limited — retrying after 60s`);
           } else {
             // Don't cancel the queue — let the next poll retry.
-            // Track failures — after 3, skip this prompt to keep queue draining.
-            const maxCrash = 3;
+            // Track failures — if they exceed maxCrash, skip prompt.
+            // maxCrash is set high (20) because each failure has 30s
+            // backoff AND the crash key has 120s TTL — within that
+            // window at most 4-5 retries happen. Setting it low (3)
+            // would skip prompts prematurely when the Cloud API is
+            // temporarily overloaded (the user sees "1/1 done" with
+            // no response, which is confusing).
+            const maxCrash = 20;
             const crashKey = `crash:${repo}:${q.position}`;
             let crashCount = 0;
             try {
