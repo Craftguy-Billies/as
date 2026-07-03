@@ -862,27 +862,25 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                 logger.info("send: no branch — sending prompt as-is, no git pull")
             success, send_err = _send_message(current_conv_id, effective_prompt)
             if not success:
-                # 409 = sandbox paused/gone. _send_message already tried resume
-                # + polling + retry. If it still fails, propagate error — do NOT
-                # create a new conversation (that would burn uncached tokens).
-                # The user can retry manually.
-                if send_err and "409" in str(send_err):
-                    logger.warning("send-message 409 unrecoverable for %s — propagating to user", current_conv_id)
-                    raise Exception("409:Sandbox unavailable")
+                # 409 = sandbox paused/gone/conv completed. _send_message already
+                # tried resume + polling + retry. If it still fails, create a new
+                # conversation instead of propagating the error. Without this,
+                # Phase 1c (which saves the user message) NEVER runs — the
+                # exception skips it entirely. The user's message is lost.
                 # Non-409 failures (timeout, model busy, sandbox gone) should
-                # NOT kill the user's request. Create a fresh conversation and
-                # retry. This handles cases where the old conversation is too
-                # large (401+ msgs), the sandbox is cold, or the Cloud API is
-                # slow to respond.
-                logger.warning("send_message failed (non-409): send_err=%s — attempting recovery with new conversation. "
-                               "conv=%s status=%s seen_ids=%d",
+                # NOT kill the user's request either.
+                logger.warning("send_message failed: send_err=%s conv=%s status=%s seen_ids=%d — "
+                               "attempting recovery with new conversation",
                                send_err, current_conv_id, _conversation_status, len(_seen_event_ids))
                 recent_user_msgs = []
+                is_409 = send_err and "409" in str(send_err)
                 with _lock:
-                    for m in _msgs()[-6:]:
-                        role = m.get("role", "")
-                        if role == "user" and m.get("content"):
-                            recent_user_msgs.append(m["content"])
+                    if not is_409:
+                        # Only capture context for non-409 (409 means conv itself is dead)
+                        for m in _msgs()[-6:]:
+                            role = m.get("role", "")
+                            if role == "user" and m.get("content"):
+                                recent_user_msgs.append(m["content"])
                     _conversation_id = None
                     _last_event_index = 0
                     _sandbox_id = None
@@ -896,12 +894,12 @@ def send(prompt: str, repo: str = "", branch: str = "", mode: str = "code", _fro
                         f"---\n\n"
                         f"{prompt}"
                     )
-                    logger.info("AUDIT non-409-recovery: %d user msgs injected, prompt=%s",
+                    logger.info("AUDIT recovery: %d user msgs injected, prompt=%s",
                                 len(recent_user_msgs), prompt[:80])
                 else:
                     enhanced = prompt
                 new_conv_id = _create_conversation(enhanced, repo, branch, mode)
-                logger.info("Recovered from non-409: created new conv=%s", new_conv_id)
+                logger.info("Recovered from send error: created new conv=%s (was_409=%s)", new_conv_id, is_409)
                 need_new_conv = True
     except httpx.HTTPStatusError as e:
         status_code = e.response.status_code
@@ -1445,6 +1443,7 @@ def _process_batch_worker() -> None:
             _batch_running = False
             _batch_position = 0
             _batch_total = 0
+            _batch_started_at = 0
         _persist_to_db()
 
 
