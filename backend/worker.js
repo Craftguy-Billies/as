@@ -2010,6 +2010,31 @@ async function route(method, path, url, request, env) {
           await writeStateIfDirty(env, repo, state);
           return buildStateResponse(state, q, false, repo, mode, 'completed');
         }
+
+        // Also check in-memory state.messages (not KV). The rspt recovery
+        // at line ~1638 may have already pushed this response to state.messages
+        // in the CURRENT poll (before fetchResponse was called). If so, the rspt
+        // key was written but writeState may have failed before the "already
+        // consumed" check above — and with KV eventual consistency, the key
+        // might not be visible yet. Without this check, the response is pushed
+        // AGAIN with a different local id, creating a duplicate in the Flutter
+        // UI (dedup uses id:N, so id:N+1 and id:N+2 both survive).
+        const alreadyInMessages = state.messages.some(m =>
+          m.role === 'assistant' && m.content === directResponse
+        );
+        if (alreadyInMessages) {
+          // Response was already pushed by rspt recovery — advance queue
+          q.position = Math.min(q.position + 1, q.total);
+          q.done = Math.min(q.position, q.total);
+          state._dirty = true;
+          state._last_response_ts = new Date().toISOString();
+          try { await env.VIBECODE.put(`lrt:${state.conversation_id}`, state._last_response_ts); } catch (_) {}
+          try { await env.VIBECODE.put(`qpos:${state.conversation_id}`, String(q.position), {expirationTtl: 86400}); } catch (_) {}
+          try { await env.VIBECODE.put(`qdon:${state.conversation_id}`, String(q.done), {expirationTtl: 86400}); } catch (_) {}
+          await writeStateIfDirty(env, repo, state);
+          return buildStateResponse(state, q, false, repo, mode, 'completed');
+        }
+
         // First time seeing this response — write rspt key BEFORE pushing
         // to state.messages. If the main state write fails below, the next
         // poll's rspt recovery re-pushes the response AND advances the queue
