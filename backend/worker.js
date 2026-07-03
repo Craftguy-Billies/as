@@ -1273,10 +1273,10 @@ async function route(method, path, url, request, env) {
 
     // Treat as batch of 1
     const state = (await readState(env, repo)) || emptyState(repo, branch, mode);
-    state.queue.prompts.push(prompt);
-    state.queue.modes.push(mode);
-    state.queue.total = state.queue.prompts.length;
-    if (state.queue.position >= state.queue.total) {
+    // If all previous prompts finished OR were cancelled, start fresh (replace queue)
+    if (state.queue.position >= state.queue.total || state.queue.cancelled) {
+      state.queue.prompts = [];
+      state.queue.modes = [];
       state.queue.position = 0;
       state.queue.done = 0;
       state.last_sent_position = -1;
@@ -1291,6 +1291,9 @@ async function route(method, path, url, request, env) {
         try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
       }
     }
+    state.queue.prompts.push(prompt);
+    state.queue.modes.push(mode);
+    state.queue.total = state.queue.prompts.length;
     // Write to KV directly (not writeState) so we can detect failure and
     // return an error to the client — if the queue state wasn't persisted,
     // the message is lost forever (next poll reads old state from KV).
