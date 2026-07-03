@@ -1282,6 +1282,15 @@ async function route(method, path, url, request, env) {
       state.queue.cancelled = false;
       state.last_sent_position = -1;
       try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
+      // Delete stale queue position tiny keys from the previous batch.
+      // qpos/qdon have 86400s TTL and survive POST reset. Without this, the
+      // next poll's qpos restore sees qpos=1 (from old completed batch) and
+      // restores q.position to 1 — making hasPending=false and showing
+      // "1/1 done" without ever sending the new message.
+      if (state.conversation_id) {
+        try { await env.VIBECODE.delete(`qpos:${state.conversation_id}`).catch(() => {}); } catch (_) {}
+        try { await env.VIBECODE.delete(`qdon:${state.conversation_id}`).catch(() => {}); } catch (_) {}
+      }
       state._run_started_at = undefined;
       state._completed_position = undefined;
       state._error_retry = 0;  // reset retry counter for new batch
@@ -1337,6 +1346,14 @@ async function route(method, path, url, request, env) {
       state.queue.cancelled = false;
       state.last_sent_position = -1;
       try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
+      // Delete stale queue position tiny keys from the previous batch.
+      // qpos/qdon have 86400s TTL and survive POST reset. Without this,
+      // the next poll's qpos restore restores the OLD position and shows
+      // "1/1 done" without ever sending the new batch.
+      if (state.conversation_id) {
+        try { await env.VIBECODE.delete(`qpos:${state.conversation_id}`).catch(() => {}); } catch (_) {}
+        try { await env.VIBECODE.delete(`qdon:${state.conversation_id}`).catch(() => {}); } catch (_) {}
+      }
       state._run_started_at = undefined;  // reset timer for new batch
       state._completed_position = undefined;
       state._error_retry = 0;  // reset retry counter for new batch
