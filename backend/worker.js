@@ -2318,6 +2318,12 @@ async function route(method, path, url, request, env) {
         await writeStateIfDirty(env, repo, state);
         return buildStateResponse(state, q, true, repo, mode, convStatus);
       } else if (pollResult.status === 'error') {
+        // Dead conversation — clear state so next poll creates a new one.
+        // No need to advance queue (next poll retries the same prompt).
+        if (pollResult.error && state.messages) {
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] ${pollResult.error.slice(0, 200)}`, kind: 'ErrorEvent', timestamp: now() });
+          state._dirty = true;
+        }
         state.conversation_id = null;
       state._dirty = true;
         state._last_event_ts = "";
@@ -2325,29 +2331,9 @@ async function route(method, path, url, request, env) {
         state.last_sent_position = -1;
         state.start_task_id = null;
         state._run_started_at = undefined;
-        // Delete lsp since we're starting fresh with a new conversation
         try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
         await writeStateIfDirty(env, repo, state);
         return buildStateResponse(state, q, true, repo, mode, 'starting');
-      } else if (pollResult.status === 'error') {
-        // Cloud API returned error (e.g., items:[null]) — conversation is dead.
-        const errMsg = pollResult.error || 'unknown error';
-        state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] ${errMsg.slice(0, 200)}`, kind: 'ErrorEvent', timestamp: now() });
-        q.position++;
-        state._dirty = true;
-        q.done = Math.min(q.position, q.total);
-        state._dirty = true;
-        skipFutureCancelled(q);
-        state.conversation_id = null;
-      state._dirty = true;
-        state._last_event_ts = "";
-        state.sandbox_id = null;
-        state.last_sent_position = -1;
-        state.start_task_id = null;
-        state._run_started_at = undefined;
-        await writeStateIfDirty(env, repo, state);
-        const fp2 = q.position < q.total && !q.cancelled;
-        return buildStateResponse(state, q, fp2, repo, mode, 'idle');
       } else if (pollResult.status === 'idle' || (pollResult.status === 'completed' && !pollResult.response)) {
         // Conversation is idle/completed but queue has work and no response.
         // This means either:
