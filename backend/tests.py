@@ -12,6 +12,8 @@ import pytest
 
 # Use a temp DB for tests
 os.environ["VIBECODE_DB_PATH"] = os.path.join(tempfile.gettempdir(), "vibecode_test.db")
+# Set API key for LLM config tests
+os.environ["LLM_API_KEY"] = "sk-test-key-for-llm-config-tests"
 
 from fastapi.testclient import TestClient
 from database import init_db
@@ -190,26 +192,26 @@ def test_register_fcm_token(client):
 def test_update_llm_config(client):
     resp = client.put("/api/config/llm", json={
         "api_key": "sk-test-key",
-        "model": "deepseek-chat",
+        "model": "deepseek/deepseek-v4-flash",
         "base_url": "https://api.deepseek.com/v1",
     })
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "updated"
-    assert data["model"] == "deepseek-chat"
+    assert data["model"] == "deepseek/deepseek-v4-flash"
 
 
 def test_get_llm_config(client):
     # Update first
     client.put("/api/config/llm", json={
         "api_key": "sk-test",
-        "model": "gpt-4o",
+        "model": "deepseek/deepseek-v4-pro",
         "base_url": None,
     })
     resp = client.get("/api/config/llm")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["model"] == "gpt-4o"
+    assert data["model"] == "deepseek/deepseek-v4-pro"
     assert data["has_api_key"] is True
     assert "api_key" not in data  # Key is never returned
 
