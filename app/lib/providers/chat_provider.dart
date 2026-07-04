@@ -396,6 +396,7 @@ class ChatProvider extends ChangeNotifier {
       if (status == 'queued') {
         // DO NOT add user message to chat — it's in the queue.
         // The poll picks it up once the server processes it.
+        final wasAlreadyPolling = _pollTimer?.isActive == true;
         _queuePosition = (result['position'] as int?) ?? 0;
         _queueTotal = (result['total'] as int?) ?? 1;
         _pollFailures = 0;
@@ -403,7 +404,12 @@ class ChatProvider extends ChangeNotifier {
         _loadingSince = DateTime.now();
         logViewer('ChatProvider.send: queued pos=$_queuePosition total=$_queueTotal — polling');
         _notify();
-        _startPolling(repo: repo, branch: branch, mode: mode);
+        // Only start a new poll if one isn't already running. Calling
+        // _startPolling on an active batch resets _batchSeenRunning and
+        // re-creates the timer, delaying completion detection by 15s.
+        if (!wasAlreadyPolling) {
+          _startPolling(repo: repo, branch: branch, mode: mode);
+        }
       } else if (status == 'appended') {
         // Appended to running batch — poll will pick it up
         _queueTotal = (result['total'] as int?) ?? _queueTotal;

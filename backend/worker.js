@@ -117,6 +117,25 @@ async function writeStateIfDirty(env, repo, state) {
   await writeState(env, repo, state);
 }
 
+// Re-read queue total from KV to catch prompts appended by the user
+// while this poll was processing. The in-memory q.total was loaded at
+// poll start and may be stale. Without this, stillPending = position <
+// stale_total is false, and the follow-up prompt is silently lost.
+async function syncQueueFromKv(env, repo, q) {
+  try {
+    const raw = await env.VIBECODE.get(`state:${repo}`);
+    if (!raw) return;
+    const fresh = JSON.parse(raw);
+    if (!fresh?.queue) return;
+    if (fresh.queue.total > q.total) {
+      console.log(`[SYNC] repo=${repo}: merged queue total ${q.total}→${fresh.queue.total}`);
+      q.total = fresh.queue.total;
+      q.prompts = fresh.queue.prompts || q.prompts;
+      q.modes = fresh.queue.modes || q.modes;
+    }
+  } catch (_) {}
+}
+
 function buildStateResponse(state, q, hasPending, repo, mode, convStatus) {
   // Dedup messages: KV eventual consistency can cause the same assistant
   // response to be pushed twice when a previous poll's state write hasn't
@@ -2121,6 +2140,10 @@ async function route(method, path, url, request, env) {
         try { await env.VIBECODE.put(`qpos:${state.conversation_id}`, String(q.position), {expirationTtl: 86400}); } catch (_) {}
         try { await env.VIBECODE.put(`qdon:${state.conversation_id}`, String(q.done), {expirationTtl: 86400}); } catch (_) {}
         skipFutureCancelled(q);
+        // Re-read q.total from KV: user may have queued more prompts while
+        // this poll was processing. Without this, stillPending uses stale
+        // total and follow-up prompts are silently lost.
+        await syncQueueFromKv(env, repo, q);
         const stillPending = q.position < q.total && !q.cancelled;
         if (stillPending) {
           const nextPrompt = q.prompts[q.position];
@@ -2194,6 +2217,10 @@ async function route(method, path, url, request, env) {
           try { await env.VIBECODE.put(`qpos:${state.conversation_id}`, String(q.position), {expirationTtl: 86400}); } catch (_) {}
           try { await env.VIBECODE.put(`qdon:${state.conversation_id}`, String(q.done), {expirationTtl: 86400}); } catch (_) {}
           skipFutureCancelled(q);
+          // Re-read q.total from KV: user may have queued more prompts while
+          // this poll was processing. Without this, stillPending uses stale
+          // total and follow-up prompts are silently lost.
+          await syncQueueFromKv(env, repo, q);
           // Recompute hasPending after queue advance for accurate batch.running
           const stillPending = q.position < q.total && !q.cancelled;
           // If more prompts, send next one
@@ -2319,6 +2346,10 @@ async function route(method, path, url, request, env) {
           q.done = Math.min(q.position, q.total);
         state._dirty = true;
           skipFutureCancelled(q);
+          // Re-read q.total from KV: user may have queued more prompts while
+          // this poll was processing. Without this, stillPending uses stale
+          // total and follow-up prompts are silently lost.
+          await syncQueueFromKv(env, repo, q);
           const stillPending = q.position < q.total && !q.cancelled;
 
           // If more prompts, send next one
@@ -2354,6 +2385,10 @@ async function route(method, path, url, request, env) {
           q.done = Math.min(q.position, q.total);
         state._dirty = true;
           skipFutureCancelled(q);
+          // Re-read q.total from KV: user may have queued more prompts while
+          // this poll was processing. Without this, stillPending uses stale
+          // total and follow-up prompts are silently lost.
+          await syncQueueFromKv(env, repo, q);
           const stillPending = q.position < q.total && !q.cancelled;
 
           if (stillPending) {
