@@ -594,24 +594,6 @@ class ChatProvider extends ChangeNotifier {
       return;
     }
 
-    // Guard: if a batch is running on a DIFFERENT repo, warn the user.
-    // This prevents losing visibility of the in-progress batch.
-    // Allow override: if the batch has been running for > 5 minutes with
-    // no done, it's likely stuck (KV write failure regression). The user
-    // should be able to switch away from a stuck batch.
-    final stuck = isProcessing && _loadingSince != null &&
-        DateTime.now().difference(_loadingSince!).inMinutes >= 5;
-    if (isProcessing && serverRepo.isNotEmpty && repo != serverRepo && !stuck) {
-      logViewer('ChatProvider.switchRepo: BLOCKED — batch running on $serverRepo');
-      _error = 'Cannot switch to "$repo" — a batch is still running on "$serverRepo". '
-          'Wait for it to finish, then switch.';
-      _notify();
-      return;
-    }
-    if (stuck) {
-      logViewer('ChatProvider.switchRepo: overriding stuck batch on $serverRepo');
-    }
-
     serverRepo = repo;
     serverBranch = branch;
     serverMode = mode;
@@ -815,7 +797,8 @@ class ChatProvider extends ChangeNotifier {
         _queuePosition = (batch['position'] as int?) ?? 0;
         _queueTotal = (batch['total'] as int?) ?? 0;
         _queueDone = (batch['done'] as int?) ?? _queuePosition;
-        _loading = _queueTotal > 0;
+        final isRunning = batch['running'] == true;
+        _loading = isRunning && _queueTotal > 0;
         if (_loading) {
           _loadingSince ??= DateTime.now();
           _startPolling(repo: serverRepo, branch: serverBranch, mode: serverMode);
