@@ -594,6 +594,10 @@ class ChatProvider extends ChangeNotifier {
       return;
     }
 
+    // No guard needed — backend stores state per-repo (independent queues).
+    // A batch running on repo A is unaffected by switching to repo B.
+    // The user can switch back to see repo A's results when ready.
+
     serverRepo = repo;
     serverBranch = branch;
     serverMode = mode;
@@ -603,8 +607,9 @@ class ChatProvider extends ChangeNotifier {
     _queuePosition = 0;
     _queueTotal = 0;
     _queueDone = 0;
-    _loading = false;
-    _loadingSince = null;
+    _loading = true;  // show loading while fetching new repo's data
+    _loadingSince = DateTime.now();
+    _notify();
     // Fetch messages for this repo from server
     try {
       final state = await _api.getChat(repo: repo, mode: mode);
@@ -628,10 +633,14 @@ class ChatProvider extends ChangeNotifier {
       _messages = serverMsgs;
       _resetShowIndex();  // re-clamp for new repo's message count
       _error = null;
+      _loading = false;
+      _loadingSince = null;
       await _saveToCache();
       logViewer('ChatProvider.switchRepo: loaded ${_messages.length} msgs for repo=$repo branch=$serverBranch');
     } catch (e) {
       logViewer('ChatProvider.switchRepo: failed to fetch messages: $e');
+      _loading = false;
+      _loadingSince = null;
     }
     _notify();
     // Refresh repo list (new repo might appear later after messages)
@@ -698,6 +707,10 @@ class ChatProvider extends ChangeNotifier {
           _pollTimer?.cancel();
           _loadingSince = null;
           _batchSeenRunning = false;
+        } else if (_pollTimer == null || !_pollTimer!.isActive) {
+          // App was backgrounded and polling stopped — restart it.
+          _loadingSince ??= DateTime.now();
+          _startPolling(repo: serverRepo, branch: serverBranch, mode: serverMode);
         }
         final prompts = batch['prompts'] as List?;
         if (prompts != null) {
@@ -794,11 +807,12 @@ class ChatProvider extends ChangeNotifier {
       // Step 4: Update batch state
       final batch = data['batch'] as Map<String, dynamic>?;
       if (batch != null) {
-        _queuePosition = (batch['position'] as int?) ?? 0;
-        _queueTotal = (batch['total'] as int?) ?? 0;
-        _queueDone = (batch['done'] as int?) ?? _queuePosition;
         final isRunning = batch['running'] == true;
-        _loading = isRunning && _queueTotal > 0;
+        final total = (batch['total'] as int?) ?? 0;
+        _queuePosition = (batch['position'] as int?) ?? 0;
+        _queueTotal = total;
+        _queueDone = (batch['done'] as int?) ?? _queuePosition;
+        _loading = isRunning && total > 0;
         if (_loading) {
           _loadingSince ??= DateTime.now();
           _startPolling(repo: serverRepo, branch: serverBranch, mode: serverMode);
