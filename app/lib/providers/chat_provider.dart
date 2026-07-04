@@ -240,6 +240,10 @@ class ChatProvider extends ChangeNotifier {
       if (serverMsgs.isNotEmpty) {
         final merged = <ChatMessage>[];
         final seen = <String>{};
+        // Secondary dedup: assistant messages with identical content but
+        // different server IDs (e.g. from KV write failure + rspt recovery)
+        // should not appear twice. Track role:content separately from id.
+        final seenAssistantContent = <String>{};
         for (final m in serverMsgs) {
           // Content-based dedup for assistant messages (same root cause
           // as poll merge — KV eventual consistency).
@@ -249,6 +253,12 @@ class ChatProvider extends ChangeNotifier {
             seen.add(contentKey);
           }
           if (seen.add(m.dedupKey)) {
+            // Content-based dedup for assistant messages: if the same
+            // response text was already added with a different server ID,
+            // skip this duplicate.
+            if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
+              continue;
+            }
             merged.add(m);
           }
         }
@@ -259,6 +269,9 @@ class ChatProvider extends ChangeNotifier {
             continue;
           }
           if (seen.add(m.dedupKey)) {
+            if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
+              continue;
+            }
             merged.add(m);
           }
         }
@@ -450,6 +463,10 @@ class ChatProvider extends ChangeNotifier {
         if (serverMsgs.isNotEmpty) {
           final merged = <ChatMessage>[];
           final seen = <String>{};
+          // Secondary dedup: assistant messages with identical content but
+          // different server IDs (e.g. from KV write failure + rspt recovery)
+          // should not appear twice.
+          final seenAssistantContent = <String>{};
           // Phase 1: server messages (canonical, have IDs).
           for (final m in serverMsgs) {
             // Content-based dedup for assistant messages: KV eventual
@@ -462,6 +479,9 @@ class ChatProvider extends ChangeNotifier {
               seen.add(contentKey);
             }
             if (seen.add(m.dedupKey)) {
+              if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
+                continue;
+              }
               merged.add(m);
             }
           }
@@ -477,6 +497,9 @@ class ChatProvider extends ChangeNotifier {
               continue;
             }
             if (seen.add(m.dedupKey)) {
+              if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
+                continue;
+              }
               merged.add(m);
             }
           }
@@ -684,6 +707,7 @@ class ChatProvider extends ChangeNotifier {
       if (serverMsgs.isNotEmpty) {
         final merged = <ChatMessage>[];
         final seen = <String>{};
+        final seenAssistantContent = <String>{};
         for (final m in serverMsgs) {
           // Content-based dedup for assistant messages (same root cause
           // as poll merge — KV eventual consistency).
@@ -693,6 +717,9 @@ class ChatProvider extends ChangeNotifier {
             seen.add(contentKey);
           }
           if (seen.add(m.dedupKey)) {
+            if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
+              continue;
+            }
             merged.add(m);
           }
         }
@@ -703,6 +730,9 @@ class ChatProvider extends ChangeNotifier {
             continue;
           }
           if (seen.add(m.dedupKey)) {
+            if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
+              continue;
+            }
             merged.add(m);
           }
         }
@@ -812,6 +842,7 @@ class ChatProvider extends ChangeNotifier {
       if (serverMsgs.isNotEmpty) {
         final merged = <ChatMessage>[];
         final seen = <String>{};
+        final seenAssistantContent = <String>{};
         for (final m in serverMsgs) {
           // Content-based dedup for assistant messages (same root cause
           // as poll merge — KV eventual consistency).
@@ -821,11 +852,17 @@ class ChatProvider extends ChangeNotifier {
             seen.add(contentKey);
           }
           if (seen.add(m.dedupKey)) {
+            if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
+              continue;
+            }
             merged.add(m);
           }
         }
         for (final m in _messages) {
           if (seen.add(m.dedupKey)) {
+            if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
+              continue;
+            }
             merged.add(m);
           }
         }

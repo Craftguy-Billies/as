@@ -1708,6 +1708,20 @@ async function route(method, path, url, request, env) {
             try { await env.VIBECODE.put(`qpos:${state.conversation_id}`, String(q.position), {expirationTtl: 86400}); } catch (_) {}
             try { await env.VIBECODE.put(`qdon:${state.conversation_id}`, String(q.done), {expirationTtl: 86400}); } catch (_) {}
           }
+          // Persist the recovered response to KV. Without this, _dirty is
+          // never flushed when hasPending=false (queue done) — all subsequent
+          // poll phases are guarded by hasPending or !conversation_id. The
+          // next request reads OLD KV state (without the assistant message),
+          // and since rspt key is deleted below, recovery can't run again —
+          // the response silently disappears on restart/reload.
+          //
+          // If writeState fails here (KV write limit), Flutter's local cache
+          // still has the response from this poll's JSON — the next poll's
+          // merge keeps it (Phase 2 adds _messages not in serverMsgs). But
+          // without the KV write, a server restart exposes the same gap.
+          // Best-effort is acceptable: the content-based dedup in Flutter
+          // (dedup by role+content) catches any remaining edge case.
+          await writeStateIfDirty(env, repo, state);
         }
         // Always try to delete rspt key (cleanup). If this fails, the next poll
         // finds alreadyInMessages=true and skips both push and advance.
