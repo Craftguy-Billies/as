@@ -118,15 +118,27 @@ async function writeStateIfDirty(env, repo, state) {
 }
 
 function buildStateResponse(state, q, hasPending, repo, mode, convStatus) {
-  // Dedup messages: skip consecutive event messages with identical content
-  // (cold start can reprocess events, creating duplicates in memory)
+  // Dedup messages: KV eventual consistency can cause the same assistant
+  // response to be pushed twice when a previous poll's state write hasn't
+  // propagated by the next poll's read. Content-based dedup prevents
+  // duplicate assistant messages from appearing in the UI.
   const msgs = state.messages || [];
   const messages = [];
+  const seenAsstContent = new Set();
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
+    // Skip consecutive event messages with identical content
+    // (cold start can reprocess events, creating duplicates in memory)
     if (m.role === 'event' && i > 0) {
       const prev = msgs[i - 1];
       if (prev.role === 'event' && prev.content === m.content) continue;
+    }
+    // Content-based dedup for assistant messages: KV eventual consistency
+    // can cause the same response text to be pushed twice with different
+    // IDs. Keeping only the first occurrence prevents duplicates.
+    if (m.role === 'assistant' && m.content) {
+      if (seenAsstContent.has(m.content)) continue;
+      seenAsstContent.add(m.content);
     }
     messages.push(m);
   }

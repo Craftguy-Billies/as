@@ -241,6 +241,13 @@ class ChatProvider extends ChangeNotifier {
         final merged = <ChatMessage>[];
         final seen = <String>{};
         for (final m in serverMsgs) {
+          // Content-based dedup for assistant messages (same root cause
+          // as poll merge — KV eventual consistency).
+          if (m.role == 'assistant' && m.content.isNotEmpty) {
+            final contentKey = 'asst_content:${m.content}';
+            if (seen.contains(contentKey)) continue;
+            seen.add(contentKey);
+          }
           if (seen.add(m.dedupKey)) {
             merged.add(m);
           }
@@ -445,6 +452,15 @@ class ChatProvider extends ChangeNotifier {
           final seen = <String>{};
           // Phase 1: server messages (canonical, have IDs).
           for (final m in serverMsgs) {
+            // Content-based dedup for assistant messages: KV eventual
+            // consistency can cause the same response text to be pushed
+            // twice with different IDs. Keeping only the first occurrence
+            // prevents duplicate assistant bubbles in the UI.
+            if (m.role == 'assistant' && m.content.isNotEmpty) {
+              final contentKey = 'asst_content:${m.content}';
+              if (seen.contains(contentKey)) continue;
+              seen.add(contentKey);
+            }
             if (seen.add(m.dedupKey)) {
               merged.add(m);
             }
@@ -669,6 +685,13 @@ class ChatProvider extends ChangeNotifier {
         final merged = <ChatMessage>[];
         final seen = <String>{};
         for (final m in serverMsgs) {
+          // Content-based dedup for assistant messages (same root cause
+          // as poll merge — KV eventual consistency).
+          if (m.role == 'assistant' && m.content.isNotEmpty) {
+            final contentKey = 'asst_content:${m.content}';
+            if (seen.contains(contentKey)) continue;
+            seen.add(contentKey);
+          }
           if (seen.add(m.dedupKey)) {
             merged.add(m);
           }
@@ -790,6 +813,13 @@ class ChatProvider extends ChangeNotifier {
         final merged = <ChatMessage>[];
         final seen = <String>{};
         for (final m in serverMsgs) {
+          // Content-based dedup for assistant messages (same root cause
+          // as poll merge — KV eventual consistency).
+          if (m.role == 'assistant' && m.content.isNotEmpty) {
+            final contentKey = 'asst_content:${m.content}';
+            if (seen.contains(contentKey)) continue;
+            seen.add(contentKey);
+          }
           if (seen.add(m.dedupKey)) {
             merged.add(m);
           }
