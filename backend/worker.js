@@ -105,16 +105,18 @@ async function writeState(env, repo, state) {
   trimState(state);
   try {
     await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
+    return true;
   } catch (_) {
     // KV write limit exceeded — worker stays functional in-memory, next poll retries.
+    return false;
   }
 }
 
-/** Write state to KV only if the dirty flag is set. Resets the flag. */
+/** Write state to KV only if the dirty flag is set. Clears flag only on success. */
 async function writeStateIfDirty(env, repo, state) {
   if (!state._dirty) return;
-  state._dirty = false;
-  await writeState(env, repo, state);
+  const ok = await writeState(env, repo, state);
+  if (ok) state._dirty = false;
 }
 
 // Re-read queue total from KV to catch prompts appended by the user

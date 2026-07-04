@@ -434,6 +434,19 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             if (ii < visible.length && visible[ii].role == 'assistant') {
                               aiResp = visible[ii];
                               ii++;
+                              // Merge trailing events that are NOT followed by an
+                              // assistant response into this group. Late-arriving
+                              // events (Cloud API eventual consistency) end up after
+                              // the response in sorted order. Without this, they form
+                              // a phantom _AiWorkGroup with null response that shows
+                              // "Working..." forever even after the batch completes.
+                              while (ii < visible.length && visible[ii].role == 'event') {
+                                // Peek: if next item is assistant, these events
+                                // start a new turn — don't merge.
+                                if (ii + 1 < visible.length && visible[ii + 1].role == 'assistant') break;
+                                evts.add(visible[ii]);
+                                ii++;
+                              }
                             }
                             items.add(_AiWorkGroup(events: evts, response: aiResp));
                           } else {

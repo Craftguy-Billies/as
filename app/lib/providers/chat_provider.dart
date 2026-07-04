@@ -830,9 +830,12 @@ class ChatProvider extends ChangeNotifier {
       final data = await _api.getChat(repo: serverRepo, mode: serverMode);
       logViewer('ChatProvider.refreshFull: got server state');
 
-      // Step 2: Update repo/branch from server
+      // Step 2: Update repo/branch from server.
+      // Only trust server's repo when our local one is empty — prevents
+      // overwriting the user's explicitly chosen repo (same guard as
+      // refreshMessages at line 212).
       final serverRp = data['repo']?.toString();
-      if (serverRp != null && serverRp.isNotEmpty) {
+      if (serverRp != null && serverRp.isNotEmpty && serverRepo.isEmpty) {
         serverRepo = serverRp;
       }
       final serverBr = data['branch']?.toString();
@@ -865,6 +868,11 @@ class ChatProvider extends ChangeNotifier {
           }
         }
         for (final m in _messages) {
+          // Skip stale heartbeats from local cache — same reason as poll merge.
+          if (m.role == 'event' && m.content.contains('[STATUS]') &&
+              (m.content.contains('Working') || m.content.contains('working'))) {
+            continue;
+          }
           if (seen.add(m.dedupKey)) {
             if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
               continue;
