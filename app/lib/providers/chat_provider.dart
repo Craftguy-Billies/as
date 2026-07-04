@@ -252,6 +252,16 @@ class ChatProvider extends ChangeNotifier {
             if (seen.contains(contentKey)) continue;
             seen.add(contentKey);
           }
+          // Content-based dedup for user messages: send() adds user
+          // messages immediately; when the server returns them via poll,
+          // the local copy would be added again (Phase 2 sees different
+          // dedupKey: no id vs server id). Prevent duplicate by tracking
+          // content alongside dedupKey.
+          if (m.role == 'user' && m.content.isNotEmpty) {
+            final userKey = 'user_content:${m.content}';
+            if (seen.contains(userKey)) continue;
+            seen.add(userKey);
+          }
           if (seen.add(m.dedupKey)) {
             // Content-based dedup for assistant messages: if the same
             // response text was already added with a different server ID,
@@ -266,6 +276,11 @@ class ChatProvider extends ChangeNotifier {
           // Skip stale heartbeats — same reason as poll merge.
           if (m.role == 'event' && m.content.contains('[STATUS]') &&
               (m.content.contains('Working') || m.content.contains('working'))) {
+            continue;
+          }
+          // Skip user messages already covered by server messages (content-based).
+          if (m.role == 'user' && m.content.isNotEmpty &&
+              seen.contains('user_content:${m.content}')) {
             continue;
           }
           if (seen.add(m.dedupKey)) {
@@ -396,14 +411,20 @@ class ChatProvider extends ChangeNotifier {
 
       final status = result['status']?.toString() ?? '';
       if (status == 'queued') {
-        // DO NOT add user message to chat — it's in the queue.
-        // The poll picks it up once the server processes it.
         final wasAlreadyPolling = _pollTimer?.isActive == true;
         _queuePosition = (result['position'] as int?) ?? 0;
         _queueTotal = (result['total'] as int?) ?? 1;
         _pollFailures = 0;
         _loading = true;
         _loadingSince = DateTime.now();
+        // Add user message immediately so the user sees it in the UI
+        // even before the server processes it. The merge dedup (user-content
+        // key in Phase 1) prevents duplicates when the server returns it.
+        _messages.add(ChatMessage(
+          role: 'user', content: trimmed,
+          timestamp: DateTime.now().millisecondsSinceEpoch,
+        ));
+        await _saveToCache();
         logViewer('ChatProvider.send: queued pos=$_queuePosition total=$_queueTotal — polling');
         _notify();
         // Only start a new poll if one isn't already running. Calling
@@ -416,6 +437,12 @@ class ChatProvider extends ChangeNotifier {
         // Appended to running batch — poll will pick it up
         _queueTotal = (result['total'] as int?) ?? _queueTotal;
         _loading = true;
+        // Add user message immediately (same reason as 'queued' case)
+        _messages.add(ChatMessage(
+          role: 'user', content: trimmed,
+          timestamp: DateTime.now().millisecondsSinceEpoch,
+        ));
+        await _saveToCache();
         logViewer('ChatProvider.send: appended to batch (total=$_queueTotal)');
         _notify();
       } else {
@@ -486,6 +513,16 @@ class ChatProvider extends ChangeNotifier {
               if (seen.contains(contentKey)) continue;
               seen.add(contentKey);
             }
+            // Content-based dedup for user messages: send() adds user
+            // messages immediately; when the server returns them via poll,
+            // the local copy would be added again (Phase 2 sees different
+            // dedupKey: no id vs server id). Prevent duplicate by tracking
+            // content alongside dedupKey.
+            if (m.role == 'user' && m.content.isNotEmpty) {
+              final userKey = 'user_content:${m.content}';
+              if (seen.contains(userKey)) continue;
+              seen.add(userKey);
+            }
             if (seen.add(m.dedupKey)) {
               if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
                 continue;
@@ -502,6 +539,11 @@ class ChatProvider extends ChangeNotifier {
             // auto-refresh even though the agent has already completed.
             if (m.role == 'event' && m.content.contains('[STATUS]') &&
                 (m.content.contains('Working') || m.content.contains('working'))) {
+              continue;
+            }
+            // Skip user messages already covered by server messages (content-based).
+            if (m.role == 'user' && m.content.isNotEmpty &&
+                seen.contains('user_content:${m.content}')) {
               continue;
             }
             if (seen.add(m.dedupKey)) {
@@ -724,6 +766,13 @@ class ChatProvider extends ChangeNotifier {
             if (seen.contains(contentKey)) continue;
             seen.add(contentKey);
           }
+          // Content-based dedup for user messages: send() adds user
+          // messages immediately; prevent duplicates when server returns them.
+          if (m.role == 'user' && m.content.isNotEmpty) {
+            final userKey = 'user_content:${m.content}';
+            if (seen.contains(userKey)) continue;
+            seen.add(userKey);
+          }
           if (seen.add(m.dedupKey)) {
             if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
               continue;
@@ -735,6 +784,11 @@ class ChatProvider extends ChangeNotifier {
           // Skip stale heartbeats — same reason as poll merge.
           if (m.role == 'event' && m.content.contains('[STATUS]') &&
               (m.content.contains('Working') || m.content.contains('working'))) {
+            continue;
+          }
+          // Skip user messages already covered by server messages (content-based).
+          if (m.role == 'user' && m.content.isNotEmpty &&
+              seen.contains('user_content:${m.content}')) {
             continue;
           }
           if (seen.add(m.dedupKey)) {
@@ -790,6 +844,18 @@ class ChatProvider extends ChangeNotifier {
         if (modes != null) {
           _batchModes = modes.map((e) => e.toString()).toList();
         }
+      } else {
+        // Server returned no batch state (queue was fully processed and
+        // GC'd). Reset local batch tracking to prevent stuck loading.
+        _queuePosition = 0;
+        _queueTotal = 0;
+        _queueDone = 0;
+        _loading = false;
+        _loadingSince = null;
+        _batchSeenRunning = false;
+        _batchPrompts = [];
+        _batchModes = [];
+        _pollTimer?.cancel();
       }
 
       // Recover from "Lost connection" error if the API call succeeded.
@@ -871,6 +937,13 @@ class ChatProvider extends ChangeNotifier {
             if (seen.contains(contentKey)) continue;
             seen.add(contentKey);
           }
+          // Content-based dedup for user messages: send() adds user
+          // messages immediately; prevent duplicates when server returns them.
+          if (m.role == 'user' && m.content.isNotEmpty) {
+            final userKey = 'user_content:${m.content}';
+            if (seen.contains(userKey)) continue;
+            seen.add(userKey);
+          }
           if (seen.add(m.dedupKey)) {
             if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
               continue;
@@ -882,6 +955,11 @@ class ChatProvider extends ChangeNotifier {
           // Skip stale heartbeats from local cache — same reason as poll merge.
           if (m.role == 'event' && m.content.contains('[STATUS]') &&
               (m.content.contains('Working') || m.content.contains('working'))) {
+            continue;
+          }
+          // Skip user messages already covered by server messages (content-based).
+          if (m.role == 'user' && m.content.isNotEmpty &&
+              seen.contains('user_content:${m.content}')) {
             continue;
           }
           if (seen.add(m.dedupKey)) {
