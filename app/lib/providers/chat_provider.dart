@@ -285,14 +285,16 @@ class ChatProvider extends ChangeNotifier {
       logViewer('ChatProvider.loadFromCache: server merge failed (using cache): $e');
     }
 
-    // --- Phase D: Resume polling if batch running ---
+    // --- Phase D: Resume polling if batch exists (running OR queued) ---
     try {
       final state = await _api.getChat(repo: serverRepo, mode: serverMode);
       final batch = state?['batch'] as Map<String, dynamic>?;
-      final isRunning = batch?['running'] == true;
       final total = (batch?['total'] as int?) ?? 0;
-      logViewer('ChatProvider.loadFromCache: batch running=$isRunning total=$total pos=${batch?['position']}');
-      if (isRunning && total > 0) {
+      logViewer('ChatProvider.loadFromCache: batch total=$total pos=${batch?['position']} running=${batch?['running']}');
+      // Resume polling whenever there's a queue, regardless of isRunning.
+      // The batch may be queued but not yet running (worker hasn't picked it
+      // up) — the poll callback handles completion detection.
+      if (total > 0) {
         _queuePosition = (batch?['position'] as int?) ?? 0;
         _queueTotal = total;
         _loading = true;
@@ -761,15 +763,24 @@ class ChatProvider extends ChangeNotifier {
         _queuePosition = (batch['position'] as int?) ?? 0;
         _queueTotal = total;
         _queueDone = (batch['done'] as int?) ?? _queuePosition;
-        _loading = isRunning && total > 0;
-        if (!_loading) {
+
+        // CRITICAL: Do NOT cancel polling when total > 0 but isRunning is false.
+        // This happens when the batch was just queued but the worker hasn't
+        // picked it up yet. The poll callback handles completion detection
+        // with _batchSeenRunning + pollAge guards — but those guards can't
+        // fire if we kill the timer here.
+        if (_queueTotal > 0) {
+          // Queue exists — ensure polling runs regardless of isRunning.
+          _loading = true;
+          _loadingSince ??= DateTime.now();
+          if (_pollTimer == null || !_pollTimer!.isActive) {
+            _startPolling(repo: serverRepo, branch: serverBranch, mode: serverMode);
+          }
+        } else {
+          _loading = false;
           _pollTimer?.cancel();
           _loadingSince = null;
           _batchSeenRunning = false;
-        } else if (_pollTimer == null || !_pollTimer!.isActive) {
-          // App was backgrounded and polling stopped — restart it.
-          _loadingSince ??= DateTime.now();
-          _startPolling(repo: serverRepo, branch: serverBranch, mode: serverMode);
         }
         final prompts = batch['prompts'] as List?;
         if (prompts != null) {
@@ -789,8 +800,8 @@ class ChatProvider extends ChangeNotifier {
         if (_queueTotal > 0) {
           _startPolling(repo: serverRepo, branch: serverBranch, mode: serverMode);
         }
-        _notify();
       }
+      _notify();
     } catch (e) {
       logViewer('ChatProvider.refreshMessages: $e');
     }
@@ -893,11 +904,18 @@ class ChatProvider extends ChangeNotifier {
         _queuePosition = (batch['position'] as int?) ?? 0;
         _queueTotal = total;
         _queueDone = (batch['done'] as int?) ?? _queuePosition;
-        _loading = isRunning && total > 0;
-        if (_loading) {
+
+        // CRITICAL: Do NOT cancel polling when total > 0 but isRunning is false.
+        // Same reasoning as refreshMessages — the poll callback's completion
+        // detection guards need the timer to stay alive.
+        if (_queueTotal > 0) {
+          _loading = true;
           _loadingSince ??= DateTime.now();
-          _startPolling(repo: serverRepo, branch: serverBranch, mode: serverMode);
+          if (_pollTimer == null || !_pollTimer!.isActive) {
+            _startPolling(repo: serverRepo, branch: serverBranch, mode: serverMode);
+          }
         } else {
+          _loading = false;
           _pollTimer?.cancel();
           _loadingSince = null;
         }
