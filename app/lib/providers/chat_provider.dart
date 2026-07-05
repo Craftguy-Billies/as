@@ -469,6 +469,7 @@ class ChatProvider extends ChangeNotifier {
   void _startPolling({required String repo, required String branch, required String mode}) {
     _pollTimer?.cancel();
     _batchSeenRunning = false;  // new batch, new detection cycle
+    _pollFailures = 0;  // reset failure counter for new poll cycle
     final gen = ++_pollGeneration;
     final pollStarted = DateTime.now();
     logViewer('ChatProvider.poll: timer STARTED (gen=$gen repo=$repo branch=$branch)');
