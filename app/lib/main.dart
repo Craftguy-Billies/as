@@ -5,7 +5,8 @@ import 'package:firebase_core/firebase_core.dart';
 import 'services/api_service.dart';
 import 'services/preferences_service.dart';
 import 'services/notification_service.dart';
-import 'services/background_service.dart';
+import 'services/background_service_stub.dart'
+    if (dart.library.io) 'services/background_service.dart';
 import 'providers/task_provider.dart';
 import 'providers/settings_provider.dart';
 import 'screens/home_screen.dart';
@@ -26,8 +27,10 @@ void main() async {
   final api = ApiService();
   api.setBaseUrl(prefs.serverUrl);
 
-  // Initialize background service (WorkManager) for periodic task polling
-  await initBackgroundService();
+  // Initialize background service (Android/iOS only; web uses stub)
+  if (!kIsWeb) {
+    await initBackgroundService();
+  }
 
   NotificationService? ns;
   TaskProvider? taskProvider;
