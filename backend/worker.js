@@ -172,7 +172,7 @@ function buildStateResponse(state, q, hasPending, repo, mode, convStatus) {
     }
     messages.push(m);
   }
-  console.log(`[RESP] repo=${repo}: returning ${messages.length} msgs (dedup: ${dedupConsecutive} consecutive+${dedupAsstContent} content) | batch pos=${q.position||0}/${q.total||0} done=${q.done||0} running=${hasPending && !!state.conversation_id} convStatus=${convStatus} convId=${(state.conversation_id||'').slice(0,12)}`);
+  console.log(`[RESP] repo=${repo}: returning ${messages.length} msgs (dedup: ${dedupConsecutive} consecutive+${dedupAsstContent} content) | batch pos=${q.position||0}/${q.total||0} done=${q.done||0} running=${hasPending && (!!state.conversation_id || !!state.start_task_id)} convStatus=${convStatus} convId=${(state.conversation_id||'').slice(0,12)}`);
   return json({
     messages,
     conversation_id: state.conversation_id,
@@ -2058,6 +2058,7 @@ async function route(method, path, url, request, env) {
         } else {
           state.last_sent_position = q.position;
           state._dirty = true;
+          console.log(`[SEND-FOLLOWUP] repo=${repo}: sent prompt #${q.position} (${prompt.length} chars) → conv=${state.conversation_id.slice(0,12)}`);
           state._send_retry = 0;  // reset on successful send
       state._create_retry_at = undefined;
       state._send_retry_at = undefined;
@@ -2176,6 +2177,7 @@ async function route(method, path, url, request, env) {
         q.position++;
         state._dirty = true;
         q.done = Math.min(q.position, q.total);
+        console.log(`[QUEUE] repo=${repo}: advanced → pos=${q.position}/${q.total} done=${q.done}`);
         state._dirty = true;
         // Persist queue position and done to tiny keys. If writeStateIfDirty
         // fails below, q.position and q.done regress to stale KV values on the
@@ -2254,6 +2256,7 @@ async function route(method, path, url, request, env) {
           q.position++;
         state._dirty = true;
           q.done = Math.min(q.position, q.total);
+          console.log(`[QUEUE] repo=${repo}: advanced → pos=${q.position}/${q.total} done=${q.done}`);
         state._dirty = true;
           // Write rspt key AFTER push so the next poll can dedup (the same
           // pattern as the fetchResponse path at line ~1973).
@@ -2391,6 +2394,7 @@ async function route(method, path, url, request, env) {
           q.position++;
         state._dirty = true;
           q.done = Math.min(q.position, q.total);
+          console.log(`[QUEUE] repo=${repo}: advanced (retry) → pos=${q.position}/${q.total} done=${q.done}`);
         state._dirty = true;
           skipFutureCancelled(q);
           // Re-read q.total from KV: user may have queued more prompts while
@@ -2425,6 +2429,7 @@ async function route(method, path, url, request, env) {
         } else {
           // All retries exhausted — give up
           state.messages.push({ id: nextMsgId(state), role: 'event', content: '[ERROR] Task finished but no response text found', kind: 'ErrorEvent', timestamp: now() });
+          console.log(`[QUEUE] repo=${repo}: advancing after retry exhaustion → error at pos=${q.position}`);
 
           // Advance queue
           q.position++;
