@@ -75,6 +75,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       final offset = _scrollCtrl.hasClients ? _scrollCtrl.offset : 0.0;
       final show = offset > 200;
       if (show != _showScrollToBottom) {
+        debugPrint('[UI] scroll: offset=${offset.toStringAsFixed(0)} showFab=$show');
         setState(() => _showScrollToBottom = show);
       }
     });
@@ -172,6 +173,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     } catch (e) {
       debugPrint('[ChatScreen._init] model load error: $e');
     }
+    debugPrint('[UI] _init done: repoCtrl="${_repoCtrl.text}" branchCtrl="${_branchCtrl.text}" showRepoBar=$_showRepoBar hasLoaded=$_hasLoaded');
   }
 
   Future<void> _saveRepoPrefs() async {
@@ -295,6 +297,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final prov = context.watch<ChatProvider>();
     final msgs = prov.messages;
+    debugPrint('[UI] build: msgs=${msgs.length}/${prov.messages.length} showFrom=${prov.showFromIndex} loaded=$_hasLoaded loading=${prov.loading} batch=${prov.queueDone}/${prov.queueTotal} scrollFab=$_showScrollToBottom repoBar=$_showRepoBar implement=$_implementChecked test=$_testChecked audit=$_auditChecked');
 
     // With reverse:true ListView, offset 0 = bottom. Auto-scroll to
     // bottom when new messages arrive (count changes).
@@ -391,7 +394,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               color: _repoCtrl.text.isNotEmpty ? const Color(0xFF7C3AED) : Colors.grey,
             ),
             tooltip: _showRepoBar ? 'Hide repo settings' : 'Repo & mode',
-            onPressed: () => setState(() => _showRepoBar = !_showRepoBar),
+            onPressed: () {
+              debugPrint('[UI] repoBar toggle: ${!_showRepoBar}');
+              setState(() => _showRepoBar = !_showRepoBar);
+            },
           ),
           // Always show clear — user needs to reset conversation even when empty
           IconButton(
@@ -862,7 +868,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   width: 20,
                   child: Checkbox(
                     value: _implementChecked,
-                    onChanged: (v) => setState(() => _implementChecked = v ?? false),
+                    onChanged: (v) {
+                      debugPrint('[UI] implement checkbox: $v');
+                      setState(() => _implementChecked = v ?? false);
+                    },
                     activeColor: const Color(0xFF7C3AED),
                     checkColor: Colors.white,
                     side: const BorderSide(color: Color(0xFF4A4A5E), width: 1.5),
@@ -871,7 +880,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 ),
                 const SizedBox(width: 6),
                 GestureDetector(
-                  onTap: () => setState(() => _implementChecked = !_implementChecked),
+                  onTap: () {
+                    debugPrint('[UI] implement tap: ${!_implementChecked}');
+                    setState(() => _implementChecked = !_implementChecked);
+                  },
                   child: Text(
                     'Implement',
                     style: TextStyle(
@@ -889,6 +901,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   child: Checkbox(
                     value: _testChecked,
                     onChanged: (v) {
+                      debugPrint('[UI] test checkbox: $v');
                       setState(() => _testChecked = v ?? false);
                       // Persist immediately so state survives app restart
                       context.read<PreferencesService>().setTestEnabled(v ?? false);
@@ -903,6 +916,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 GestureDetector(
                   onTap: () {
                     final newVal = !_testChecked;
+                    debugPrint('[UI] test tap: $newVal');
                     setState(() => _testChecked = newVal);
                     context.read<PreferencesService>().setTestEnabled(newVal);
                   },
@@ -923,6 +937,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   child: Checkbox(
                     value: _auditChecked,
                     onChanged: (v) {
+                      debugPrint('[UI] audit checkbox: $v');
                       setState(() => _auditChecked = v ?? false);
                       context.read<PreferencesService>().setAuditEnabled(v ?? false);
                     },
@@ -936,6 +951,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 GestureDetector(
                   onTap: () {
                     final newVal = !_auditChecked;
+                    debugPrint('[UI] audit tap: $newVal');
                     setState(() => _auditChecked = newVal);
                     context.read<PreferencesService>().setAuditEnabled(newVal);
                   },
