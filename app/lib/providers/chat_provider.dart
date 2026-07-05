@@ -435,17 +435,15 @@ class ChatProvider extends ChangeNotifier {
           _startPolling(repo: repo, branch: branch, mode: mode);
         }
       } else if (status == 'appended') {
-        // Appended to running batch — poll will pick it up
+        // Appended to running batch — poll will pick it up.
+        // Do NOT add user message here. The server returns each user message
+        // one-by-one when the queue advances to it (in the SEND-FOLLOWUP phase).
+        // Adding all user messages upfront makes it look like the batch was sent
+        // at once instead of processing sequentially. The batch chips (above input)
+        // already show the prompt text — the user sees their message is queued.
         _queueTotal = (result['total'] as int?) ?? _queueTotal;
         _loading = true;
-        // Add user message immediately (same reason as 'queued' case)
-        _messages.add(ChatMessage(
-          role: 'user', content: trimmed,
-          timestamp: DateTime.now().millisecondsSinceEpoch,
-        ));
-        logViewer('ChatProvider.send: ADDED user msg to _messages (appended, id=${_messages.last.id})');
-        await _saveToCache();
-        logViewer('ChatProvider.send: appended to batch (total=$_queueTotal)');
+        logViewer('ChatProvider.send: appended to batch (total=$_queueTotal) — user msg deferred to server');
         _notify();
       } else {
         logViewer('ChatProvider.send: unexpected status=$status');
