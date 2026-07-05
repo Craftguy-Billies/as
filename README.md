@@ -118,3 +118,5 @@ app/               → Flutter Android app
     screens/       → Setup, Home, LiveFeed, Settings
     widgets/       → EventCard (7 types), TaskTile, StatusBanner
 ```
+
+This project is awesome!
