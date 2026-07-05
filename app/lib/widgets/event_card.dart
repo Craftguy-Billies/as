@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../models/event.dart';
 
 class EventCard extends StatelessWidget {
@@ -14,7 +15,7 @@ class EventCard extends StatelessWidget {
     if (event.isFileEditAction) return _buildFileEdit();
     if (event.isSearchAction) return _buildSearchResult();
     if (event.isError) return _buildError();
-    if (event.isObservation) return const SizedBox.shrink(); // shown inline with action
+    if (event.isObservation) return _buildObservation();
 
     // Generic fallback
     return _buildGeneric();
@@ -92,7 +93,14 @@ class EventCard extends StatelessWidget {
               const Spacer(),
               GestureDetector(
                 onTap: () {
-                  // Copy to clipboard would go here
+                  Clipboard.setData(ClipboardData(text: command));
+                  HapticFeedback.lightImpact();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Command copied'),
+                      duration: Duration(seconds: 1),
+                    ),
+                  );
                 },
                 child: const Icon(Icons.copy, color: Colors.grey, size: 14),
               ),
@@ -223,6 +231,36 @@ class EventCard extends StatelessWidget {
     );
   }
 
+  /// Render an observation event (command output, file-diff results, etc.).
+  /// Observations appear right after their corresponding action in the feed,
+  /// so they read naturally as inline output.
+  Widget _buildObservation() {
+    Map<String, dynamic>? obs;
+    try {
+      obs = event.observationJson != null
+          ? json.decode(event.observationJson!) as Map<String, dynamic>
+          : null;
+    } catch (_) {}
+
+    if (obs == null) return const SizedBox.shrink();
+
+    final content = obs['content'] as String? ?? '';
+    final extractedContent = obs['extracted_content'] as String? ?? '';
+    final exitCode = obs['exit_code'];
+    final displayContent = extractedContent.isNotEmpty ? extractedContent : content;
+
+    if (displayContent.isEmpty) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.only(left: 24, right: 12, bottom: 4),
+      child: _CollapsibleOutput(
+        content: displayContent,
+        exitCode: exitCode is int ? exitCode : null,
+        isError: exitCode is int && exitCode != 0,
+      ),
+    );
+  }
+
   Widget _buildGeneric() {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
@@ -242,6 +280,154 @@ class EventCard extends StatelessWidget {
               style: TextStyle(color: Colors.grey[700], fontSize: 11),
             ),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+/// A collapsible block showing terminal/file-output content.
+/// When content exceeds [maxPreviewLines], a "Show more/less" toggle appears.
+class _CollapsibleOutput extends StatefulWidget {
+  final String content;
+  final int? exitCode;
+  final bool isError;
+
+  const _CollapsibleOutput({
+    required this.content,
+    this.exitCode,
+    this.isError = false,
+  });
+
+  @override
+  State<_CollapsibleOutput> createState() => _CollapsibleOutputState();
+}
+
+class _CollapsibleOutputState extends State<_CollapsibleOutput> {
+  bool _expanded = false;
+  static const int maxPreviewLines = 6;
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = const LineSplitter().convert(widget.content);
+    final isLong = lines.length > maxPreviewLines;
+    final displayLines = isLong && !_expanded
+        ? lines.take(maxPreviewLines).toList()
+        : lines;
+    final displayText = displayLines.join('\n');
+    final trailingNewline = isLong && !_expanded && lines.length > maxPreviewLines
+        ? '... (${lines.length - maxPreviewLines} more lines)'
+        : null;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: widget.isError
+            ? const Color(0xFF2A1010)
+            : const Color(0xFF0D0D0D),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: widget.isError
+              ? const Color(0xFF5B2020)
+              : const Color(0xFF222222),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header: output label + optional exit code
+          if (widget.exitCode != null || isLong)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
+              child: Row(
+                children: [
+                  Icon(
+                    widget.isError ? Icons.error : Icons.output,
+                    size: 12,
+                    color: widget.isError ? Colors.redAccent : Colors.grey,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Output',
+                    style: TextStyle(
+                      color: widget.isError ? Colors.redAccent : Colors.grey,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const Spacer(),
+                  if (widget.exitCode != null)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: widget.isError
+                            ? Colors.red.withAlpha(30)
+                            : Colors.green.withAlpha(30),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        'exit ${widget.exitCode}',
+                        style: TextStyle(
+                          color: widget.isError ? Colors.redAccent : const Color(0xFF00FF88),
+                          fontSize: 10,
+                          fontFamily: 'monospace',
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+
+          // Content
+          Padding(
+            padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
+            child: SelectableText(
+              displayText,
+              style: TextStyle(
+                color: widget.isError ? Colors.redAccent[100] : const Color(0xFFCCCCCC),
+                fontSize: 12,
+                fontFamily: 'monospace',
+                height: 1.4,
+              ),
+            ),
+          ),
+
+          // Trailing "more lines" hint
+          if (trailingNewline != null)
+            Padding(
+              padding: const EdgeInsets.only(left: 10, bottom: 4),
+              child: Text(
+                trailingNewline,
+                style: TextStyle(color: Colors.grey[600], fontSize: 11, fontStyle: FontStyle.italic),
+              ),
+            ),
+
+          // Show more/less button
+          if (isLong)
+            InkWell(
+              onTap: () => setState(() => _expanded = !_expanded),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                decoration: BoxDecoration(
+                  border: Border(top: BorderSide(color: Colors.grey[800]!)),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      _expanded ? Icons.expand_less : Icons.expand_more,
+                      size: 16,
+                      color: Colors.grey[500],
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      _expanded ? 'Show less' : 'Show all (${lines.length} lines)',
+                      style: TextStyle(color: Colors.grey[500], fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            ),
         ],
       ),
     );

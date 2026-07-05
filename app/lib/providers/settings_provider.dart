@@ -2,9 +2,6 @@ import 'package:flutter/material.dart';
 import '../services/api_service.dart';
 import '../services/preferences_service.dart';
 
-/// Global key for navigation from notifications / auto-refresh
-final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
-
 class SettingsProvider extends ChangeNotifier {
   final ApiService _api;
   final PreferencesService _prefs;

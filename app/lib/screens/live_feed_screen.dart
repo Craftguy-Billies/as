@@ -120,12 +120,24 @@ class _LiveFeedScreenState extends State<LiveFeedScreen>
                     itemCount: events.length + 1, // +1 for "show more" at top
                     itemBuilder: (context, i) {
                       if (i == 0) {
-                        // "Show more" button
-                        return events.length >= 30
+                        // Show less / Show earlier buttons at top
+                        if (events.length > 30) {
+                          return Center(
+                            child: TextButton.icon(
+                              onPressed: () => prov.collapseEvents(),
+                              icon: const Icon(Icons.expand_less, color: Colors.grey),
+                              label: const Text(
+                                'Show less',
+                                style: TextStyle(color: Colors.grey),
+                              ),
+                            ),
+                          );
+                        }
+                        return events.length >= 30 && prov.hasMoreEvents
                             ? Center(
                                 child: TextButton.icon(
                                   onPressed: () => prov.loadMoreEvents(),
-                                  icon: const Icon(Icons.expand_less, color: Colors.grey),
+                                  icon: const Icon(Icons.expand_more, color: Colors.grey),
                                   label: const Text(
                                     'Show earlier messages',
                                     style: TextStyle(color: Colors.grey),

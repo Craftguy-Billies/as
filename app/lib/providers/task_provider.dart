@@ -24,6 +24,7 @@ class TaskProvider extends ChangeNotifier {
   String? _currentTaskId;
   Timer? _pollTimer;
   bool _autoScroll = true;
+  bool _hasMoreEvents = false;
 
   /// Called when a task becomes completed or failed during polling.
   TaskStatusCallback? onTaskCompleted;
@@ -44,6 +45,7 @@ class TaskProvider extends ChangeNotifier {
   String? get error => _error;
   String? get currentTaskId => _currentTaskId;
   bool get autoScroll => _autoScroll;
+  bool get hasMoreEvents => _hasMoreEvents;
 
   set autoScroll(bool v) {
     _autoScroll = v;
@@ -264,6 +266,7 @@ class TaskProvider extends ChangeNotifier {
           .map((e) => AgentEvent.fromJson(e as Map<String, dynamic>))
           .toList();
       final taskStatus = data['task_status'] as String?;
+      _hasMoreEvents = data['has_more'] == true;
 
       debugPrint('[TASK_PROV] _fetchEvents() got ${newEvents.length} events, task_status=$taskStatus');
 
