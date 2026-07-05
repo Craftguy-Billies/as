@@ -1897,6 +1897,19 @@ async function route(method, path, url, request, env) {
       await writeStateIfDirty(env, repo, state);
     }
 
+    // Flush deferred follow-up messages from the PREVIOUS poll's SEND-FOLLOWUP.
+    // These were stored in _pending_followup_msgs (not in state.messages) so the
+    // previous poll response showed only the assistant — not the next prompt's
+    // user message. They become visible in THIS poll so the UI shows one-by-one.
+    if (state._pending_followup_msgs && state._pending_followup_msgs.length > 0) {
+      console.log(`[POLL] repo=${repo}: FLUSH_DEFERRED flushing ${state._pending_followup_msgs.length} msgs`);
+      for (const msg of state._pending_followup_msgs) {
+        state.messages.push(msg);
+      }
+      state._pending_followup_msgs = [];
+      state._dirty = true;
+    }
+
     // --- Phase: create conversation if queue has work ---
     if (hasPending && !state.conversation_id && !state.start_task_id) {
       // Don't retry createConversation more often than every 30s.
@@ -2063,8 +2076,14 @@ async function route(method, path, url, request, env) {
       state._create_retry_at = undefined;
       state._send_retry_at = undefined;
           state._send_retry_at = undefined;
-          state.messages.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
-          state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+          // Defer user message + working event to NEXT poll so the user sees
+          // the previous prompt's assistant response BEFORE the next prompt's
+          // user message appears. Pushing to state.messages immediately would
+          // include them in THIS poll's response — the user sees asst1+user2
+          // together instead of sequentially.
+          if (!state._pending_followup_msgs) state._pending_followup_msgs = [];
+          state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'user', content: prompt, timestamp: now() });
+          state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
           state._dirty = true;
           // Write last_sent_position to SEPARATE small KV key FIRST
           try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
@@ -2201,8 +2220,9 @@ async function route(method, path, url, request, env) {
             state.last_sent_position = q.position;
           state._dirty = true;
             try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
-            state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
-            state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+            if (!state._pending_followup_msgs) state._pending_followup_msgs = [];
+            state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
+            state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
           state._dirty = true;
           }
         }
@@ -2282,8 +2302,9 @@ async function route(method, path, url, request, env) {
               state.last_sent_position = q.position;
           state._dirty = true;
               try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
-              state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
-              state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+              if (!state._pending_followup_msgs) state._pending_followup_msgs = [];
+              state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
+              state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
           state._dirty = true;
             }
           }
@@ -2413,8 +2434,9 @@ async function route(method, path, url, request, env) {
               state.last_sent_position = q.position;
           state._dirty = true;
               try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
-              state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
-              state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+              if (!state._pending_followup_msgs) state._pending_followup_msgs = [];
+              state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
+              state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
           state._dirty = true;
             }
           }
@@ -2452,8 +2474,9 @@ async function route(method, path, url, request, env) {
               state.last_sent_position = q.position;
           state._dirty = true;
               try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
-              state.messages.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
-              state.messages.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+              if (!state._pending_followup_msgs) state._pending_followup_msgs = [];
+              state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
+              state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
           state._dirty = true;
             }
           }
