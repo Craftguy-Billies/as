@@ -72,6 +72,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // Track scroll position to show/hide scroll-to-bottom button.
     // With reverse:true, offset=0=bottom. Show button when offset > 200.
     _scrollCtrl.addListener(() {
+      if (!mounted) return;
       final offset = _scrollCtrl.hasClients ? _scrollCtrl.offset : 0.0;
       final show = offset > 200;
       if (show != _showScrollToBottom) {

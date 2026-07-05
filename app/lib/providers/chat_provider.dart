@@ -274,8 +274,7 @@ class ChatProvider extends ChangeNotifier {
         }
         for (final m in _messages) {
           // Skip stale heartbeats — same reason as poll merge.
-          if (m.role == 'event' && m.content.contains('[STATUS]') &&
-              (m.content.contains('Working') || m.content.contains('working'))) {
+          if (m.role == 'event' && m.content.contains('[STATUS]')) {
             continue;
           }
           // Skip user messages already covered by server messages (content-based).
@@ -456,9 +455,14 @@ class ChatProvider extends ChangeNotifier {
     } catch (e) {
       logViewer('ChatProvider.send: ERROR ${ApiService.friendlyError(e)}');
       _error = ApiService.friendlyError(e);
-      _queuePosition = 0;
-      _queueTotal = 0;
-      _queueDone = 0;
+      // Only reset queue state if there was NO batch running before the error.
+      // If a batch was already running, this was an append failure — the batch
+      // continues on the server and we should keep showing progress in the UI.
+      if (_queueTotal == 0) {
+        _queuePosition = 0;
+        _queueTotal = 0;
+        _queueDone = 0;
+      }
       _notify();
     }
   }
@@ -641,6 +645,7 @@ class ChatProvider extends ChangeNotifier {
               _loading = false;
               _queuePosition = 0;
               _queueTotal = 0;
+              _queueDone = 0;
               _batchSeenRunning = false;
               logViewer('ChatProvider.poll: batch completed — stopped '
                         '(seenRunning=$_batchSeenRunning pollAge=${pollAge.inSeconds}s wasLoading=$wasLoading)');
@@ -737,6 +742,23 @@ class ChatProvider extends ChangeNotifier {
       _loadingSince = null;
       await _saveToCache();
       logViewer('ChatProvider.switchRepo: loaded ${_messages.length} msgs for repo=$repo branch=$serverBranch');
+
+      // If this repo has a running batch (started by another device), resume polling
+      final batch = state['batch'] as Map<String, dynamic>?;
+      final batchTotal = (batch?['total'] as int?) ?? 0;
+      if (batchTotal > 0) {
+        _queuePosition = (batch?['position'] as int?) ?? 0;
+        _queueTotal = batchTotal;
+        _queueDone = (batch?['done'] as int?) ?? 0;
+        final bPrompts = batch?['prompts'] as List?;
+        if (bPrompts != null) _batchPrompts = bPrompts.map((e) => e.toString()).toList();
+        final bModes = batch?['modes'] as List?;
+        if (bModes != null) _batchModes = bModes.map((e) => e.toString()).toList();
+        _loading = true;
+        _loadingSince = DateTime.now();
+        _startPolling(repo: serverRepo, branch: serverBranch, mode: serverMode);
+        logViewer('ChatProvider.switchRepo: resumed polling for batch (total=$batchTotal pos=$_queuePosition done=$_queueDone)');
+      }
     } catch (e) {
       logViewer('ChatProvider.switchRepo: failed to fetch messages: $e');
       _loading = false;
@@ -793,8 +815,7 @@ class ChatProvider extends ChangeNotifier {
         }
         for (final m in _messages) {
           // Skip stale heartbeats — same reason as poll merge.
-          if (m.role == 'event' && m.content.contains('[STATUS]') &&
-              (m.content.contains('Working') || m.content.contains('working'))) {
+          if (m.role == 'event' && m.content.contains('[STATUS]')) {
             continue;
           }
           // Skip user messages already covered by server messages (content-based).
@@ -838,9 +859,7 @@ class ChatProvider extends ChangeNotifier {
           // Queue exists — ensure polling runs regardless of isRunning.
           _loading = true;
           _loadingSince ??= DateTime.now();
-          if (_pollTimer == null || !_pollTimer!.isActive) {
-            _startPolling(repo: serverRepo, branch: serverBranch, mode: serverMode);
-          }
+          _startPolling(repo: serverRepo, branch: serverBranch, mode: serverMode);
         } else {
           _loading = false;
           _pollTimer?.cancel();
@@ -964,8 +983,7 @@ class ChatProvider extends ChangeNotifier {
         }
         for (final m in _messages) {
           // Skip stale heartbeats from local cache — same reason as poll merge.
-          if (m.role == 'event' && m.content.contains('[STATUS]') &&
-              (m.content.contains('Working') || m.content.contains('working'))) {
+          if (m.role == 'event' && m.content.contains('[STATUS]')) {
             continue;
           }
           // Skip user messages already covered by server messages (content-based).
@@ -1000,9 +1018,7 @@ class ChatProvider extends ChangeNotifier {
         if (_queueTotal > 0) {
           _loading = true;
           _loadingSince ??= DateTime.now();
-          if (_pollTimer == null || !_pollTimer!.isActive) {
-            _startPolling(repo: serverRepo, branch: serverBranch, mode: serverMode);
-          }
+          _startPolling(repo: serverRepo, branch: serverBranch, mode: serverMode);
         } else {
           _loading = false;
           _pollTimer?.cancel();
@@ -1062,7 +1078,7 @@ class ChatProvider extends ChangeNotifier {
 
     // Await server cancel — if it fails, show error but UI already reset
     try {
-      final ok = await _api.cancelChatBatch();
+      final ok = await _api.cancelChatBatch(repo: serverRepo);
       if (!ok) {
         logViewer('ChatProvider.cancel: server unreachable, batch may still run');
       }
@@ -1078,7 +1094,7 @@ class ChatProvider extends ChangeNotifier {
     logViewer('ChatProvider.cancelPrompt: #$index "${_batchPrompts[index].length > 60 ? "${_batchPrompts[index].substring(0, 60)}..." : _batchPrompts[index]}"');
 
     try {
-      final result = await _api.cancelPrompt(index);
+      final result = await _api.cancelPrompt(index, repo: serverRepo);
       if (result != null && result.containsKey('error')) {
         logViewer('ChatProvider.cancelPrompt error: ${result['error']}');
       }
