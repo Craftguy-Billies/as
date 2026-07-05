@@ -467,24 +467,29 @@ class ChatProvider extends ChangeNotifier {
     }
   }
 
-  // -- Polling: fetch messages + progress every 2 seconds --
+  // -- Polling: fetch messages + progress with exponential backoff --
   void _startPolling({required String repo, required String branch, required String mode}) {
     _pollTimer?.cancel();
     _batchSeenRunning = false;  // new batch, new detection cycle
     _pollFailures = 0;  // reset failure counter for new poll cycle
     final gen = ++_pollGeneration;
     final pollStarted = DateTime.now();
+    Duration _delay = const Duration(seconds: 2); // starts at 2s, grows on failure
     logViewer('ChatProvider.poll: timer STARTED (gen=$gen repo=$repo branch=$branch)');
-    _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+
+    void tick() async {
       if (gen != _pollGeneration) return; // stale: repo switched or chat cleared
-      if (DateTime.now().difference(pollStarted).inMinutes >= 30) {
+
+      // Overall poll timeout — batch runs on server independently, so this
+      // only stops the local UI updates. 120 minutes covers even very long agents.
+      if (DateTime.now().difference(pollStarted).inMinutes >= 120) {
         _pollTimer?.cancel();
         _loading = false;
         _loadingSince = null;
         _queuePosition = 0;
         _queueTotal = 0;
         _queueDone = 0;
-        _error = 'Polling timed out (30 min). Queue may still run on server.';
+        _error = 'Polling timed out (2h). Queue may still run on server.';
         logViewer('ChatProvider.poll: TIMEOUT');
         _notify();
         return;
@@ -663,19 +668,30 @@ class ChatProvider extends ChangeNotifier {
         }
 
         _pollFailures = 0;
+        _delay = const Duration(seconds: 2); // reset backoff on success
         _notify();
       } catch (e) {
-        logViewer('ChatProvider.poll: fail #$_pollFailures: $e');
         _pollFailures++;
-        if (_pollFailures >= 10) {
-          _error = 'Lost connection to server. Queue may still be running.';
+        logViewer('ChatProvider.poll: fail #$_pollFailures (next in ${_delay.inSeconds}s): $e');
+        if (_pollFailures >= 30) {
+          _error = 'Lost connection to server (${_pollFailures} attempts). Queue may still be running.';
           _loading = false;
           _loadingSince = null;
           _pollTimer?.cancel();
           _notify();
+          return; // don't reschedule
         }
+        // Exponential backoff with jitter: 2→4→8→16→30→60, capped at 60s
+        final secs = (_delay.inSeconds * 2).clamp(2, 60);
+        _delay = Duration(seconds: secs);
       }
-    });
+      // Self-rescheduling: schedule next poll after the current delay
+      if (gen == _pollGeneration) {
+        _pollTimer = Timer(_delay, tick);
+      }
+    }
+
+    tick(); // start immediately
   }
 
   // -- Repo management --
