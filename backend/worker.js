@@ -186,7 +186,7 @@ function buildStateResponse(state, q, hasPending, repo, mode, convStatus) {
     configured_model: state.configured_model || '',
     run_started_at: state._run_started_at || null,
     batch: {
-      running: hasPending && !!state.conversation_id,
+      running: hasPending && (!!state.conversation_id || !!state.start_task_id),
       cancelled: !!q.cancelled,
       position: q.position || 0,
       total: q.total || 0,
@@ -1862,6 +1862,7 @@ async function route(method, path, url, request, env) {
 
     // --- Phase: resolve start_task to conversation_id (stateful retry across polls) ---
     if (!state.conversation_id && state.start_task_id) {
+      convStatus = 'starting';
       const stKey = `start_task:${state.start_task_id}`;
       let stCount = 0;
       try {
