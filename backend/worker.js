@@ -78,25 +78,32 @@ const now = () => Date.now();
 
 async function readState(env, repo) {
   const raw = await env.VIBECODE.get(`state:${repo}`);
-  if (!raw) return null;
-  try { return JSON.parse(raw); } catch { return null; }
+  if (!raw) { console.log(`[KV] readState(${repo}): MISS — no state found`); return null; }
+  try { return JSON.parse(raw); } catch (e) { console.error(`[KV] readState(${repo}): PARSE ERROR — ${e.message}`); return null; }
 }
 
 /** Trim state in-place before writing to KV to stay under size limits. */
 function trimState(state) {
   if (state.messages && state.messages.length > 5000) {
+    const before = state.messages.length;
     state.messages = state.messages.slice(-4000);
+    console.log(`[KV] trimState: messages trimmed ${before}→${state.messages.length}`);
   }
   if (state.event_kinds && Object.keys(state.event_kinds).length > 1000) {
+    console.log(`[KV] trimState: event_kinds reset (${Object.keys(state.event_kinds).length} keys)`);
     state.event_kinds = {};
   }
   if (state._extracted_hashes && Object.keys(state._extracted_hashes).length > 100) {
+    console.log(`[KV] trimState: _extracted_hashes reset (${Object.keys(state._extracted_hashes).length} keys)`);
     state._extracted_hashes = {};
   }
   if (state.seen_event_ids && state.seen_event_ids.length > 2000) {
+    const before = state.seen_event_ids.length;
     state.seen_event_ids = state.seen_event_ids.slice(-1500);
+    console.log(`[KV] trimState: seen_event_ids trimmed ${before}→${state.seen_event_ids.length}`);
   }
   if (state._batch_skip && Object.keys(state._batch_skip).length > 100) {
+    console.log(`[KV] trimState: _batch_skip cleared (${Object.keys(state._batch_skip).length} keys)`);
     state._batch_skip = undefined;
   }
 }
@@ -106,8 +113,8 @@ async function writeState(env, repo, state) {
   try {
     await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
     return true;
-  } catch (_) {
-    // KV write limit exceeded — worker stays functional in-memory, next poll retries.
+  } catch (e) {
+    console.error(`[KV] writeState(${repo}): WRITE FAILED — ${e.message || e}`);
     return false;
   }
 }
@@ -146,23 +153,26 @@ function buildStateResponse(state, q, hasPending, repo, mode, convStatus) {
   const msgs = state.messages || [];
   const messages = [];
   const seenAsstContent = new Set();
+  let dedupConsecutive = 0;
+  let dedupAsstContent = 0;
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
     // Skip consecutive event messages with identical content
     // (cold start can reprocess events, creating duplicates in memory)
     if (m.role === 'event' && i > 0) {
       const prev = msgs[i - 1];
-      if (prev.role === 'event' && prev.content === m.content) continue;
+      if (prev.role === 'event' && prev.content === m.content) { dedupConsecutive++; continue; }
     }
     // Content-based dedup for assistant messages: KV eventual consistency
     // can cause the same response text to be pushed twice with different
     // IDs. Keeping only the first occurrence prevents duplicates.
     if (m.role === 'assistant' && m.content) {
-      if (seenAsstContent.has(m.content)) continue;
+      if (seenAsstContent.has(m.content)) { dedupAsstContent++; continue; }
       seenAsstContent.add(m.content);
     }
     messages.push(m);
   }
+  console.log(`[RESP] repo=${repo}: returning ${messages.length} msgs (dedup: ${dedupConsecutive} consecutive+${dedupAsstContent} content) | batch pos=${q.position||0}/${q.total||0} done=${q.done||0} running=${hasPending && !!state.conversation_id} convStatus=${convStatus} convId=${(state.conversation_id||'').slice(0,12)}`);
   return json({
     messages,
     conversation_id: state.conversation_id,
@@ -387,10 +397,11 @@ async function createConversation(env, prompt, repo, branch, mode, state) {
   }
 
   const cfg = await readConfig(env);
+  const model = cfg.model || env.LLM_MODEL || 'deepseek/deepseek-v4-flash';
   const body = {
     initial_message: { content: [{ type: 'text', text: fullPrompt }] },
     title: prompt.slice(0, 80),
-    llm_model: cfg.model || env.LLM_MODEL || 'deepseek/deepseek-v4-flash',
+    llm_model: model,
   };
   if (repo) {
     body.selected_repository = repo;
@@ -423,6 +434,8 @@ async function createConversation(env, prompt, repo, branch, mode, state) {
     }
   } catch (_) {}
 
+  const t0 = Date.now();
+  console.log(`[CONV] repo=${repo}: creating conversation — model=${model} promptLen=${fullPrompt.length} mcp=${mcpServers.map(s=>s.name).join(',')||'none'} repo=${repo} branch=${effectiveBranch}`);
   const resp = await fetchWithTimeout(`${CLOUD_API}/api/v1/app-conversations`, {
     method: 'POST',
     headers: await cloudHeaders(env),
@@ -430,7 +443,9 @@ async function createConversation(env, prompt, repo, branch, mode, state) {
   });
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(`Create conv failed: ${resp.status}:${text.slice(0, 200)}`);
+    const err = new Error(`Create conv failed: ${resp.status}:${text.slice(0, 200)}`);
+    console.error(`[CONV] repo=${repo}: create FAILED — ${resp.status} (${Date.now()-t0}ms)`);
+    throw err;
   }
   const data = await resp.json();
 
@@ -439,6 +454,7 @@ async function createConversation(env, prompt, repo, branch, mode, state) {
   const directId = data.app_conversation_id || data.conversation_id || '';
   const taskId = data.id || data.start_task_id || '';
   const sboxId = data.sandbox_id || '';
+  console.log(`[CONV] repo=${repo}: created — convId=${directId.slice(0,12)} startTaskId=${taskId.slice(0,12)} sandboxId=${sboxId.slice(0,12)} (${Date.now()-t0}ms)`);
   return {
     conversation_id: directId,
     start_task_id: taskId,
@@ -485,6 +501,8 @@ async function sendMessage(env, convId, prompt, sandboxId) {
     content: [{ type: 'text', text: prompt }],
     run: true,
   };
+  const t0 = Date.now();
+  console.log(`[SEND] conv=${convId.slice(0,12)}: sending msg (${prompt.length} chars) sandboxId=${(sandboxId||'').slice(0,12)}`);
   let lastErr = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     let resp;
@@ -497,6 +515,7 @@ async function sendMessage(env, convId, prompt, sandboxId) {
     } catch (e) {
       // Timeout or network error — return error string, don't throw
       lastErr = e.name === 'AbortError' ? 'send-message timed out' : `send-message failed: ${e.message}`;
+      console.error(`[SEND] conv=${convId.slice(0,12)}: ${lastErr} (${Date.now()-t0}ms)`);
       break;
     }
     if (resp.ok) {
@@ -506,6 +525,7 @@ async function sendMessage(env, convId, prompt, sandboxId) {
         if (data.success === false) {
           const sbStatus = data.sandbox_status || 'unknown';
           lastErr = `send-message rejected (sandbox=${sbStatus})`;
+          console.error(`[SEND] conv=${convId.slice(0,12)}: ${lastErr} (${Date.now()-t0}ms)`);
           break;
         }
       } catch (_) {}
@@ -519,6 +539,7 @@ async function sendMessage(env, convId, prompt, sandboxId) {
             const acp = items[0].acp_server || '';
             const sk = items[0].session_api_key || '';
             if (acp && sk) {
+              console.log(`[SEND] conv=${convId.slice(0,12)}: triggering /run (agent stuck in ${status})`);
               fetch(`${acp}/api/conversations/${convId}/run`, {
                 method: 'POST',
                 headers: { 'X-Session-API-Key': sk },
@@ -527,9 +548,11 @@ async function sendMessage(env, convId, prompt, sandboxId) {
           }
         }
       } catch (_) {}
+      console.log(`[SEND] conv=${convId.slice(0,12)}: OK (${Date.now()-t0}ms)`);
       return null;  // success
     }
     if (resp.status === 409 && attempt === 0 && sandboxId) {
+      console.log(`[SEND] conv=${convId.slice(0,12)}: 409 — resuming sandbox ${sandboxId.slice(0,12)}`);
       try {
         const r = await fetch(`${CLOUD_API}/api/v1/sandboxes/${sandboxId}/resume`, {
           method: 'POST', headers: await cloudHeaders(env),
@@ -537,6 +560,7 @@ async function sendMessage(env, convId, prompt, sandboxId) {
         if (!r.ok) {
           const txt = await r.text().catch(() => '');
           lastErr = `${r.status}:${txt.slice(0, 200)}`;
+          console.error(`[SEND] conv=${convId.slice(0,12)}: sandbox resume failed — ${lastErr}`);
           break;
         }
         // Poll sandbox status until RUNNING (up to ~20s, every 2s).
@@ -599,6 +623,7 @@ async function pollConversation(env, convId, state) {
     // min_timestamp!). Use the conversation's updated_at as a window start
     // so we only fetch the recent events cluster.
     const cutoff = state._last_response_ts || '';
+    console.log(`[POLL] conv=${convId}: status=${execStatus} — searching events (cutoff=${(cutoff||'none').slice(0,24)})`);
     try {
       const updatedMs = conv.updated_at ? new Date(conv.updated_at).getTime() : Date.now();
       if (!isNaN(updatedMs)) {
@@ -658,9 +683,11 @@ async function pollConversation(env, convId, state) {
   }
 
   if (['failed', 'error', 'stopped'].includes(execStatus)) {
+    console.log(`[POLL] conv=${convId}: status=${execStatus} error=${(conv.error_message||conv.error||'').slice(0,80)}`);
     return { status: 'failed', error: conv.error_message || conv.error || execStatus, sandbox_id: sandboxId };
   }
 
+  console.log(`[POLL] conv=${convId}: status=${execStatus||'pending'} (unhandled — treating as pending)`);
   return { status: execStatus || 'pending', sandbox_id: sandboxId };
 }
 
@@ -818,6 +845,10 @@ async function fetchResponse(env, convId, state) {
  */
 async function processCloudEvents(env, convId, state) {
   const seen = new Set((state.seen_event_ids || []).map(String));
+  const t0 = Date.now();
+  let totalEvents = 0;
+  let newEvents = 0;
+  let kindCounts = {};
   try {
     // Paginate through ALL pages (not just the first 100). events/search max
     // limit=100, no offset support — use min_timestamp cursor.
@@ -848,6 +879,9 @@ async function processCloudEvents(env, convId, state) {
         const tool = evt.tool_name || evt.tool || evt.name || '';
         const ts = evt.timestamp || evt.created_at || now();
 
+        totalEvents++;
+        kindCounts[kind] = (kindCounts[kind] || 0) + 1;
+
         // Register dedup for MessageEvents too (so fetchResponse can skip old
         // ones when looking for the current turn's response). Without this, when
         // a new prompt is sent to an existing conversation, fetchResponse finds
@@ -861,6 +895,8 @@ async function processCloudEvents(env, convId, state) {
         // Track already-seen events by ID (registered AFTER MessageEvent skip)
         if (eid && seen.has(eid)) continue;
         if (eid) seen.add(eid);
+
+        newEvents++;
 
         // AgentStateChangeEvent
         if (kind === 'AgentStateChangeEvent') {
@@ -976,6 +1012,8 @@ async function processCloudEvents(env, convId, state) {
     }
   } catch (_) {}
 
+  const kindSummary = Object.entries(kindCounts).map(([k,v]) => `${k}=${v}`).join(' ');
+  console.log(`[CLOUD] conv=${convId}: processed ${totalEvents} events (${newEvents} new, ${totalEvents-newEvents} skipped) — ${kindSummary} (${Date.now()-t0}ms)`);
   state.seen_event_ids = Array.from(seen);
 }
 
@@ -1441,6 +1479,8 @@ async function route(method, path, url, request, env) {
     state.queue.total = state.queue.prompts.length;
     state.queue.cancelled = false;
 
+    console.log(`[BATCH] repo=${repo}: queued ${prompts.length} prompts — pos=${state.queue.position}/${state.queue.total} mode=${mode}`);
+
     // Write to KV directly (not writeState) so we can detect failure and
     // return an error to the client — if the queue state wasn't persisted,
     // the message is lost forever (next poll reads old state from KV).
@@ -1669,6 +1709,7 @@ async function route(method, path, url, request, env) {
     }
 
     const q = state.queue;
+    const tPoll = Date.now();
 
     // Restore last_sent_position from the tiny lsp KV key if writeState
     // failed after a successful sendMessage (see line 1622).
@@ -2123,6 +2164,7 @@ async function route(method, path, url, request, env) {
         // is still propagating (KV eventual consistency).
         try { await env.VIBECODE.put(rsptKey, directResponse, {expirationTtl: 86400}); } catch (_) {}
         state.messages.push({ id: nextMsgId(state), role: 'assistant', content: directResponse, timestamp: now() });
+        console.log(`[RESP] repo=${repo}: PUSH assistant msg (${directResponse.length} chars) via fetchResponse — pos=${q.position}/${q.total}`);
         state._dirty = true;
         state._last_response_ts = new Date().toISOString();
         // Persist to separate tiny key — survives main state write failures.
@@ -2205,6 +2247,7 @@ async function route(method, path, url, request, env) {
             return buildStateResponse(state, q, false, repo, mode, 'completed');
           }
           state.messages.push({ id: nextMsgId(state), role: 'assistant', content: responseText, timestamp: now() });
+          console.log(`[RESP] repo=${repo}: PUSH assistant msg (${responseText.length} chars) via pollConversation — pos=${q.position}/${q.total}`);
           state._dirty = true;
           // Advance queue
           q.position++;
@@ -2338,6 +2381,7 @@ async function route(method, path, url, request, env) {
           // Clean up retry state
           try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
           state.messages.push({ id: nextMsgId(state), role: 'assistant', content: retryResponse, timestamp: now() });
+          console.log(`[RESP] repo=${repo}: PUSH assistant msg (${retryResponse.length} chars) via RETRY — pos=${q.position}/${q.total}`);
           state._last_response_ts = new Date().toISOString();
           // Persist to separate tiny key — survives main state write failures.
           try { await env.VIBECODE.put(`lrt:${state.conversation_id}`, state._last_response_ts); } catch (_) {}
@@ -2556,6 +2600,7 @@ async function route(method, path, url, request, env) {
       }
     }
     // No poll phase ran (no conversation_id or no pending work). Return current state.
+    console.log(`[POLL] repo=${repo}: done — hasPending=${hasPending} convId=${(state.conversation_id||'').slice(0,12)} convStatus=${convStatus} (${Date.now()-tPoll}ms)`);
     return buildStateResponse(state, q, hasPending, repo, mode, convStatus);
   }
 

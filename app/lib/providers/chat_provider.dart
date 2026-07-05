@@ -354,7 +354,7 @@ class ChatProvider extends ChangeNotifier {
       return;
     }
 
-    logViewer('ChatProvider.send: START repo=$repo branch=$branch mode=$mode');
+    logViewer('ChatProvider.send: START repo=$repo branch=$branch mode=$mode msg="${trimmed.length > 80 ? '${trimmed.substring(0, 80)}...' : trimmed}"');
     _error = null;
 
     // If repo or branch changed, switch to new conversation history
@@ -424,6 +424,7 @@ class ChatProvider extends ChangeNotifier {
           role: 'user', content: trimmed,
           timestamp: DateTime.now().millisecondsSinceEpoch,
         ));
+        logViewer('ChatProvider.send: ADDED user msg to _messages (id=${_messages.last.id})');
         await _saveToCache();
         logViewer('ChatProvider.send: queued pos=$_queuePosition total=$_queueTotal — polling');
         _notify();
@@ -442,6 +443,7 @@ class ChatProvider extends ChangeNotifier {
           role: 'user', content: trimmed,
           timestamp: DateTime.now().millisecondsSinceEpoch,
         ));
+        logViewer('ChatProvider.send: ADDED user msg to _messages (appended, id=${_messages.last.id})');
         await _saveToCache();
         logViewer('ChatProvider.send: appended to batch (total=$_queueTotal)');
         _notify();
@@ -469,6 +471,7 @@ class ChatProvider extends ChangeNotifier {
     _batchSeenRunning = false;  // new batch, new detection cycle
     final gen = ++_pollGeneration;
     final pollStarted = DateTime.now();
+    logViewer('ChatProvider.poll: timer STARTED (gen=$gen repo=$repo branch=$branch)');
     _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
       if (gen != _pollGeneration) return; // stale: repo switched or chat cleared
       if (DateTime.now().difference(pollStarted).inMinutes >= 30) {
@@ -502,6 +505,10 @@ class ChatProvider extends ChangeNotifier {
           // different server IDs (e.g. from KV write failure + rspt recovery)
           // should not appear twice.
           final seenAssistantContent = <String>{};
+          int dedupServerId = 0;
+          int dedupServerAsstContent = 0;
+          int dedupServerUserContent = 0;
+          int dedupClientSeen = 0;
           // Phase 1: server messages (canonical, have IDs).
           for (final m in serverMsgs) {
             // Content-based dedup for assistant messages: KV eventual
@@ -510,7 +517,7 @@ class ChatProvider extends ChangeNotifier {
             // prevents duplicate assistant bubbles in the UI.
             if (m.role == 'assistant' && m.content.isNotEmpty) {
               final contentKey = 'asst_content:${m.content}';
-              if (seen.contains(contentKey)) continue;
+              if (seen.contains(contentKey)) { dedupServerAsstContent++; continue; }
               seen.add(contentKey);
             }
             // Content-based dedup for user messages: send() adds user
@@ -520,7 +527,7 @@ class ChatProvider extends ChangeNotifier {
             // content alongside dedupKey.
             if (m.role == 'user' && m.content.isNotEmpty) {
               final userKey = 'user_content:${m.content}';
-              if (seen.contains(userKey)) continue;
+              if (seen.contains(userKey)) { dedupServerUserContent++; continue; }
               seen.add(userKey);
             }
             if (seen.add(m.dedupKey)) {
@@ -528,7 +535,7 @@ class ChatProvider extends ChangeNotifier {
                 continue;
               }
               merged.add(m);
-            }
+            } else { dedupServerId++; }
           }
           // Phase 2: client messages only if not covered by server
           for (final m in _messages) {
@@ -551,7 +558,7 @@ class ChatProvider extends ChangeNotifier {
                 continue;
               }
               merged.add(m);
-            }
+            } else { dedupClientSeen++; }
           }
           // Sort by timestamp so messages appear chronologically
           merged.sort((a, b) => a.timestamp.compareTo(b.timestamp));
@@ -562,7 +569,9 @@ class ChatProvider extends ChangeNotifier {
           if (merged.length != _messages.length ||
               _messages.isEmpty ||
               merged.last.timestamp != _messages.last.timestamp) {
-            logViewer('ChatProvider.poll: merged ${_messages.length}→${merged.length} messages');
+            logViewer('ChatProvider.poll: merged ${_messages.length}→${merged.length} messages '
+                      '(dedup: id=${dedupServerId} asstContent=${dedupServerAsstContent} '
+                      'userContent=${dedupServerUserContent} clientSeen=${dedupClientSeen})');
             _messages = merged;
             _resetShowIndex();  // re-clamp after possible trim
             _error = null;
@@ -589,6 +598,9 @@ class ChatProvider extends ChangeNotifier {
           // is still False because the worker hasn't picked it up. If we set
           // _loading=false and cancel the timer here, the batch runs invisibly.
           if (relevantToMe) {
+            if (_loading != isRunning) {
+              logViewer('ChatProvider.poll: _loading ${_loading}→$isRunning (relevantToMe=$relevantToMe)');
+            }
             _loading = isRunning;
           }
           _queuePosition = (batch['position'] as int?) ?? _queuePosition;

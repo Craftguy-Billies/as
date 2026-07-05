@@ -22,7 +22,7 @@ class ApiService {
       return 'Cannot reach server. Check your internet connection and server URL.';
     }
     if (s.contains('timeout') || s.contains('timed out')) {
-      return 'Request timed out. The server may be overloaded — try again.';
+      return 'Request timed out. The server may be overloaded ã try again.';
     }
     if (s.contains('handshake') || s.contains('certificate') || s.contains('tls')) {
       return 'Secure connection failed. Check your server URL (use http:// for local servers).';
@@ -150,7 +150,7 @@ class ApiService {
     return json.decode(resp.body) as Map<String, dynamic>;
   }
 
-  /// Send all prompts at once — backend queues them, processes in background.
+  /// Send all prompts at once ã backend queues them, processes in background.
   /// Returns immediately. Poll getChat() to track progress and new messages.
   Future<Map<String, dynamic>> sendChatBatch({
     required List<String> prompts,
@@ -158,22 +158,32 @@ class ApiService {
     String branch = '',
     String mode = 'code',
   }) async {
-    final resp = await http
-        .post(
-          Uri.parse('$_url/api/chat/batch'),
-          headers: {'Content-Type': 'application/json'},
-          body: json.encode({
-            'prompts': prompts,
-            'repo': repo,
-            'branch': branch,
-            'mode': mode,
-          }),
-        )
-        .timeout(const Duration(seconds: 10));
-    if (resp.statusCode != 200) {
-      throw Exception(_parseError(resp.statusCode, resp.body));
+    final t0 = DateTime.now();
+    debugPrint('[API] sendChatBatch ã $_url/api/chat/batch repo=$repo branch=$branch mode=$mode prompts=${prompts.length}');
+    try {
+      final resp = await http
+          .post(
+            Uri.parse('$_url/api/chat/batch'),
+            headers: {'Content-Type': 'application/json'},
+            body: json.encode({
+              'prompts': prompts,
+              'repo': repo,
+              'branch': branch,
+              'mode': mode,
+            }),
+          )
+          .timeout(const Duration(seconds: 10));
+      final elapsed = DateTime.now().difference(t0).inMilliseconds;
+      debugPrint('[API] sendChatBatch ã ${resp.statusCode} (${elapsed}ms) bodyLen=${resp.body.length}');
+      if (resp.statusCode != 200) {
+        throw Exception(_parseError(resp.statusCode, resp.body));
+      }
+      return json.decode(resp.body) as Map<String, dynamic>;
+    } catch (e) {
+      final elapsed = DateTime.now().difference(t0).inMilliseconds;
+      debugPrint('[API] sendChatBatch ã ${e.runtimeType}: ${e.toString().length > 120 ? '${e.toString().substring(0, 120)}...' : e.toString()} (${elapsed}ms)');
+      rethrow;
     }
-    return json.decode(resp.body) as Map<String, dynamic>;
   }
 
   Future<bool> cancelChatBatch() async {
@@ -212,13 +222,25 @@ class ApiService {
     final uri = repo.isNotEmpty
         ? Uri.parse('$_url/api/chat?repo=${Uri.encodeComponent(repo)}&mode=${Uri.encodeComponent(mode)}')
         : Uri.parse('$_url/api/chat');
-    final resp = await http
-        .get(uri)
-        .timeout(const Duration(seconds: 60));
-    if (resp.statusCode != 200) {
-      throw Exception(_parseError(resp.statusCode, resp.body));
+    final t0 = DateTime.now();
+    try {
+      final resp = await http
+          .get(uri)
+          .timeout(const Duration(seconds: 60));
+      final elapsed = DateTime.now().difference(t0).inMilliseconds;
+      final data = json.decode(resp.body) as Map<String, dynamic>;
+      final msgs = data['messages'] as List?;
+      final batch = data['batch'] as Map<String, dynamic>?;
+      debugPrint('[API] getChat ← ${resp.statusCode} (${elapsed}ms) msgs=${msgs?.length ?? 0} batchRunning=${batch?['running']} pos=${batch?['position']}/${batch?['total']}');
+      if (resp.statusCode != 200) {
+        throw Exception(_parseError(resp.statusCode, resp.body));
+      }
+      return data;
+    } catch (e) {
+      final elapsed = DateTime.now().difference(t0).inMilliseconds;
+      debugPrint('[API] getChat ✗ ${e.runtimeType}: ${e.toString().length > 120 ? '${e.toString().substring(0, 120)}...' : e.toString()} (${elapsed}ms)');
+      rethrow;
     }
-    return json.decode(resp.body) as Map<String, dynamic>;
   }
 
   Future<List<Map<String, dynamic>>> getChatRepos() async {

@@ -220,6 +220,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && mounted) {
+      debugPrint('[ChatScreen] lifecycle RESUMED — triggering refreshMessages()');
       context.read<ChatProvider>().refreshMessages();
     }
   }
@@ -286,7 +287,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final branch = _branchCtrl.text.trim().isEmpty ? 'main' : _branchCtrl.text.trim();
     final prov = context.read<ChatProvider>();
 
-    debugPrint('[ChatScreen._send] repo=$repo branch=$branch mode=code implement=$_implementChecked test=$_testChecked');
+    debugPrint('[ChatScreen._send] repo=$repo branch=$branch mode=code implement=$_implementChecked test=$_testChecked msg="${text.length > 100 ? '${text.substring(0, 100)}...' : text}"');
     prov.send(text, repo: repo, branch: branch, mode: 'code');
   }
 
@@ -298,7 +299,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // With reverse:true ListView, offset 0 = bottom. Auto-scroll to
     // bottom when new messages arrive (count changes).
     if (msgs.isNotEmpty && _hasLoaded && msgs.length != _lastMsgCount) {
+      final oldCount = _lastMsgCount;
       _lastMsgCount = msgs.length;
+      debugPrint('[ChatScreen] auto-scroll: msgs $oldCount→${msgs.length} (last role=${msgs.last.role})');
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_scrollCtrl.hasClients) {
           _scrollCtrl.animateTo(
