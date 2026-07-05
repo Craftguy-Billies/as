@@ -31,6 +31,11 @@
 
   <title>vibecode</title>
   <link rel="manifest" href="manifest.json">
+  <script>
+    // Force HTML renderer for maximum browser compatibility.
+    // CanvasKit requires WebGL which fails silently on many browsers.
+    window.flutterConfiguration = { renderer: 'html' };
+  </script>
 </head>
 <body>
   <!--
