@@ -72,7 +72,8 @@ class ChatProvider extends ChangeNotifier {
   // Deferred user message bubbles: only shown when agent starts processing that
   // position (queuePosition reaches the message's index). Added by send(), shown
   // in poll tick when position advances.
-  final List<String> _deferredUserContents = [];
+  // Map of content → send-timestamp so inserted bubbles sort correctly.
+  final Map<String, int> _deferredMessages = {};
   int _lastPositionShown = -1;  // highest queuePosition whose user msg was inserted
 
   ChatProvider(this._api);
@@ -447,7 +448,7 @@ class ChatProvider extends ChangeNotifier {
         _loading = true;
         _loadingSince = DateTime.now();
         _pendingUserContents.add(trimmed);
-        _deferredUserContents.add(trimmed);
+        _deferredMessages[trimmed] = DateTime.now().millisecondsSinceEpoch;
         // Only show user message bubble immediately for the FIRST message.
         // Subsequent messages are hidden until the agent reaches their position
         // (poll tick inserts them when _queuePosition advances).
@@ -679,21 +680,21 @@ class ChatProvider extends ChangeNotifier {
           _queueDone = (batch['done'] as int?) ?? _queuePosition;
 
           // Insert deferred user messages when position advances.
-          // On first poll: pos=0 → show message 0 (if not already shown).
-          // On subsequent polls: pos=1 → show message 1, pos=2 → show message 2, etc.
-          // Use _lastPositionShown to avoid re-inserting on every poll.
+          // Uses stored send-timestamp so inserted bubbles sort correctly
+          // (before the AI response, not after).
           _lastPositionShown ??= -1;
-          while (_lastPositionShown < _queuePosition && _lastPositionShown + 1 < _deferredUserContents.length) {
+          final deferredKeys = _deferredMessages.keys.toList();
+          while (_lastPositionShown < _queuePosition && _lastPositionShown + 1 < deferredKeys.length) {
             final idx = _lastPositionShown + 1;
-            final content = _deferredUserContents[idx];
-            // Check if already in _messages (first msg added immediately in send())
+            final content = deferredKeys[idx];
+            final sendTs = _deferredMessages[content] ?? DateTime.now().millisecondsSinceEpoch;
             final alreadyInChat = _messages.any((m) => m.role == 'user' && m.content == content);
             if (!alreadyInChat) {
               _messages.add(ChatMessage(
                 role: 'user', content: content,
-                timestamp: DateTime.now().millisecondsSinceEpoch,
+                timestamp: sendTs,
               ));
-              logViewer('ChatProvider.poll: inserted deferred user msg #$idx: "$content"');
+              logViewer('ChatProvider.poll: inserted deferred user msg #$idx: "$content" (ts=$sendTs)');
             } else {
               logViewer('ChatProvider.poll: user msg #$idx already in chat, skipping');
             }
@@ -739,8 +740,8 @@ class ChatProvider extends ChangeNotifier {
               _batchSeenRunning = false;
               _pendingUserContents.clear();  // prevent stale entries across batch cycles
               _confirmedUserContents.clear();
-    _deferredUserContents.clear();
-    _lastPositionShown = -1;
+              _deferredMessages.clear();
+              _lastPositionShown = -1;
               logViewer('ChatProvider.poll: batch completed — stopped '
                         '(seenRunning=$_batchSeenRunning pollAge=${pollAge.inSeconds}s wasLoading=$wasLoading)');
             } else {
@@ -1225,7 +1226,7 @@ class ChatProvider extends ChangeNotifier {
     _batchModes = [];
     _pendingUserContents.clear();
     _confirmedUserContents.clear();
-    _deferredUserContents.clear();
+    _deferredMessages.clear();
     _lastPositionShown = -1;
     _notify();
 
@@ -1272,7 +1273,7 @@ class ChatProvider extends ChangeNotifier {
     _queueDone = 0;
     _pendingUserContents.clear();
     _confirmedUserContents.clear();
-    _deferredUserContents.clear();
+    _deferredMessages.clear();
     _lastPositionShown = -1;
     _error = null;
     // Insert a centered system message immediately for instant feedback
@@ -1306,7 +1307,7 @@ class ChatProvider extends ChangeNotifier {
     _queueDone = 0;
     _pendingUserContents.clear();
     _confirmedUserContents.clear();
-    _deferredUserContents.clear();
+    _deferredMessages.clear();
     _lastPositionShown = -1;
     _lastConversationId = null;
     _conversationChanged = false;
