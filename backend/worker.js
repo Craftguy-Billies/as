@@ -166,6 +166,12 @@ function buildStateResponse(state, q, hasPending, repo, mode, convStatus) {
   let dedupAsstContent = 0;
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
+    // Filter heartbeat/STATUS events — they're internal progress indicators,
+    // not chat bubbles. The Flutter UI has its own progress tracking via batch
+    // state (position/total/done) and doesn't need these inline.
+    if (m.role === 'event' && m.content && m.content.includes('[STATUS]')) {
+      continue;
+    }
     // Skip consecutive event messages with identical content
     // (cold start can reprocess events, creating duplicates in memory)
     if (m.role === 'event' && i > 0) {

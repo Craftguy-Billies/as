@@ -611,6 +611,12 @@ class ChatProvider extends ChangeNotifier {
           int dedupClientSeen = 0;
           // Phase 1: server messages (canonical, have IDs).
           for (final m in serverMsgs) {
+            // Filter heartbeat/STATUS events from server — the worker may
+            // still push them in some code paths; filtering here ensures
+            // they never appear as chat bubbles regardless of worker version.
+            if (m.role == 'event' && m.content.contains('[STATUS]')) {
+              continue;
+            }
             // Content-based dedup for assistant messages: KV eventual
             // consistency can cause the same response text to be pushed
             // twice with different IDs. Keeping only the first occurrence
