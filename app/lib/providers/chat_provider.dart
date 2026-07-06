@@ -957,10 +957,25 @@ class ChatProvider extends ChangeNotifier {
         // with _batchSeenRunning + pollAge guards — but those guards can't
         // fire if we kill the timer here.
         if (_queueTotal > 0) {
-          // Queue exists — ensure polling runs regardless of isRunning.
-          _loading = true;
-          _loadingSince ??= DateTime.now();
-          _startPolling(repo: serverRepo, branch: serverBranch, mode: serverMode);
+          // Batch is already complete on the server — don't restart polling.
+          // Otherwise polling shows "agent working" for up to 15s needlessly.
+          final done = _queueDone;
+          final isRunning = batch['running'] == true;
+          if ((done >= total || _queuePosition >= total) && !isRunning) {
+            _queuePosition = 0;
+            _queueTotal = 0;
+            _queueDone = 0;
+            _loading = false;
+            _loadingSince = null;
+            _batchSeenRunning = false;
+            _pollTimer?.cancel();
+            logViewer('ChatProvider.refreshMessages: batch already complete — not restarting poll');
+          } else {
+            // Queue exists — ensure polling runs regardless of isRunning.
+            _loading = true;
+            _loadingSince ??= DateTime.now();
+            _startPolling(repo: serverRepo, branch: serverBranch, mode: serverMode);
+          }
         } else {
           _loading = false;
           _pollTimer?.cancel();
