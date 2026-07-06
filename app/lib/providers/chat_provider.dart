@@ -441,25 +441,27 @@ class ChatProvider extends ChangeNotifier {
 
       final status = result['status']?.toString() ?? '';
       if (status == 'queued') {
-        final wasAlreadyPolling = _pollTimer?.isActive == true;
-        _queuePosition = (result['position'] as int?) ?? 0;
-        _queueTotal = (result['total'] as int?) ?? 1;
         _pollFailures = 0;
         _loading = true;
         _loadingSince = DateTime.now();
         _pendingUserContents.add(trimmed);
         _deferred.add((trimmed, DateTime.now().millisecondsSinceEpoch));
-        // Only show user message bubble immediately for the FIRST message.
-        // Subsequent messages are hidden until the agent reaches their position
-        // (poll tick inserts them when _queuePosition advances).
-        if (_queueTotal <= 1 || !wasAlreadyPolling) {
+        // Queue position from server — 0 for new batch, non-0 if appended
+        _queuePosition = (result['position'] as int?) ?? 0;
+        _queueTotal = (result['total'] as int?) ?? 1;
+        // Only show user bubble immediately for the FIRST message in a batch.
+        // _queueTotal > 1 means we appended to an existing batch — defer the
+        // bubble until the poll tick advances _queuePosition past this message.
+        // Previously used _pollTimer?.isActive which races: two rapid sends()
+        // both see timer=null before the first has started polling.
+        if (_queueTotal <= 1) {
           _messages.add(ChatMessage(
             role: 'user', content: trimmed,
             timestamp: DateTime.now().millisecondsSinceEpoch,
           ));
           logViewer('ChatProvider.send: ADDED user msg immediately (first in batch)');
         } else {
-          logViewer('ChatProvider.send: deferred user msg (pos=$_queuePosition total=$_queueTotal) — will show when agent reaches it');
+          logViewer('ChatProvider.send: deferred user msg (total=$_queueTotal) — will show when agent reaches it');
         }
         await _saveToCache();
         logViewer('ChatProvider.send: queued pos=$_queuePosition total=$_queueTotal — polling');
@@ -467,19 +469,17 @@ class ChatProvider extends ChangeNotifier {
         // Only start a new poll if one isn't already running. Calling
         // _startPolling on an active batch resets _batchSeenRunning and
         // re-creates the timer, delaying completion detection by 15s.
-        if (!wasAlreadyPolling) {
+        if (_pollTimer?.isActive != true) {
           _startPolling(repo: repo, branch: branch, mode: mode);
         }
       } else if (status == 'appended') {
-        // Appended to running batch — poll will pick it up.
-        // Do NOT add user message here. The server returns each user message
-        // one-by-one when the queue advances to it (in the SEND-FOLLOWUP phase).
-        // Adding all user messages upfront makes it look like the batch was sent
-        // at once instead of processing sequentially. The batch chips (above input)
-        // already show the prompt text — the user sees their message is queued.
+        // Appended to running batch — defer the user bubble until the poll
+        // tick advances _queuePosition past this message.
         _queueTotal = (result['total'] as int?) ?? _queueTotal;
         _loading = true;
-        logViewer('ChatProvider.send: appended to batch (total=$_queueTotal) — user msg deferred to server');
+        _pendingUserContents.add(trimmed);
+        _deferred.add((trimmed, DateTime.now().millisecondsSinceEpoch));
+        logViewer('ChatProvider.send: appended to batch (total=$_queueTotal) — user msg deferred to poll');
         _notify();
       } else {
         logViewer('ChatProvider.send: unexpected status=$status');
