@@ -66,6 +66,9 @@ class ChatProvider extends ChangeNotifier {
 
   // Pending message tracking: user messages queued but not yet confirmed by server
   final Set<String> _pendingUserContents = {};
+  // Count of server-confirmed user contents: used to skip local copies
+  // without accidentally deduping identical messages (e.g., two "hi!"s)
+  final Map<String, int> _confirmedUserContents = {};
 
   ChatProvider(this._api);
 
@@ -551,6 +554,7 @@ class ChatProvider extends ChangeNotifier {
         logViewer('ChatProvider.poll: serverMsgs=${serverMsgs.length} localMsgs=${_messages.length} convId=$newConvId pendingUserMsgs=${_pendingUserContents.length}');
         if (serverMsgs.isNotEmpty) {
           final merged = <ChatMessage>[];
+          _confirmedUserContents.clear();
           final seen = <String>{};
           // Secondary dedup: assistant messages with identical content but
           // different server IDs (e.g. from KV write failure + rspt recovery)
@@ -574,16 +578,14 @@ class ChatProvider extends ChangeNotifier {
             // Content-based dedup for user messages: send() adds user
             // messages immediately; when the server returns them via poll,
             // the local copy would be added again (Phase 2 sees different
-            // dedupKey: no id vs server id). Prevent duplicate by tracking
-            // content alongside dedupKey.
+            // dedupKey: no id vs server id). Track confirmed contents
+            // with a count to handle identical messages correctly.
             // Also clear from pending set — server has confirmed this message.
             if (m.role == 'user' && m.content.isNotEmpty) {
-              final userKey = 'user_content:${m.content}';
-              if (seen.contains(userKey)) { dedupServerUserContent++; continue; }
-              seen.add(userKey);
               if (_pendingUserContents.remove(m.content)) {
                 logViewer('ChatProvider.poll: server confirmed pending msg, remaining=${_pendingUserContents.length}');
               }
+              _confirmedUserContents.update(m.content, (v) => v + 1, ifAbsent: () => 1);
             }
             if (seen.add(m.dedupKey)) {
               if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
@@ -603,10 +605,15 @@ class ChatProvider extends ChangeNotifier {
                 (m.content.contains('Working') || m.content.contains('working'))) {
               continue;
             }
-            // Skip user messages already covered by server messages (content-based).
-            if (m.role == 'user' && m.content.isNotEmpty &&
-                seen.contains('user_content:${m.content}')) {
-              continue;
+            // Skip user messages already covered by server messages.
+            // Use count-based tracking so identical messages (e.g., two "hi!"s)
+            // each get one local copy skipped — not both deduped by content.
+            if (m.role == 'user' && m.content.isNotEmpty) {
+              final cnt = _confirmedUserContents[m.content] ?? 0;
+              if (cnt > 0) {
+                _confirmedUserContents[m.content] = cnt - 1;
+                continue;
+              }
             }
             if (seen.add(m.dedupKey)) {
               if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
@@ -700,6 +707,7 @@ class ChatProvider extends ChangeNotifier {
               _queueDone = 0;
               _batchSeenRunning = false;
               _pendingUserContents.clear();  // prevent stale entries across batch cycles
+              _confirmedUserContents.clear();
               logViewer('ChatProvider.poll: batch completed — stopped '
                         '(seenRunning=$_batchSeenRunning pollAge=${pollAge.inSeconds}s wasLoading=$wasLoading)');
             } else {
@@ -874,6 +882,7 @@ class ChatProvider extends ChangeNotifier {
       logViewer('ChatProvider.refreshMessages: serverMsgs=${serverMsgs.length} localMsgs=${_messages.length} convId=$newConvId pendingUserMsgs=${_pendingUserContents.length}');
       if (serverMsgs.isNotEmpty) {
         final merged = <ChatMessage>[];
+        _confirmedUserContents.clear();
         final seen = <String>{};
         final seenAssistantContent = <String>{};
         for (final m in serverMsgs) {
@@ -888,12 +897,10 @@ class ChatProvider extends ChangeNotifier {
           // messages immediately; prevent duplicates when server returns them.
           // Also clear from pending set — server has confirmed this message.
           if (m.role == 'user' && m.content.isNotEmpty) {
-            final userKey = 'user_content:${m.content}';
-            if (seen.contains(userKey)) continue;
-            seen.add(userKey);
             if (_pendingUserContents.remove(m.content)) {
               logViewer('ChatProvider.refreshMessages: server confirmed pending msg, remaining=${_pendingUserContents.length}');
             }
+            _confirmedUserContents.update(m.content, (v) => v + 1, ifAbsent: () => 1);
           }
           if (seen.add(m.dedupKey)) {
             if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
@@ -907,11 +914,15 @@ class ChatProvider extends ChangeNotifier {
           if (m.role == 'event' && m.content.contains('[STATUS]')) {
             continue;
           }
-          // Skip user messages already covered by server messages (content-based).
-          // BUT keep pending messages that haven't been confirmed by server yet.
-          if (m.role == 'user' && m.content.isNotEmpty &&
-              seen.contains('user_content:${m.content}')) {
-            continue;
+          // Skip user messages already covered by server messages.
+          // Use count-based tracking so identical messages (e.g., two "hi!"s)
+          // each get one local copy skipped — not both deduped by content.
+          if (m.role == 'user' && m.content.isNotEmpty) {
+            final cnt = _confirmedUserContents[m.content] ?? 0;
+            if (cnt > 0) {
+              _confirmedUserContents[m.content] = cnt - 1;
+              continue;
+            }
           }
           if (seen.add(m.dedupKey)) {
             if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
@@ -1165,6 +1176,7 @@ class ChatProvider extends ChangeNotifier {
     _batchPrompts = [];
     _batchModes = [];
     _pendingUserContents.clear();
+    _confirmedUserContents.clear();
     _notify();
 
     // Await server cancel — if it fails, show error but UI already reset
@@ -1209,6 +1221,7 @@ class ChatProvider extends ChangeNotifier {
     _queueTotal = 0;
     _queueDone = 0;
     _pendingUserContents.clear();
+    _confirmedUserContents.clear();
     _error = null;
     // Insert a centered system message immediately for instant feedback
     _messages.add(ChatMessage(
@@ -1240,6 +1253,7 @@ class ChatProvider extends ChangeNotifier {
     _queueTotal = 0;
     _queueDone = 0;
     _pendingUserContents.clear();
+    _confirmedUserContents.clear();
     _lastConversationId = null;
     _conversationChanged = false;
     _conversationChangeReason = null;
