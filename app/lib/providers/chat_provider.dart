@@ -546,15 +546,50 @@ class ChatProvider extends ChangeNotifier {
             _skipNextConvChangeMsg = false;
           } else {
             final serverReason = convChange?['reason']?.toString();
+            final serverAt = convChange?['at']?.toString();
             final reason = serverReason ?? 'Server started a new conversation';
+            // Use server timestamp so system message sorts correctly relative
+            // to server messages, avoiding device-clock skew issues.
+            final sysTs = serverAt != null
+                ? DateTime.tryParse(serverAt)?.millisecondsSinceEpoch
+                : null;
             _messages.add(ChatMessage(
               role: 'system', content: reason,
-              timestamp: DateTime.now().millisecondsSinceEpoch,
+              timestamp: sysTs ?? DateTime.now().millisecondsSinceEpoch,
             ));
             logViewer('ChatProvider.poll: NEW CONVERSATION system msg: $reason');
           }
         }
         _lastConversationId = newConvId;
+
+        // Fetch queue progress BEFORE merge so deferred user messages
+        // are inserted BEFORE the merge sorts by timestamp. Otherwise
+        // _messages.add() appends after merge and the user bubble lands
+        // after system/AI messages (wrong order).
+        var batch = state['batch'] as Map<String, dynamic>?;
+        if (batch != null) {
+          _queuePosition = (batch['position'] as int?) ?? _queuePosition;
+          _queueTotal = (batch['total'] as int?) ?? _queueTotal;
+          _queueDone = (batch['done'] as int?) ?? _queuePosition;
+
+          // Insert deferred user messages when position advances.
+          _lastPositionShown ??= -1;
+          while (_lastPositionShown < _queuePosition && _lastPositionShown + 1 < _deferred.length) {
+            final idx = _lastPositionShown + 1;
+            final (content, sendTs) = _deferred[idx];
+            final alreadyInChat = _messages.any((m) => m.role == 'user' && m.content == content);
+            if (!alreadyInChat) {
+              _messages.add(ChatMessage(
+                role: 'user', content: content,
+                timestamp: sendTs,
+              ));
+              logViewer('ChatProvider.poll: inserted deferred user msg #$idx: "$content" (ts=$sendTs)');
+            } else {
+              logViewer('ChatProvider.poll: user msg #$idx already in chat, skipping');
+            }
+            _lastPositionShown = idx;
+          }
+        }
 
         // Merge server messages (events, responses) into local chat
         final serverMsgs = (state['messages'] as List?)
@@ -652,7 +687,6 @@ class ChatProvider extends ChangeNotifier {
         }
 
         // Update progress from server
-        final batch = state['batch'] as Map<String, dynamic>?;
         if (batch != null) {
           final wasLoading = _loading;
           final isRunning = batch['running'] == true;
@@ -674,29 +708,6 @@ class ChatProvider extends ChangeNotifier {
               logViewer('ChatProvider.poll: _loading ${_loading}→$isRunning (relevantToMe=$relevantToMe)');
             }
             _loading = isRunning;
-          }
-          _queuePosition = (batch['position'] as int?) ?? _queuePosition;
-          _queueTotal = (batch['total'] as int?) ?? _queueTotal;
-          _queueDone = (batch['done'] as int?) ?? _queuePosition;
-
-          // Insert deferred user messages when position advances.
-          // Uses stored send-timestamp so inserted bubbles sort correctly
-          // (before the AI response, not after).
-          _lastPositionShown ??= -1;
-          while (_lastPositionShown < _queuePosition && _lastPositionShown + 1 < _deferred.length) {
-            final idx = _lastPositionShown + 1;
-            final (content, sendTs) = _deferred[idx];
-            final alreadyInChat = _messages.any((m) => m.role == 'user' && m.content == content);
-            if (!alreadyInChat) {
-              _messages.add(ChatMessage(
-                role: 'user', content: content,
-                timestamp: sendTs,
-              ));
-              logViewer('ChatProvider.poll: inserted deferred user msg #$idx: "$content" (ts=$sendTs)');
-            } else {
-              logViewer('ChatProvider.poll: user msg #$idx already in chat, skipping');
-            }
-            _lastPositionShown = idx;
           }
 
           // Parse prompt list for per-prompt cancel UI
