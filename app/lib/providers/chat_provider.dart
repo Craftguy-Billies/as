@@ -69,6 +69,11 @@ class ChatProvider extends ChangeNotifier {
   // Count of server-confirmed user contents: used to skip local copies
   // without accidentally deduping identical messages (e.g., two "hi!"s)
   final Map<String, int> _confirmedUserContents = {};
+  // Deferred user message bubbles: only shown when agent starts processing that
+  // position (queuePosition reaches the message's index). Added by send(), shown
+  // in poll tick when position advances.
+  final List<String> _deferredUserContents = [];
+  int _lastPositionShown = -1;  // highest queuePosition whose user msg was inserted
 
   ChatProvider(this._api);
 
@@ -441,16 +446,20 @@ class ChatProvider extends ChangeNotifier {
         _pollFailures = 0;
         _loading = true;
         _loadingSince = DateTime.now();
-        // Add user message immediately so the user sees it in the UI
-        // even before the server processes it. The merge dedup (user-content
-        // key in Phase 1) prevents duplicates when the server returns it.
-        // Mark as pending until server confirms (poll sees server's copy).
         _pendingUserContents.add(trimmed);
-        _messages.add(ChatMessage(
-          role: 'user', content: trimmed,
-          timestamp: DateTime.now().millisecondsSinceEpoch,
-        ));
-        logViewer('ChatProvider.send: ADDED user msg to _messages (pending=true totalPending=${_pendingUserContents.length})');
+        _deferredUserContents.add(trimmed);
+        // Only show user message bubble immediately for the FIRST message.
+        // Subsequent messages are hidden until the agent reaches their position
+        // (poll tick inserts them when _queuePosition advances).
+        if (_queueTotal <= 1 || !wasAlreadyPolling) {
+          _messages.add(ChatMessage(
+            role: 'user', content: trimmed,
+            timestamp: DateTime.now().millisecondsSinceEpoch,
+          ));
+          logViewer('ChatProvider.send: ADDED user msg immediately (first in batch)');
+        } else {
+          logViewer('ChatProvider.send: deferred user msg (pos=$_queuePosition total=$_queueTotal) — will show when agent reaches it');
+        }
         await _saveToCache();
         logViewer('ChatProvider.send: queued pos=$_queuePosition total=$_queueTotal — polling');
         _notify();
@@ -669,6 +678,28 @@ class ChatProvider extends ChangeNotifier {
           _queueTotal = (batch['total'] as int?) ?? _queueTotal;
           _queueDone = (batch['done'] as int?) ?? _queuePosition;
 
+          // Insert deferred user messages when position advances.
+          // On first poll: pos=0 → show message 0 (if not already shown).
+          // On subsequent polls: pos=1 → show message 1, pos=2 → show message 2, etc.
+          // Use _lastPositionShown to avoid re-inserting on every poll.
+          _lastPositionShown ??= -1;
+          while (_lastPositionShown < _queuePosition && _lastPositionShown + 1 < _deferredUserContents.length) {
+            final idx = _lastPositionShown + 1;
+            final content = _deferredUserContents[idx];
+            // Check if already in _messages (first msg added immediately in send())
+            final alreadyInChat = _messages.any((m) => m.role == 'user' && m.content == content);
+            if (!alreadyInChat) {
+              _messages.add(ChatMessage(
+                role: 'user', content: content,
+                timestamp: DateTime.now().millisecondsSinceEpoch,
+              ));
+              logViewer('ChatProvider.poll: inserted deferred user msg #$idx: "$content"');
+            } else {
+              logViewer('ChatProvider.poll: user msg #$idx already in chat, skipping');
+            }
+            _lastPositionShown = idx;
+          }
+
           // Parse prompt list for per-prompt cancel UI
           final prompts = batch['prompts'] as List?;
           if (prompts != null) {
@@ -708,6 +739,8 @@ class ChatProvider extends ChangeNotifier {
               _batchSeenRunning = false;
               _pendingUserContents.clear();  // prevent stale entries across batch cycles
               _confirmedUserContents.clear();
+    _deferredUserContents.clear();
+    _lastPositionShown = -1;
               logViewer('ChatProvider.poll: batch completed — stopped '
                         '(seenRunning=$_batchSeenRunning pollAge=${pollAge.inSeconds}s wasLoading=$wasLoading)');
             } else {
@@ -1192,6 +1225,8 @@ class ChatProvider extends ChangeNotifier {
     _batchModes = [];
     _pendingUserContents.clear();
     _confirmedUserContents.clear();
+    _deferredUserContents.clear();
+    _lastPositionShown = -1;
     _notify();
 
     // Await server cancel — if it fails, show error but UI already reset
@@ -1237,6 +1272,8 @@ class ChatProvider extends ChangeNotifier {
     _queueDone = 0;
     _pendingUserContents.clear();
     _confirmedUserContents.clear();
+    _deferredUserContents.clear();
+    _lastPositionShown = -1;
     _error = null;
     // Insert a centered system message immediately for instant feedback
     _messages.add(ChatMessage(
@@ -1269,6 +1306,8 @@ class ChatProvider extends ChangeNotifier {
     _queueDone = 0;
     _pendingUserContents.clear();
     _confirmedUserContents.clear();
+    _deferredUserContents.clear();
+    _lastPositionShown = -1;
     _lastConversationId = null;
     _conversationChanged = false;
     _conversationChangeReason = null;
