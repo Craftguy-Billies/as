@@ -72,6 +72,15 @@ function error(msg, status = 400) {
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const now = () => Date.now();
 
+// Record a conversation change reason for the UI to display.
+// Called whenever conversation_id is set (new conv) or cleared (reset).
+function recordConvChange(state, reason) {
+  state._last_conv_change_reason = reason;
+  state._last_conv_change_at = new Date().toISOString();
+  state._dirty = true;
+  console.log(`[CONV-CHANGE] ${reason}`);
+}
+
 // ---------------------------------------------------------------------------
 // KV state helpers
 // ---------------------------------------------------------------------------
@@ -185,6 +194,9 @@ function buildStateResponse(state, q, hasPending, repo, mode, convStatus) {
     llm_model: state.llm_model || '',
     configured_model: state.configured_model || '',
     run_started_at: state._run_started_at || null,
+    conversation_change: (state._last_conv_change_reason && state._last_conv_change_at)
+      ? { reason: state._last_conv_change_reason, at: state._last_conv_change_at }
+      : null,
     batch: {
       running: hasPending && (!!state.conversation_id || !!state.start_task_id),
       cancelled: !!q.cancelled,
@@ -1211,6 +1223,45 @@ export default {
       return json({ error: msg, detail: stack }, 500);
     }
   },
+
+  // Cron trigger: poll all active queues every 30s so batch processing
+  // continues even when the Flutter app is closed on the user's device.
+  async scheduled(controller, env, ctx) {
+    console.log('[CRON-START] scheduled run firing');
+    let list;
+    try {
+      list = await env.VIBECODE.list({ prefix: 'state:' });
+      console.log(`[CRON] found ${list.keys.length} state keys`);
+    } catch (e) {
+      console.error(`[CRON] LIST ERROR: ${e.message}`);
+      return;
+    }
+    let active = 0;
+    for (const key of list.keys) {
+      const repo = key.name.slice(6);
+      let state;
+      try {
+        state = await readState(env, repo);
+      } catch (e) {
+        console.error(`[CRON] readState error for ${repo}: ${e.message}`);
+        continue;
+      }
+      if (!state || !state.queue) continue;
+      if (state.queue.position >= state.queue.total || state.queue.cancelled) continue;
+      active++;
+      console.log(`[CRON] ACTIVE repo=${repo} pos=${state.queue.position}/${state.queue.total} mode=${state.mode||'code'}`);
+      try {
+        const url = new URL(`https://localhost/api/chat?repo=${encodeURIComponent(repo)}&mode=${state.mode || 'code'}`);
+        const req = new Request(url, { method: 'GET' });
+        const resp = await route('GET', '/api/chat', url, req, env);
+        const body = await resp.text();
+        console.log(`[CRON] repo=${repo} status=${resp.status} bodyPrefix=${body.slice(0,100)}`);
+      } catch (e) {
+        console.error(`[CRON] repo=${repo} POLL ERROR: ${e.message} stack=${(e.stack||'').slice(0,200)}`);
+      }
+    }
+    console.log(`[CRON-END] done — ${active} active queue(s) polled`);
+  },
 };
 
 async function route(method, path, url, request, env) {
@@ -1252,6 +1303,36 @@ async function route(method, path, url, request, env) {
     }
     return json({ ok: true, message: `Batch cancelled for ${repo}. Chat history preserved.` });
   }
+
+  // Start a fresh conversation — clears current conv but keeps chat history
+  if (path === '/api/chat/new-conversation' && method === 'POST') {
+    const repo = url.searchParams.get('repo') || '';
+    if (!repo) return error('repo is required', 400);
+    const state = await readState(env, repo);
+    if (state) {
+      state.conversation_id = null;
+      state._last_event_ts = "";
+      state.sandbox_id = null;
+      state.last_sent_position = -1;
+      state.start_task_id = null;
+      state._run_started_at = undefined;
+      state._error_retry = 0;
+      state._send_retry = 0;
+      state._create_retry_at = undefined;
+      state._send_retry_at = undefined;
+      state._retry_at = undefined;
+      // Cancel any running batch
+      state.queue.cancelled = true;
+      state._dirty = true;
+      recordConvChange(state, 'You started a new conversation');
+      try { await env.VIBECODE.delete(`cid:${repo}`); } catch (_) {}
+      try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
+      await writeState(env, repo, state);
+    }
+    return json({ ok: true, message: `New conversation started for ${repo}.` });
+  }
+
+
 
   // Clear queue — full reset (kept for backwards compat, but per-repo cancel above is better)
   if (path === '/api/chat/clear-queue' && method === 'POST') {
@@ -1373,13 +1454,9 @@ async function route(method, path, url, request, env) {
       // conversation is created and the prompt is sent AGAIN.
       try { await env.VIBECODE.delete(`cid:${repo}`).catch(() => {}); } catch (_) {}
       // Clear conversation_id — each new batch must start with a FRESH
-      // conversation. If we don't clear it, the next poll's send-follow-up
-      // sends the prompt to the OLD (completed) conversation. The Cloud API
-      // silently accepts (200 OK) but the agent doesn't start. After 3 retries,
-      // conversation_id is cleared and createConversation creates a new one
-      // — sending the prompt AGAIN. This is the 100% confirmed root cause of
-      // "message appears in two conversations".
+      // conversation.
       state.conversation_id = null;
+      recordConvChange(state, 'Starting new task');
       state._dirty = true;
       state._last_event_ts = "";
       state.sandbox_id = null;
@@ -1458,6 +1535,7 @@ async function route(method, path, url, request, env) {
       try { await env.VIBECODE.delete(`cid:${repo}`).catch(() => {}); } catch (_) {}
       // Clear conversation_id — each new batch must start fresh.
       state.conversation_id = null;
+      recordConvChange(state, `Starting ${prompts.length} new tasks`);
       state._dirty = true;
       state._last_event_ts = "";
       state.sandbox_id = null;
@@ -1835,6 +1913,7 @@ async function route(method, path, url, request, env) {
     // Queue naturally completed — reset to clean idle state so the app
     // doesn't show stale "1/1 done" after the task finishes.
     if (!hasPending && q.total > 0 && !state.conversation_id) {
+      console.log(`[POLL] repo=${repo}: QUEUE DONE — resetting state (was ${q.total} prompts, all completed)`);
       q.position = 0;
       q.total = 0;
       q.done = 0;
@@ -1874,6 +1953,7 @@ async function route(method, path, url, request, env) {
         const result = await pollForConvId(env, state.start_task_id);
         if (result) {
           state.conversation_id = result.conversation_id;
+          recordConvChange(state, 'Agent connected');
           state._dirty = true;
           state._last_event_ts = '';  // reset event pagination for new conversation
           if (result.sandbox_id) state.sandbox_id = result.sandbox_id;
@@ -1932,15 +2012,12 @@ async function route(method, path, url, request, env) {
           const result = await createConversation(env, prompt, repo, state.branch, promptMode, state);
           if (result.conversation_id) {
             state.conversation_id = result.conversation_id;
+            recordConvChange(state, 'Agent connected');
             state._dirty = true;
             state._last_event_ts = '';  // reset event pagination for new conversation
             if (result.sandbox_id) state.sandbox_id = result.sandbox_id;
             state.last_sent_position = q.position;  // sent via initial_message
             try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
-            // Persist conversation_id to a tiny key. If writeStateIfDirty fails
-            // below, the next poll reads OLD KV with null conversation_id —
-            // causing createConversation to fire AGAIN with the same prompt
-            // (wasted Cloud API quota and duplicate agent work).
             try { await env.VIBECODE.put(`cid:${repo}`, result.conversation_id, {expirationTtl: 86400}); } catch (_) {}
             convStatus = 'starting';
           } else if (result.start_task_id) {
@@ -1999,6 +2076,7 @@ async function route(method, path, url, request, env) {
         state._dirty = true;
               state.conversation_id = null;
       state._dirty = true;
+              recordConvChange(state, `Agent unavailable — skipping task #${q.position}`);
               state._last_event_ts = "";
               state.sandbox_id = null;
               state.last_sent_position = -1;
@@ -2059,6 +2137,7 @@ async function route(method, path, url, request, env) {
               state._send_retry_at = undefined;
               state.conversation_id = null;
       state._dirty = true;
+              recordConvChange(state, 'Reconnecting to agent...');
               state._last_event_ts = "";
               state.sandbox_id = null;
             }
@@ -2503,6 +2582,7 @@ async function route(method, path, url, request, env) {
           state._retry_at = undefined;
           state.conversation_id = null;
       state._dirty = true;
+          recordConvChange(state, 'Agent had trouble — restarting...');
           state._last_event_ts = "";
           state.sandbox_id = null;
           state.last_sent_position = -1;
@@ -2542,6 +2622,7 @@ async function route(method, path, url, request, env) {
         }
         state.conversation_id = null;
       state._dirty = true;
+        recordConvChange(state, 'Agent disconnected — reconnecting...');
         state._last_event_ts = "";
         state.sandbox_id = null;
         state.last_sent_position = -1;

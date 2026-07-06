@@ -12,6 +12,10 @@ kv_namespaces = [
 [vars]
 LLM_MODEL = "deepseek/deepseek-v4-flash"
 
+# Cron trigger: polls active queues every minute so batch continues even when app is closed
+[triggers]
+crons = ["* * * * *"]
+
 # Secrets to set manually:
 # npx wrangler secret put OPENHANDS_CLOUD_API_KEY
 # npx wrangler secret put LLM_API_KEY

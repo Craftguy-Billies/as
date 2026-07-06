@@ -263,6 +263,16 @@ class ApiService {
     }
   }
 
+  Future<void> newConversation({required String repo}) async {
+    final uri = Uri.parse('$_url/api/chat/new-conversation').replace(
+      queryParameters: {'repo': repo},
+    );
+    final resp = await http.post(uri).timeout(const Duration(seconds: 8));
+    if (resp.statusCode != 200) {
+      throw Exception(_parseError(resp.statusCode, resp.body));
+    }
+  }
+
   /// Extract a human-readable error from an API response body.
   /// FastAPI returns {"detail": "..."} for validation/HTTP errors.
   String _parseError(int statusCode, String body) {

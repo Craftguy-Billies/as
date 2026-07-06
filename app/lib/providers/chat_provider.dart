@@ -58,6 +58,15 @@ class ChatProvider extends ChangeNotifier {
   Timer? _pollTimer;
   int _lastNotifiedHash = 0;  // avoid redundant rebuilds
 
+  // Conversation tracking: detect when server creates a new conversation
+  String? _lastConversationId;
+  bool _conversationChanged = false;
+  String? _conversationChangeReason;
+  bool _skipNextConvChangeMsg = false;  // true after manual newConversation()
+
+  // Pending message tracking: user messages queued but not yet confirmed by server
+  final Set<String> _pendingUserContents = {};
+
   ChatProvider(this._api);
 
   // -- Getters --
@@ -71,6 +80,19 @@ class ChatProvider extends ChangeNotifier {
   String serverRepo = '';
   String serverBranch = '';
   String serverMode = 'code';
+  String? get lastConversationId => _lastConversationId;
+  bool get conversationChanged => _conversationChanged;
+  String? get conversationChangeReason => _conversationChangeReason;
+
+  /// Call after UI has displayed the conversation change banner
+  void acknowledgeConversationChange() {
+    _conversationChanged = false;
+    _conversationChangeReason = null;
+    _notify();
+  }
+
+  /// Check if a user message is still pending (queued, not yet processed by server)
+  bool isMessagePending(String content) => _pendingUserContents.contains(content);
   List<Map<String, dynamic>> _savedRepos = [];
   List<Map<String, dynamic>> get savedRepos => _savedRepos;
 
@@ -419,11 +441,13 @@ class ChatProvider extends ChangeNotifier {
         // Add user message immediately so the user sees it in the UI
         // even before the server processes it. The merge dedup (user-content
         // key in Phase 1) prevents duplicates when the server returns it.
+        // Mark as pending until server confirms (poll sees server's copy).
+        _pendingUserContents.add(trimmed);
         _messages.add(ChatMessage(
           role: 'user', content: trimmed,
           timestamp: DateTime.now().millisecondsSinceEpoch,
         ));
-        logViewer('ChatProvider.send: ADDED user msg to _messages (id=${_messages.last.id})');
+        logViewer('ChatProvider.send: ADDED user msg to _messages (pending=true totalPending=${_pendingUserContents.length})');
         await _saveToCache();
         logViewer('ChatProvider.send: queued pos=$_queuePosition total=$_queueTotal — polling');
         _notify();
@@ -500,12 +524,31 @@ class ChatProvider extends ChangeNotifier {
         if (state == null) return;
         _error = null;  // clear error on any successful poll
 
+        // Detect conversation changes — insert a centered system message
+        final newConvId = state['conversation_id']?.toString();
+        final convChange = state['conversation_change'] as Map<String, dynamic>?;
+        if (newConvId != null && newConvId.isNotEmpty &&
+            _lastConversationId != newConvId) {
+          if (_skipNextConvChangeMsg) {
+            _skipNextConvChangeMsg = false;
+          } else {
+            final serverReason = convChange?['reason']?.toString();
+            final reason = serverReason ?? 'Server started a new conversation';
+            _messages.add(ChatMessage(
+              role: 'system', content: reason,
+              timestamp: DateTime.now().millisecondsSinceEpoch,
+            ));
+            logViewer('ChatProvider.poll: NEW CONVERSATION system msg: $reason');
+          }
+        }
+        _lastConversationId = newConvId;
+
         // Merge server messages (events, responses) into local chat
         final serverMsgs = (state['messages'] as List?)
                 ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
                 .toList() ??
             [];
-        logViewer('ChatProvider.poll: serverMsgs=${serverMsgs.length} localMsgs=${_messages.length}');
+        logViewer('ChatProvider.poll: serverMsgs=${serverMsgs.length} localMsgs=${_messages.length} convId=$newConvId pendingUserMsgs=${_pendingUserContents.length}');
         if (serverMsgs.isNotEmpty) {
           final merged = <ChatMessage>[];
           final seen = <String>{};
@@ -533,10 +576,14 @@ class ChatProvider extends ChangeNotifier {
             // the local copy would be added again (Phase 2 sees different
             // dedupKey: no id vs server id). Prevent duplicate by tracking
             // content alongside dedupKey.
+            // Also clear from pending set — server has confirmed this message.
             if (m.role == 'user' && m.content.isNotEmpty) {
               final userKey = 'user_content:${m.content}';
               if (seen.contains(userKey)) { dedupServerUserContent++; continue; }
               seen.add(userKey);
+              if (_pendingUserContents.remove(m.content)) {
+                logViewer('ChatProvider.poll: server confirmed pending msg, remaining=${_pendingUserContents.length}');
+              }
             }
             if (seen.add(m.dedupKey)) {
               if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
@@ -652,6 +699,7 @@ class ChatProvider extends ChangeNotifier {
               _queueTotal = 0;
               _queueDone = 0;
               _batchSeenRunning = false;
+              _pendingUserContents.clear();  // prevent stale entries across batch cycles
               logViewer('ChatProvider.poll: batch completed — stopped '
                         '(seenRunning=$_batchSeenRunning pollAge=${pollAge.inSeconds}s wasLoading=$wasLoading)');
             } else {
@@ -799,10 +847,31 @@ class ChatProvider extends ChangeNotifier {
   Future<void> refreshMessages() async {
     try {
       final data = await _api.getChat(repo: serverRepo, mode: serverMode);
+
+      // Detect conversation changes — insert a centered system message
+      final newConvId = data['conversation_id']?.toString();
+      final convChange = data['conversation_change'] as Map<String, dynamic>?;
+      if (newConvId != null && newConvId.isNotEmpty &&
+          _lastConversationId != newConvId) {
+        if (_skipNextConvChangeMsg) {
+          _skipNextConvChangeMsg = false;
+        } else {
+          final serverReason = convChange?['reason']?.toString();
+          final reason = serverReason ?? 'Server started a new conversation';
+          _messages.add(ChatMessage(
+            role: 'system', content: reason,
+            timestamp: DateTime.now().millisecondsSinceEpoch,
+          ));
+          logViewer('ChatProvider.refreshMessages: NEW CONVERSATION system msg: $reason');
+        }
+      }
+      _lastConversationId = newConvId;
+
       final serverMsgs = (data['messages'] as List?)
               ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
               .toList() ??
           [];
+      logViewer('ChatProvider.refreshMessages: serverMsgs=${serverMsgs.length} localMsgs=${_messages.length} convId=$newConvId pendingUserMsgs=${_pendingUserContents.length}');
       if (serverMsgs.isNotEmpty) {
         final merged = <ChatMessage>[];
         final seen = <String>{};
@@ -817,10 +886,14 @@ class ChatProvider extends ChangeNotifier {
           }
           // Content-based dedup for user messages: send() adds user
           // messages immediately; prevent duplicates when server returns them.
+          // Also clear from pending set — server has confirmed this message.
           if (m.role == 'user' && m.content.isNotEmpty) {
             final userKey = 'user_content:${m.content}';
             if (seen.contains(userKey)) continue;
             seen.add(userKey);
+            if (_pendingUserContents.remove(m.content)) {
+              logViewer('ChatProvider.refreshMessages: server confirmed pending msg, remaining=${_pendingUserContents.length}');
+            }
           }
           if (seen.add(m.dedupKey)) {
             if (m.role == 'assistant' && !seenAssistantContent.add('assistant:${m.content}')) {
@@ -835,6 +908,7 @@ class ChatProvider extends ChangeNotifier {
             continue;
           }
           // Skip user messages already covered by server messages (content-based).
+          // BUT keep pending messages that haven't been confirmed by server yet.
           if (m.role == 'user' && m.content.isNotEmpty &&
               seen.contains('user_content:${m.content}')) {
             continue;
@@ -1090,6 +1164,7 @@ class ChatProvider extends ChangeNotifier {
     _queueDone = 0;
     _batchPrompts = [];
     _batchModes = [];
+    _pendingUserContents.clear();
     _notify();
 
     // Await server cancel — if it fails, show error but UI already reset
@@ -1120,6 +1195,40 @@ class ChatProvider extends ChangeNotifier {
     _notify();  // next periodic poll (~2s) will sync authoritative state
   }
 
+  /// Start a fresh conversation — keeps chat history, clears server conv state.
+  Future<void> newConversation() async {
+    if (serverRepo.isEmpty) {
+      logViewer('ChatProvider.newConversation: no repo selected, skipping');
+      return;
+    }
+    _pollTimer?.cancel();
+    _pollGeneration++;  // invalidate in-flight tick (prevents old conv_id leak)
+    _loading = false;
+    _loadingSince = null;
+    _queuePosition = 0;
+    _queueTotal = 0;
+    _queueDone = 0;
+    _pendingUserContents.clear();
+    _error = null;
+    // Insert a centered system message immediately for instant feedback
+    _messages.add(ChatMessage(
+      role: 'system',
+      content: '🔄 You started a new conversation',
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+    ));
+    _skipNextConvChangeMsg = true;
+    _lastConversationId = null;
+    _notify();
+
+    try {
+      await _api.newConversation(repo: serverRepo);
+      logViewer('ChatProvider.newConversation: server confirmed');
+    } catch (e) {
+      logViewer('ChatProvider.newConversation: $e');
+    }
+  }
+
+
   Future<void> clearChat() async {
     _pollTimer?.cancel();
     _messages.clear();
@@ -1130,6 +1239,11 @@ class ChatProvider extends ChangeNotifier {
     _queuePosition = 0;
     _queueTotal = 0;
     _queueDone = 0;
+    _pendingUserContents.clear();
+    _lastConversationId = null;
+    _conversationChanged = false;
+    _conversationChangeReason = null;
+    _skipNextConvChangeMsg = false;
     _notify();
 
     try {

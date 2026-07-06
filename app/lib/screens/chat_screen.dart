@@ -39,12 +39,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // Desktop: Enter → send (via onSubmitted), Shift+Enter → newline
-    // Phone:  Send button → send, no physical Enter key
+    // Enter → newline (multiline), Send button → send.
+    // Shift+Enter is also newline (hardware keyboard compatibility).
     _inputFocusNode.onKeyEvent = (node, event) {
       if (event is KeyDownEvent &&
-          event.logicalKey == LogicalKeyboardKey.enter &&
-          HardwareKeyboard.instance.isShiftPressed) {
+          event.logicalKey == LogicalKeyboardKey.enter) {
         // Insert newline at cursor, prevent onSubmitted from firing
         final text = _inputCtrl.text;
         final sel = _inputCtrl.selection;
@@ -400,10 +399,19 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               setState(() => _showRepoBar = !_showRepoBar);
             },
           ),
+          // Start fresh conversation — keeps chat history
+          IconButton(
+            icon: const Icon(Icons.auto_awesome, color: Color(0xFF7C3AED)),
+            tooltip: 'New conversation (keeps chat history)',
+            onPressed: () {
+              debugPrint('[UI] newConversation button tapped');
+              context.read<ChatProvider>().newConversation();
+            },
+          ),
           // Always show clear — user needs to reset conversation even when empty
           IconButton(
             icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-            tooltip: 'New conversation',
+            tooltip: 'Delete all messages',
             onPressed: () => _confirmClear(context),
           ),
         ],
@@ -978,8 +986,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   style: const TextStyle(color: Colors.white, fontSize: 15),
                   minLines: 1,
                   maxLines: 4,
-                  textInputAction: TextInputAction.send,
-                  onSubmitted: (_) => _send(),
+                  textInputAction: TextInputAction.newline,
                   decoration: InputDecoration(
                     hintText: 'Send a message…',
                     hintStyle: TextStyle(color: Colors.grey[700]),
@@ -1073,8 +1080,27 @@ class _ChatBubbleState extends State<_ChatBubble> {
     final isEvent = msg.role == 'event';
     final isError = msg.role == 'error';
     final isAssistant = msg.role == 'assistant';
+    final isSystem = msg.role == 'system';
 
     if (isEvent) return _buildEvent(context);
+
+    if (isSystem) {
+      return Center(
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+          decoration: BoxDecoration(
+            color: const Color(0xFF7C3AED).withAlpha(20),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Text(
+            msg.content,
+            style: const TextStyle(fontSize: 11, color: Color(0xFF7C3AED)),
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+    }
 
     if (isError) {
       return Padding(
@@ -1183,6 +1209,31 @@ class _ChatBubbleState extends State<_ChatBubble> {
                             fontSize: 10,
                           ),
                         ),
+                        // Pending indicator — message queued, not yet confirmed by server
+                        if (isUser) ...[
+                          Builder(builder: (ctx) {
+                            try {
+                              final prov = ctx.read<ChatProvider>();
+                              if (prov.isMessagePending(msg.content)) {
+                                return const Padding(
+                                  padding: EdgeInsets.only(left: 8),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      SizedBox(
+                                        width: 10, height: 10,
+                                        child: CircularProgressIndicator(strokeWidth: 1.5, color: Colors.white54),
+                                      ),
+                                      SizedBox(width: 4),
+                                      Text('queued', style: TextStyle(color: Colors.white54, fontSize: 10, fontStyle: FontStyle.italic)),
+                                    ],
+                                  ),
+                                );
+                              }
+                            } catch (_) {}
+                            return const SizedBox.shrink();
+                          }),
+                        ],
                         const Spacer(),
                         // Copy button for ALL messages (user + assistant)
                         GestureDetector(
