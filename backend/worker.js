@@ -97,21 +97,13 @@ async function readState(env, repo) {
 function trimState(state) {
   if (state.messages && state.messages.length > 300) {
     const before = state.messages.length;
-    // Separate user/assistant (must preserve) from events/errors (can trim)
-    const keep = [];
-    const events = [];
+    const keep = [], events = [];
     for (const m of state.messages) {
       const role = m.role || '';
-      if (role === 'user' || role === 'assistant' || role === 'system') {
-        keep.push(m);
-      } else {
-        events.push(m);
-      }
+      if (role === 'user' || role === 'assistant' || role === 'system') { keep.push(m); }
+      else { events.push(m); }
     }
-    // Trim events to last 150, keep ALL user + assistant messages
-    if (events.length > 150) {
-      events.splice(0, events.length - 150);
-    }
+    if (events.length > 150) { events.splice(0, events.length - 150); }
     state.messages = [...keep, ...events];
     state.messages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
     console.log(`[KV] trimState: messages trimmed ${before}→${state.messages.length} (kept ${keep.length} user/asst, ${events.length} events)`);
@@ -1221,8 +1213,8 @@ function emptyState(repo, branch, mode) {
     last_event_timestamp: '',
     last_sent_position: -1,
     _last_response_ts: '',
-    _prompt_started_at: 0,       // ms timestamp when current prompt began processing
-    _sent_prompt_hashes: [],     // content hashes of already-sent prompts (prevents resend)
+    _prompt_started_at: 0,
+    _sent_prompt_hashes: [],
     llm_model: '',
     configured_model: '',
   };
@@ -2024,11 +2016,10 @@ async function route(method, path, url, request, env) {
     // poll (or cron) can continue.
     let didCloudCall = false;
 
-    // --- Stuck prompt detection: if a prompt has been processing >10 min
-    //     without a response, skip it to prevent infinite hangs ---
+    // Stuck prompt detection: skip if prompt has been processing >10 min
     if (hasPending && state.conversation_id && state._prompt_started_at > 0) {
       const promptAge = Date.now() - state._prompt_started_at;
-      if (promptAge > 600000) {  // 10 minutes
+      if (promptAge > 600000) {
         console.log(`[STUCK] repo=${repo}: prompt #${q.position+1} stuck for ${Math.round(promptAge/1000)}s — forcing skip`);
         state.messages.push({ id: nextMsgId(state), role: 'event', content: `[TIMEOUT] Prompt #${q.position+1} timed out after 10min — skipping`, kind: 'ErrorEvent', timestamp: now() });
         q.position++;
@@ -2075,7 +2066,7 @@ async function route(method, path, url, request, env) {
             state._last_event_ts = '';  // reset event pagination for new conversation
             if (result.sandbox_id) state.sandbox_id = result.sandbox_id;
             state.last_sent_position = q.position;  // sent via initial_message
-            state._prompt_started_at = Date.now();   // track when this prompt started
+            state._prompt_started_at = Date.now();
             try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
             try { await env.VIBECODE.put(`cid:${repo}`, result.conversation_id, {expirationTtl: 86400}); } catch (_) {}
             convStatus = 'starting';
@@ -2083,7 +2074,7 @@ async function route(method, path, url, request, env) {
             state.start_task_id = result.start_task_id;
             state._last_event_ts = '';  // reset event pagination for new conversation
             state.last_sent_position = q.position;  // will be sent when conv resolves
-            state._prompt_started_at = Date.now();   // track when this prompt started
+            state._prompt_started_at = Date.now();
             try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
             convStatus = 'starting';
           }
@@ -2353,7 +2344,7 @@ async function route(method, path, url, request, env) {
         q.position++;
         state._dirty = true;
         q.done = Math.min(q.position, q.total);
-        state._prompt_started_at = 0;  // reset — this prompt is done
+        state._prompt_started_at = 0;
         console.log(`[QUEUE] repo=${repo}: advanced → pos=${q.position}/${q.total} done=${q.done}`);
         state._dirty = true;
         // Persist queue position and done to tiny keys. If writeStateIfDirty
@@ -2371,11 +2362,10 @@ async function route(method, path, url, request, env) {
         const stillPending = q.position < q.total && !q.cancelled;
         if (stillPending && !didCloudCall) {
           const nextPrompt = q.prompts[q.position];
-          // Dedup: don't send the same prompt text twice due to KV staleness
           const promptHash = simpleHash(nextPrompt);
           if (!state._sent_prompt_hashes) state._sent_prompt_hashes = [];
           if (state._sent_prompt_hashes.includes(promptHash)) {
-            console.log(`[SEND] repo=${repo}: SKIP duplicate send for "${nextPrompt.slice(0,40)}" (hash=${promptHash})`);
+            console.log(`[SEND] repo=${repo}: SKIP duplicate send for "${nextPrompt.slice(0,40)}"`);
           } else {
             state._sent_prompt_hashes.push(promptHash);
             if (state._sent_prompt_hashes.length > 50) state._sent_prompt_hashes.shift();
@@ -2384,13 +2374,14 @@ async function route(method, path, url, request, env) {
               console.error(`sendMessage follow-up error: ${sendErr}`);
             } else {
               state.last_sent_position = q.position;
-              state._prompt_started_at = Date.now();  // track this follow-up prompt
-          state._dirty = true;
+              state._prompt_started_at = Date.now();
+              state._dirty = true;
               try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
               if (!state._pending_followup_msgs) state._pending_followup_msgs = [];
-            state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
-            state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
-          state._dirty = true;
+              state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
+              state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+              state._dirty = true;
+            }
           }
         }
         await writeStateIfDirty(env, repo, state);
@@ -2443,7 +2434,7 @@ async function route(method, path, url, request, env) {
           q.position++;
         state._dirty = true;
           q.done = Math.min(q.position, q.total);
-          state._prompt_started_at = 0;  // reset — this prompt is done
+          state._prompt_started_at = 0;
           console.log(`[QUEUE] repo=${repo}: advanced → pos=${q.position}/${q.total} done=${q.done}`);
         state._dirty = true;
           // Write rspt key AFTER push so the next poll can dedup (the same
@@ -2463,7 +2454,6 @@ async function route(method, path, url, request, env) {
           // If more prompts, send next one
           if (stillPending && !didCloudCall) {
             const nextPrompt = q.prompts[q.position];
-            // Dedup: don't send the same prompt text twice
             const promptHash = simpleHash(nextPrompt);
             if (!state._sent_prompt_hashes) state._sent_prompt_hashes = [];
             if (state._sent_prompt_hashes.includes(promptHash)) {
@@ -2471,17 +2461,18 @@ async function route(method, path, url, request, env) {
             } else {
               state._sent_prompt_hashes.push(promptHash);
               if (state._sent_prompt_hashes.length > 50) state._sent_prompt_hashes.shift();
-            const sendErr = await sendMessage(env, state.conversation_id, nextPrompt, state.sandbox_id);
-            if (sendErr) {
-              console.error(`sendMessage error at pos ${q.position}: ${sendErr}`);
-            } else {
-              state.last_sent_position = q.position;
-          state._dirty = true;
-              try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
-              if (!state._pending_followup_msgs) state._pending_followup_msgs = [];
-              state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
-              state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
-          state._dirty = true;
+              const sendErr = await sendMessage(env, state.conversation_id, nextPrompt, state.sandbox_id);
+              if (sendErr) {
+                console.error(`sendMessage error at pos ${q.position}: ${sendErr}`);
+              } else {
+                state.last_sent_position = q.position;
+                state._dirty = true;
+                try { await env.VIBECODE.put(`lsp:${repo}`, String(q.position)); } catch (_) {}
+                if (!state._pending_followup_msgs) state._pending_followup_msgs = [];
+                state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'user', content: nextPrompt, timestamp: now() });
+                state._pending_followup_msgs.push({ id: nextMsgId(state), role: 'event', content: '[STATUS] Agent working...', kind: 'SystemEvent', timestamp: now() });
+                state._dirty = true;
+              }
             }
           }
           await writeStateIfDirty(env, repo, state);
