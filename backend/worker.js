@@ -1487,10 +1487,12 @@ async function route(method, path, url, request, env) {
     try {
       await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
     } catch (e) {
-      const status = String(e).includes('429') ? 429 : 500;
+      const errStr = String(e?.message || e);
+      console.error(`[KV-PUT-1] state:${repo} FAILED: ${errStr}`);
+      const status = errStr.includes('429') ? 429 : 500;
       const msg = status === 429
         ? 'KV rate limit exceeded — try again later'
-        : 'Failed to persist queue state';
+        : `KV write failed: ${errStr.slice(0, 80)}`;
       return error(msg, status);
     }
     return json({ status: 'queued', position: state.queue.position, total: state.queue.total });
@@ -1573,10 +1575,12 @@ async function route(method, path, url, request, env) {
     try {
       await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
     } catch (e) {
-      const status = String(e).includes('429') ? 429 : 500;
+      const errStr = String(e?.message || e);
+      console.error(`[KV-PUT-2] state:${repo} FAILED: ${errStr}`);
+      const status = errStr.includes('429') ? 429 : 500;
       const msg = status === 429
         ? 'KV rate limit exceeded — try again later'
-        : 'Failed to persist queue state';
+        : `KV write failed: ${errStr.slice(0, 80)}`;
       return error(msg, status);
     }
     return json({ status: 'queued', position: state.queue.position, total: state.queue.total });

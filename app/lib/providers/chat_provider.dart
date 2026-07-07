@@ -484,9 +484,12 @@ class ChatProvider extends ChangeNotifier {
       } else {
         logViewer('ChatProvider.send: unexpected status=$status');
         _error = (result['error']?.toString()) ?? 'Server did not accept the request';
-        _queuePosition = 0;
-        _queueTotal = 0;
-        _queueDone = 0;
+        // Keep existing queue state if a batch was already running.
+        if (_queueTotal == 0) {
+          _queuePosition = 0;
+          _queueTotal = 0;
+          _queueDone = 0;
+        }
         _notify();
       }
     } catch (e) {
@@ -1231,29 +1234,15 @@ class ChatProvider extends ChangeNotifier {
 
   // -- Cancel / Clear --
   Future<void> cancel() async {
-    _pollTimer?.cancel();
-    _loading = false;
-    _loadingSince = null;
-    _queuePosition = 0;
-    _queueTotal = 0;
-    _queueDone = 0;
-    _batchPrompts = [];
-    _batchModes = [];
-    _pendingUserContents.clear();
-    _confirmedUserContents.clear();
-    _deferred.clear();
-    _lastPositionShown = -1;
-    _notify();
-
-    // Await server cancel — if it fails, show error but UI already reset
+    // Cancel only the CURRENT running task, advance to next queued task.
+    // Server handles advancement; next poll syncs authoritative state.
+    logViewer('ChatProvider.cancel: skipping current task #$_queuePosition');
     try {
-      final ok = await _api.cancelChatBatch(repo: serverRepo);
-      if (!ok) {
-        logViewer('ChatProvider.cancel: server unreachable, batch may still run');
-      }
+      await _api.cancelPrompt(_queuePosition, repo: serverRepo);
     } catch (e) {
       logViewer('ChatProvider.cancel: $e');
     }
+    _notify();  // next poll syncs state from server
   }
 
   /// Cancel a single prompt at [index] in the batch queue.
