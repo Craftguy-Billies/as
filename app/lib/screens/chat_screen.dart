@@ -1128,14 +1128,13 @@ class _ChatBubbleState extends State<_ChatBubble> {
       );
     }
 
-    // ALL assistant messages collapsed by default (even short ones).
-    // When 50 prompts queued, this prevents 750+ event/response lines
-    // from flooding the UI. User taps any AI bubble to expand.
-    final showPreview = isAssistant && !_expanded;
+    // Assistant messages: auto-expand if short (< 500 chars), collapse if long.
+    // Collapsed messages show "Tap to expand" indicator so users know it's not
+    // a bug — the message is just collapsed for scrollability.
+    final isShortAssistant = isAssistant && msg.content.length <= 500;
+    final showPreview = isAssistant && !_expanded && !isShortAssistant;
     final previewText = showPreview
-        ? (msg.content.length > 300
-            ? '${msg.content.substring(0, 300)}…'
-            : msg.content)
+        ? '${msg.content.substring(0, 300)}…\n\n_Tap to expand full response_'
         : msg.content;
 
     return Padding(
@@ -1147,11 +1146,9 @@ class _ChatBubbleState extends State<_ChatBubble> {
           if (!isUser) const SizedBox(width: 8),
           Flexible(
             child: GestureDetector(
-              onTap: isAssistant && !_expanded
-                  ? () => setState(() => _expanded = true)
-                  : isAssistant && _expanded
-                      ? () => setState(() => _expanded = false)
-                      : null,
+              onTap: isAssistant
+                  ? () => setState(() => _expanded = !_expanded)
+                  : null,
               child: Container(
                 constraints: BoxConstraints(
                   maxWidth: MediaQuery.of(context).size.width * 0.82,

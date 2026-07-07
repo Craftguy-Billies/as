@@ -154,7 +154,15 @@ class ChatProvider extends ChangeNotifier {
   /// notifyListeners only when state actually changed (avoid 2s poll rebuilds)
   void _notify() {
     final msgs = _messages;
+    // Include all message content hashes to detect actual data changes,
+    // not just the last message. Prevents stale UI when messages are
+    // re-ordered or duplicates appear mid-list.
+    int msgHash = 0;
+    for (final m in msgs) {
+      msgHash = msgHash ^ Object.hash(m.role, m.content, m.timestamp, m.id);
+    }
     final hash = Object.hash(
+      msgHash,
       msgs.length,
       _loading,
       _error,
@@ -162,9 +170,6 @@ class ChatProvider extends ChangeNotifier {
       _queueTotal,
       _queueDone,
       _showFromIndex,
-      msgs.isEmpty ? 0 : msgs.last.timestamp,
-      msgs.isEmpty ? 0 : msgs.first.timestamp,
-      msgs.isEmpty ? '' : msgs.last.content,
     );
     if (hash != _lastNotifiedHash) {
       _lastNotifiedHash = hash;
@@ -478,7 +483,9 @@ class ChatProvider extends ChangeNotifier {
         // This prevents "sent" appearing before the queue actually processes it,
         // and prevents the message from disappearing on refresh.
         logViewer('ChatProvider.send: deferred user msg (total=$_queueTotal status=$status) — will show when agent reaches it');
-        await _saveToCache();
+        // Do NOT save cache here — deferred messages haven't been confirmed by
+        // the server yet. The poll tick calls _saveToCache() after the merge,
+        // which is when messages are properly deduped and confirmed.
         logViewer('ChatProvider.send: queued pos=$_queuePosition total=$_queueTotal — polling');
         _notify();
         // Only start a new poll if one isn't already running. Calling

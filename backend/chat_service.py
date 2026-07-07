@@ -2309,7 +2309,12 @@ def _wait_for_response(timeout: int | None = None) -> str | None:
                                             "timestamp": int(time.time() * 1000),
                                         })
                                         if len(_msgs()) > 500:
-                                            _msgs()[:] = _msgs()[-400:]
+                                            # Preserve all user + assistant messages, trim only events
+                                            keep = [m for m in _msgs() if m.get("role") in ("user", "assistant", "system")]
+                                            events = [m for m in _msgs() if m.get("role") in ("event", "error")]
+                                            if len(events) > 200:
+                                                events = events[-200:]
+                                            _msgs()[:] = keep + events
                                     _new_streamed += 1
                             else:
                                 # Agent MessageEvent — extract final response
