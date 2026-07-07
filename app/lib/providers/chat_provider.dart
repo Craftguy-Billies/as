@@ -154,15 +154,14 @@ class ChatProvider extends ChangeNotifier {
   /// notifyListeners only when state actually changed (avoid 2s poll rebuilds)
   void _notify() {
     final msgs = _messages;
-    // Include all message content hashes to detect actual data changes,
-    // not just the last message. Prevents stale UI when messages are
-    // re-ordered or duplicates appear mid-list.
-    int msgHash = 0;
+    // Combine all message hashes via list (not XOR) to avoid collision:
+    // two different message sets can produce identical XOR results.
+    final msgHashes = <int>[];
     for (final m in msgs) {
-      msgHash = msgHash ^ Object.hash(m.role, m.content, m.timestamp, m.id);
+      msgHashes.add(Object.hash(m.role, m.content, m.timestamp, m.id));
     }
     final hash = Object.hash(
-      msgHash,
+      Object.hashAll(msgHashes),
       msgs.length,
       _loading,
       _error,
@@ -170,6 +169,8 @@ class ChatProvider extends ChangeNotifier {
       _queueTotal,
       _queueDone,
       _showFromIndex,
+      _batchPrompts.length,
+      _batchModes.length,
     );
     if (hash != _lastNotifiedHash) {
       _lastNotifiedHash = hash;
@@ -238,7 +239,12 @@ class ChatProvider extends ChangeNotifier {
             }
           }
           _lastPositionShown = (data['lastPositionShown'] as int?) ?? -1;
-          logViewer('ChatProvider.loadFromCache: restored ${_deferred.length} deferred msgs, lastPosShown=$_lastPositionShown, ${_pendingUserContents.length} pending');
+          // Restore queue progress — survives app restart so the batch
+          // status bar doesn't flash "0/0 done" before the first poll.
+          _queuePosition = (data['queuePosition'] as int?) ?? _queuePosition;
+          _queueTotal = (data['queueTotal'] as int?) ?? _queueTotal;
+          _queueDone = (data['queueDone'] as int?) ?? _queuePosition;
+          logViewer('ChatProvider.loadFromCache: restored ${_deferred.length} deferred msgs, lastPosShown=$_lastPositionShown, queue=$_queuePosition/$_queueTotal done=$_queueDone');
         }
       } catch (_) {
         await prefs.remove(_cacheKey);
@@ -388,6 +394,13 @@ class ChatProvider extends ChangeNotifier {
   }
 
   // -- Send: queue prompt(s) on server, then poll for progress --
+  // Serializes concurrent sends: if a send is in flight, queue the next
+  // message locally and auto-send after the current one completes. This
+  // prevents the Cloudflare KV race where two rapid POSTs both read empty
+  // state and the second write overwrites the first.
+  bool _sendInFlight = false;
+  final List<_QueuedSend> _sendQueue = [];
+
   Future<void> send(
     String prompt, {
     String repo = '',
@@ -415,6 +428,16 @@ class ChatProvider extends ChangeNotifier {
 
     logViewer('ChatProvider.send: START repo=$repo branch=$branch mode=$mode msg="${trimmed.length > 80 ? '${trimmed.substring(0, 80)}...' : trimmed}"');
     _error = null;
+
+    // Serialize: if a send is already in flight, queue locally and return.
+    // The in-flight send will flush the queue on completion. This prevents
+    // the KV race where two rapid POSTs both create new batches.
+    if (_sendInFlight) {
+      _sendQueue.add(_QueuedSend(trimmed, repo, branch, mode));
+      logViewer('ChatProvider.send: QUEUED (in-flight) — ${_sendQueue.length} pending');
+      return;
+    }
+    _sendInFlight = true;
 
     // If repo or branch changed, switch to new conversation history
     // ONE CHAT PER REPO: branch changes keep same chat, only repo changes create new chat.
@@ -483,9 +506,11 @@ class ChatProvider extends ChangeNotifier {
         // This prevents "sent" appearing before the queue actually processes it,
         // and prevents the message from disappearing on refresh.
         logViewer('ChatProvider.send: deferred user msg (total=$_queueTotal status=$status) — will show when agent reaches it');
-        // Do NOT save cache here — deferred messages haven't been confirmed by
-        // the server yet. The poll tick calls _saveToCache() after the merge,
-        // which is when messages are properly deduped and confirmed.
+        // Save cache NOW so deferred state survives app kill between send()
+        // and the first poll tick. Without this, a crash leaves the user
+        // message invisible forever (server processes it but client lost the
+        // deferred entry needed to show it in chat).
+        await _saveToCache();
         logViewer('ChatProvider.send: queued pos=$_queuePosition total=$_queueTotal — polling');
         _notify();
         // Only start a new poll if one isn't already running. Calling
@@ -518,6 +543,15 @@ class ChatProvider extends ChangeNotifier {
       }
       _notify();
     }
+    _sendInFlight = false;
+    _flushSendQueue();
+  }
+
+  void _flushSendQueue() {
+    if (_sendQueue.isEmpty) return;
+    final next = _sendQueue.removeAt(0);
+    logViewer('ChatProvider.send: FLUSH queued msg (${_sendQueue.length} remain)');
+    send(next.prompt, repo: next.repo, branch: next.branch, mode: next.mode);
   }
 
   // -- Polling: fetch messages + progress with exponential backoff --
@@ -586,7 +620,7 @@ class ChatProvider extends ChangeNotifier {
         if (batch != null) {
           _queuePosition = (batch['position'] as int?) ?? _queuePosition;
           _queueTotal = (batch['total'] as int?) ?? _queueTotal;
-          _queueDone = (batch['done'] as int?) ?? _queuePosition;
+          _queueDone = (batch['done'] as int?) ?? _queueDone;
 
           // Insert deferred user messages when position advances.
           _lastPositionShown ??= -1;
@@ -887,7 +921,7 @@ class ChatProvider extends ChangeNotifier {
       if (batchTotal > 0) {
         _queuePosition = (batch?['position'] as int?) ?? 0;
         _queueTotal = batchTotal;
-        _queueDone = (batch?['done'] as int?) ?? 0;
+        _queueDone = (batch?['done'] as int?) ?? _queueDone;
         final bPrompts = batch?['prompts'] as List?;
         if (bPrompts != null) _batchPrompts = bPrompts.map((e) => e.toString()).toList();
         final bModes = batch?['modes'] as List?;
@@ -1015,7 +1049,7 @@ class ChatProvider extends ChangeNotifier {
         final total = (batch['total'] as int?) ?? 0;
         _queuePosition = (batch['position'] as int?) ?? 0;
         _queueTotal = total;
-        _queueDone = (batch['done'] as int?) ?? _queuePosition;
+        _queueDone = (batch['done'] as int?) ?? _queueDone;
 
         // CRITICAL: Do NOT cancel polling when total > 0 but isRunning is false.
         // This happens when the batch was just queued but the worker hasn't
@@ -1192,7 +1226,7 @@ class ChatProvider extends ChangeNotifier {
         final total = (batch['total'] as int?) ?? 0;
         _queuePosition = (batch['position'] as int?) ?? 0;
         _queueTotal = total;
-        _queueDone = (batch['done'] as int?) ?? _queuePosition;
+        _queueDone = (batch['done'] as int?) ?? _queueDone;
 
         // CRITICAL: Do NOT cancel polling when total > 0 but isRunning is false.
         // Same reasoning as refreshMessages — the poll callback's completion
@@ -1372,4 +1406,12 @@ class ChatProvider extends ChangeNotifier {
       // silently ignore — SharedPreferences may fail if disk full
     }
   }
+}
+
+class _QueuedSend {
+  final String prompt;
+  final String repo;
+  final String branch;
+  final String mode;
+  _QueuedSend(this.prompt, this.repo, this.branch, this.mode);
 }

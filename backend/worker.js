@@ -1433,6 +1433,9 @@ async function route(method, path, url, request, env) {
   }
 
   // POST /api/chat — backwards compat (single message, non-blocking)
+  // Retry-with-reread: when two rapid sends race on KV, re-read state and
+  // retry instead of silently losing the first message. KV is eventually
+  // consistent so the second read sees the first write within ~1s.
   if (path === '/api/chat' && method === 'POST') {
     let body;
     try { body = await request.json(); } catch {
@@ -1446,71 +1449,57 @@ async function route(method, path, url, request, env) {
     if (!prompt) return error('prompt is required', 400);
     if (!repo) return error('repo is required', 400);
 
-    // Treat as batch of 1
-    const state = (await readState(env, repo)) || emptyState(repo, branch, mode);
-    // If all previous prompts finished OR were cancelled, start fresh (replace queue)
-    if (state.queue.position >= state.queue.total || state.queue.cancelled) {
-      state.queue.prompts = [];
-      state.queue.modes = [];
-      state.queue.position = 0;
-      state.queue.done = 0;
-      state.queue.cancelled = false;
-      state.last_sent_position = -1;
-      try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
-      // Delete stale queue position tiny keys from the previous batch.
-      // qpos/qdon have 86400s TTL and survive POST reset. Without this, the
-      // next poll's qpos restore sees qpos=1 (from old completed batch) and
-      // restores q.position to 1 — making hasPending=false and showing
-      // "1/1 done" without ever sending the new message.
-      if (state.conversation_id) {
-        try { await env.VIBECODE.delete(`qpos:${state.conversation_id}`).catch(() => {}); } catch (_) {}
-        try { await env.VIBECODE.delete(`qdon:${state.conversation_id}`).catch(() => {}); } catch (_) {}
-      }
-      // Delete cid tiny key — prevents stale conversation_id from being
-      // restored, which causes send-follow-up to send to a completed
-      // conversation (agent doesn't start), then after 3 retries a new
-      // conversation is created and the prompt is sent AGAIN.
-      try { await env.VIBECODE.delete(`cid:${repo}`).catch(() => {}); } catch (_) {}
-      // Clear conversation_id — each new batch must start with a FRESH
-      // conversation.
-      state.conversation_id = null;
-      recordConvChange(state, 'Starting new task');
-      state._dirty = true;
-      state._last_event_ts = "";
-      state.sandbox_id = null;
-      state._run_started_at = undefined;
-      state._completed_position = undefined;
-      state._error_retry = 0;  // reset retry counter for new batch
-      state._send_retry = 0;
-      state._create_retry_at = undefined;
-      state._send_retry_at = undefined;
-      if (state.conversation_id) {
-        try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
+    // Retry up to 3 times with backoff, re-reading state each time so
+    // we pick up any concurrent writes.
+    let lastError = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, 300 * attempt));
+      try {
+        const state = (await readState(env, repo)) || emptyState(repo, branch, mode);
+        if (state.queue.position >= state.queue.total || state.queue.cancelled) {
+          state.queue.prompts = [];
+          state.queue.modes = [];
+          state.queue.position = 0;
+          state.queue.done = 0;
+          state.queue.cancelled = false;
+          state.last_sent_position = -1;
+          try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
+          if (state.conversation_id) {
+            try { await env.VIBECODE.delete(`qpos:${state.conversation_id}`).catch(() => {}); } catch (_) {}
+            try { await env.VIBECODE.delete(`qdon:${state.conversation_id}`).catch(() => {}); } catch (_) {}
+          }
+          try { await env.VIBECODE.delete(`cid:${repo}`).catch(() => {}); } catch (_) {}
+          state.conversation_id = null;
+          recordConvChange(state, 'Starting new task');
+          state._dirty = true;
+          state._last_event_ts = "";
+          state.sandbox_id = null;
+          state._run_started_at = undefined;
+          state._completed_position = undefined;
+          state._error_retry = 0;
+          state._send_retry = 0;
+          state._create_retry_at = undefined;
+          state._send_retry_at = undefined;
+        }
+        state.queue.prompts.push(prompt);
+        state.queue.modes.push(mode);
+        state.queue.total = state.queue.prompts.length;
+        trimState(state);
+        await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
+        return json({ status: 'queued', position: state.queue.position, total: state.queue.total });
+      } catch (e) {
+        lastError = e;
       }
     }
-    state.queue.prompts.push(prompt);
-    state.queue.modes.push(mode);
-    state.queue.total = state.queue.prompts.length;
-    // Write to KV directly (not writeState) so we can detect failure and
-    // return an error to the client — if the queue state wasn't persisted,
-    // the message is lost forever (next poll reads old state from KV).
-    // Trim first so JSON.stringify doesn't exceed CPU/memory limits.
-    trimState(state);
-    try {
-      await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
-    } catch (e) {
-      const errStr = String(e?.message || e);
-      console.error(`[KV-PUT-1] state:${repo} FAILED: ${errStr}`);
-      const status = errStr.includes('429') ? 429 : 500;
-      const msg = status === 429
-        ? 'KV rate limit exceeded — try again later'
-        : `KV write failed: ${errStr.slice(0, 80)}`;
-      return error(msg, status);
-    }
-    return json({ status: 'queued', position: state.queue.position, total: state.queue.total });
+    const errStr = String(lastError?.message || lastError);
+    console.error(`[KV-PUT-1] state:${repo} FAILED after retries: ${errStr}`);
+    return error('KV write failed — retry', 500);
   }
 
   // POST /api/chat/batch — queue prompt(s), return immediately
+  // Retry-with-reread: when multiple concurrent sends race on KV, re-read
+  // state on each attempt to pick up previous writes. KV is eventually
+  // consistent so retry 2 sees retry 1's write within ~300ms.
   if (path === '/api/chat/batch' && method === 'POST') {
     const body = await request.json();
     const prompts = body.prompts;
@@ -1522,74 +1511,63 @@ async function route(method, path, url, request, env) {
     if (!repo) return error('repo is required', 400);
     if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return error(`Invalid repo format: '${repo}'. Use owner/repo`, 400);
 
-    const state = (await readState(env, repo)) || emptyState(repo, branch, mode);
-    if (branch) state.branch = branch;
-    if (mode) state.mode = mode;
-
-    // Batch version for race-condition detection: each new batch gets a
-    // unique version. Appends to a running batch keep the same version.
-    // This prevents two devices from each creating a new batch (and thus
-    // a new conversation) when both POST /batch at nearly the same time.
     const batchVersion = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random()}`;
+    let lastError = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, 300 * attempt));
+      try {
+        const state = (await readState(env, repo)) || emptyState(repo, branch, mode);
+        if (branch) state.branch = branch;
+        if (mode) state.mode = mode;
 
-    // If all previous prompts finished OR were cancelled, start fresh (replace queue)
-    const isNewBatch = state.queue.position >= state.queue.total || state.queue.cancelled;
-    if (isNewBatch) {
-      state.queue.prompts = [];
-      state.queue.modes = [];
-      state.queue.position = 0;
-      state.queue.done = 0;
-      state.queue.cancelled = false;
-      state.last_sent_position = -1;
-      state._batch_version = batchVersion;
-      try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
-      // Delete stale queue position tiny keys from the previous batch.
-      if (state.conversation_id) {
-        try { await env.VIBECODE.delete(`qpos:${state.conversation_id}`).catch(() => {}); } catch (_) {}
-        try { await env.VIBECODE.delete(`qdon:${state.conversation_id}`).catch(() => {}); } catch (_) {}
-      }
-      // Delete cid tiny key too — prevents stale conversation_id from
-      // being restored by cid restore.
-      try { await env.VIBECODE.delete(`cid:${repo}`).catch(() => {}); } catch (_) {}
-      // Clear conversation_id — each new batch must start fresh.
-      state.conversation_id = null;
-      recordConvChange(state, `Starting ${prompts.length} new tasks`);
-      state._dirty = true;
-      state._last_event_ts = "";
-      state.sandbox_id = null;
-      state._run_started_at = undefined;
-      state._completed_position = undefined;
-      state._error_retry = 0;
-      state._send_retry = 0;
-      state._create_retry_at = undefined;
-      state._send_retry_at = undefined;
-      // Stale retry state from previous batch
-      if (state.conversation_id) {
-        try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
+        const isNewBatch = state.queue.position >= state.queue.total || state.queue.cancelled;
+        if (isNewBatch) {
+          state.queue.prompts = [];
+          state.queue.modes = [];
+          state.queue.position = 0;
+          state.queue.done = 0;
+          state.queue.cancelled = false;
+          state.last_sent_position = -1;
+          state._batch_version = batchVersion;
+          try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
+          if (state.conversation_id) {
+            try { await env.VIBECODE.delete(`qpos:${state.conversation_id}`).catch(() => {}); } catch (_) {}
+            try { await env.VIBECODE.delete(`qdon:${state.conversation_id}`).catch(() => {}); } catch (_) {}
+          }
+          try { await env.VIBECODE.delete(`cid:${repo}`).catch(() => {}); } catch (_) {}
+          state.conversation_id = null;
+          recordConvChange(state, `Starting ${prompts.length} new tasks`);
+          state._dirty = true;
+          state._last_event_ts = "";
+          state.sandbox_id = null;
+          state._run_started_at = undefined;
+          state._completed_position = undefined;
+          state._error_retry = 0;
+          state._send_retry = 0;
+          state._create_retry_at = undefined;
+          state._send_retry_at = undefined;
+        }
+        state.queue.prompts.push(...prompts);
+        state.queue.modes.push(...Array(prompts.length).fill(mode));
+        state.queue.total = state.queue.prompts.length;
+        state.queue.cancelled = false;
+
+        console.log(`[BATCH] repo=${repo}: queued ${prompts.length} prompts — pos=${state.queue.position}/${state.queue.total} mode=${mode} version=${state._batch_version || '(append)'}`);
+
+        trimState(state);
+        await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
+        return json({ status: isNewBatch ? 'queued' : 'appended', position: state.queue.position, total: state.queue.total, batch_version: batchVersion });
+      } catch (e) {
+        lastError = e;
       }
     }
-    state.queue.prompts.push(...prompts);
-    state.queue.modes.push(...Array(prompts.length).fill(mode));
-    state.queue.total = state.queue.prompts.length;
-    state.queue.cancelled = false;
-
-    console.log(`[BATCH] repo=${repo}: queued ${prompts.length} prompts — pos=${state.queue.position}/${state.queue.total} mode=${mode} batchVersion=${state._batch_version || '(append)'}`);
-
-    // Write to KV directly (not writeState) so we can detect failure and
-    // return an error to the client.
-    trimState(state);
-    try {
-      await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
-    } catch (e) {
-      const errStr = String(e?.message || e);
-      console.error(`[KV-PUT-2] state:${repo} FAILED: ${errStr}`);
-      const status = errStr.includes('429') ? 429 : 500;
-      const msg = status === 429
-        ? 'KV rate limit exceeded — try again later'
-        : `KV write failed: ${errStr.slice(0, 80)}`;
-      return error(msg, status);
-    }
-    return json({ status: 'queued', position: state.queue.position, total: state.queue.total, batch_version: batchVersion });
+    const errStr = String(lastError?.message || lastError);
+    console.error(`[KV-PUT-2] state:${repo} FAILED after retries: ${errStr}`);
+    const status = errStr.includes('429') ? 429 : 500;
+    const msg = status === 429
+      ? 'KV rate limit exceeded — try again later'
+      : `KV write failed: ${errStr.slice(0, 80)}`;
+    return error(msg, status);
   }
 
   // POST /api/chat/batch/cancel
