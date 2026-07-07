@@ -1,11 +1,12 @@
-name = "vibecode-proxy"
+name = "vibecoder"
 main = "worker.js"
 compatibility_date = "2025-03-01"
 
 # KV namespace for state persistence
-# Created 2026-06-23
+# CREATE THIS in Cloudflare Dashboard → Workers & Pages → KV → Create namespace
+# Then replace the id below with your new namespace ID.
 kv_namespaces = [
-  { binding = "VIBECODE", id = "e390ae1b20e84e24aeb686efbb7791b7", preview_id = "e390ae1b20e84e24aeb686efbb7791b7" }
+  { binding = "VIBECODE", id = "YOUR_KV_NAMESPACE_ID" }
 ]
 
 # Environment variables (secrets should use wrangler secret put instead)
@@ -15,12 +16,3 @@ LLM_MODEL = "deepseek/deepseek-v4-flash"
 # Cron trigger: polls active queues every minute so batch continues even when app is closed
 [triggers]
 crons = ["* * * * *"]
-
-# Secrets to set manually:
-# npx wrangler secret put OPENHANDS_CLOUD_API_KEY
-# npx wrangler secret put LLM_API_KEY
-
-[env.production]
-kv_namespaces = [
-  { binding = "VIBECODE", id = "YOUR_KV_ID" }
-]
