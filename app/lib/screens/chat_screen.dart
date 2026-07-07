@@ -39,12 +39,20 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // Enter → newline (multiline), Send button → send.
-    // Shift+Enter is also newline (hardware keyboard compatibility).
+    // Multiline: textInputAction is set to TextInputAction.newline on the
+    // TextField, which tells both mobile and hardware keyboards to insert
+    // newlines instead of submitting. The Send button is the only way to send.
+    // Hardware keyboard Enter key: onKeyEvent intercepts and inserts newline
+    // at cursor position. Software keyboard: TextInputAction.newline handles it.
     _inputFocusNode.onKeyEvent = (node, event) {
       if (event is KeyDownEvent &&
           event.logicalKey == LogicalKeyboardKey.enter) {
-        // Insert newline at cursor, prevent onSubmitted from firing
+        if (HardwareKeyboard.instance.isShiftPressed) {
+          // Shift+Enter = send (convenience for hardware keyboards)
+          _send();
+          return KeyEventResult.handled;
+        }
+        // Enter = newline at cursor (multiline)
         final text = _inputCtrl.text;
         final sel = _inputCtrl.selection;
         final pos = sel.isValid ? sel.start : text.length;

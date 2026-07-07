@@ -211,6 +211,30 @@ class ChatProvider extends ChangeNotifier {
           _resetShowIndex();
           logViewer('ChatProvider.loadFromCache: legacy cache, ${_messages.length} msgs');
         }
+        // Restore deferred user messages (survives app restart)
+        if (data is Map<String, dynamic>) {
+          final deferredRaw = data['deferred'] as List?;
+          if (deferredRaw != null) {
+            _deferred.clear();
+            for (final d in deferredRaw) {
+              if (d is Map<String, dynamic>) {
+                _deferred.add((
+                  (d['content'] ?? '').toString(),
+                  (d['timestamp'] as int?) ?? DateTime.now().millisecondsSinceEpoch,
+                ));
+              }
+            }
+          }
+          final pendingRaw = data['pendingUserContents'] as List?;
+          if (pendingRaw != null) {
+            _pendingUserContents.clear();
+            for (final p in pendingRaw) {
+              _pendingUserContents.add(p.toString());
+            }
+          }
+          _lastPositionShown = (data['lastPositionShown'] as int?) ?? -1;
+          logViewer('ChatProvider.loadFromCache: restored ${_deferred.length} deferred msgs, lastPosShown=$_lastPositionShown, ${_pendingUserContents.length} pending');
+        }
       } catch (_) {
         await prefs.remove(_cacheKey);
       }
@@ -440,7 +464,7 @@ class ChatProvider extends ChangeNotifier {
       logViewer('ChatProvider.send: result=$result');
 
       final status = result['status']?.toString() ?? '';
-      if (status == 'queued') {
+      if (status == 'queued' || status == 'appended') {
         _pollFailures = 0;
         _loading = true;
         _loadingSince = DateTime.now();
@@ -449,20 +473,11 @@ class ChatProvider extends ChangeNotifier {
         // Queue position from server — 0 for new batch, non-0 if appended
         _queuePosition = (result['position'] as int?) ?? 0;
         _queueTotal = (result['total'] as int?) ?? 1;
-        // Only show user bubble immediately for the FIRST message in a batch.
-        // _queueTotal > 1 means we appended to an existing batch — defer the
-        // bubble until the poll tick advances _queuePosition past this message.
-        // Previously used _pollTimer?.isActive which races: two rapid sends()
-        // both see timer=null before the first has started polling.
-        if (_queueTotal <= 1) {
-          _messages.add(ChatMessage(
-            role: 'user', content: trimmed,
-            timestamp: DateTime.now().millisecondsSinceEpoch,
-          ));
-          logViewer('ChatProvider.send: ADDED user msg immediately (first in batch)');
-        } else {
-          logViewer('ChatProvider.send: deferred user msg (total=$_queueTotal) — will show when agent reaches it');
-        }
+        // NEVER show user message immediately — always defer until the poll
+        // tick confirms the server has received and is processing this message.
+        // This prevents "sent" appearing before the queue actually processes it,
+        // and prevents the message from disappearing on refresh.
+        logViewer('ChatProvider.send: deferred user msg (total=$_queueTotal status=$status) — will show when agent reaches it');
         await _saveToCache();
         logViewer('ChatProvider.send: queued pos=$_queuePosition total=$_queueTotal — polling');
         _notify();
@@ -472,15 +487,6 @@ class ChatProvider extends ChangeNotifier {
         if (_pollTimer?.isActive != true) {
           _startPolling(repo: repo, branch: branch, mode: mode);
         }
-      } else if (status == 'appended') {
-        // Appended to running batch — defer the user bubble until the poll
-        // tick advances _queuePosition past this message.
-        _queueTotal = (result['total'] as int?) ?? _queueTotal;
-        _loading = true;
-        _pendingUserContents.add(trimmed);
-        _deferred.add((trimmed, DateTime.now().millisecondsSinceEpoch));
-        logViewer('ChatProvider.send: appended to batch (total=$_queueTotal) — user msg deferred to poll');
-        _notify();
       } else {
         logViewer('ChatProvider.send: unexpected status=$status');
         _error = (result['error']?.toString()) ?? 'Server did not accept the request';
@@ -760,6 +766,7 @@ class ChatProvider extends ChangeNotifier {
               _confirmedUserContents.clear();
               _deferred.clear();
               _lastPositionShown = -1;
+              _saveToCache();  // persist cleared deferred state
               logViewer('ChatProvider.poll: batch completed — stopped '
                         '(seenRunning=$_batchSeenRunning pollAge=${pollAge.inSeconds}s wasLoading=$wasLoading)');
             } else {
@@ -1337,11 +1344,21 @@ class ChatProvider extends ChangeNotifier {
   Future<void> _saveToCache() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      final deferredList = _deferred.map((d) => {
+        'content': d.$1,
+        'timestamp': d.$2,
+      }).toList();
       final payload = json.encode({
         'messages': _messages.map((m) => m.toJson()).toList(),
         'repo': serverRepo,
         'branch': serverBranch,
         'mode': serverMode,
+        'deferred': deferredList,
+        'pendingUserContents': _pendingUserContents.toList(),
+        'lastPositionShown': _lastPositionShown,
+        'queuePosition': _queuePosition,
+        'queueTotal': _queueTotal,
+        'queueDone': _queueDone,
       });
       await prefs.setString(_cacheKey, payload);
     } catch (_) {

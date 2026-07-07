@@ -93,9 +93,9 @@ async function readState(env, repo) {
 
 /** Trim state in-place before writing to KV to stay under size limits. */
 function trimState(state) {
-  if (state.messages && state.messages.length > 5000) {
+  if (state.messages && state.messages.length > 200) {
     const before = state.messages.length;
-    state.messages = state.messages.slice(-4000);
+    state.messages = state.messages.slice(-100);
     console.log(`[KV] trimState: messages trimmed ${before}→${state.messages.length}`);
   }
   if (state.event_kinds && Object.keys(state.event_kinds).length > 1000) {
@@ -106,9 +106,9 @@ function trimState(state) {
     console.log(`[KV] trimState: _extracted_hashes reset (${Object.keys(state._extracted_hashes).length} keys)`);
     state._extracted_hashes = {};
   }
-  if (state.seen_event_ids && state.seen_event_ids.length > 2000) {
+  if (state.seen_event_ids && state.seen_event_ids.length > 200) {
     const before = state.seen_event_ids.length;
-    state.seen_event_ids = state.seen_event_ids.slice(-1500);
+    state.seen_event_ids = state.seen_event_ids.slice(-100);
     console.log(`[KV] trimState: seen_event_ids trimmed ${before}→${state.seen_event_ids.length}`);
   }
   if (state._batch_skip && Object.keys(state._batch_skip).length > 100) {
@@ -1514,32 +1514,30 @@ async function route(method, path, url, request, env) {
     if (branch) state.branch = branch;
     if (mode) state.mode = mode;
 
+    // Batch version for race-condition detection: each new batch gets a
+    // unique version. Appends to a running batch keep the same version.
+    // This prevents two devices from each creating a new batch (and thus
+    // a new conversation) when both POST /batch at nearly the same time.
+    const batchVersion = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random()}`;
+
     // If all previous prompts finished OR were cancelled, start fresh (replace queue)
-    if (state.queue.position >= state.queue.total || state.queue.cancelled) {
+    const isNewBatch = state.queue.position >= state.queue.total || state.queue.cancelled;
+    if (isNewBatch) {
       state.queue.prompts = [];
       state.queue.modes = [];
       state.queue.position = 0;
       state.queue.done = 0;
       state.queue.cancelled = false;
       state.last_sent_position = -1;
+      state._batch_version = batchVersion;
       try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
       // Delete stale queue position tiny keys from the previous batch.
-      // qpos/qdon have 86400s TTL and survive POST reset. Without this,
-      // the next poll's qpos restore restores the OLD position and shows
-      // "1/1 done" without ever sending the new batch.
       if (state.conversation_id) {
         try { await env.VIBECODE.delete(`qpos:${state.conversation_id}`).catch(() => {}); } catch (_) {}
         try { await env.VIBECODE.delete(`qdon:${state.conversation_id}`).catch(() => {}); } catch (_) {}
       }
       // Delete cid tiny key too — prevents stale conversation_id from
-      // being restored by cid restore (line ~1596). Without this, the
-      // next poll restores a COMPLETED conversation_id, send-follow-up
-      // tries to send the new prompt to the old conversation, the Cloud
-      // API silently accepts but the agent doesn't start. After 3 retries,
-      // send-follow-up clears conversation_id and createConversation
-      // creates a NEW conversation — sending the prompt TWICE (once to
-      // the old conv, once to the new conv). This is the root cause of
-      // "message sent to two conversations".
+      // being restored by cid restore.
       try { await env.VIBECODE.delete(`cid:${repo}`).catch(() => {}); } catch (_) {}
       // Clear conversation_id — each new batch must start fresh.
       state.conversation_id = null;
@@ -1549,13 +1547,11 @@ async function route(method, path, url, request, env) {
       state.sandbox_id = null;
       state._run_started_at = undefined;
       state._completed_position = undefined;
-      state._error_retry = 0;  // reset retry counter for new batch
+      state._error_retry = 0;
       state._send_retry = 0;
       state._create_retry_at = undefined;
       state._send_retry_at = undefined;
-      // Stale retry state from previous batch (same conversation_id) would cause
-      // the poll handler to find an old MessageEvent and advance the queue
-      // prematurely. Delete it so the retry starts fresh.
+      // Stale retry state from previous batch
       if (state.conversation_id) {
         try { await env.VIBECODE.delete(`retry:${state.conversation_id}`).catch(() => {}); } catch (_) {}
       }
@@ -1565,12 +1561,10 @@ async function route(method, path, url, request, env) {
     state.queue.total = state.queue.prompts.length;
     state.queue.cancelled = false;
 
-    console.log(`[BATCH] repo=${repo}: queued ${prompts.length} prompts — pos=${state.queue.position}/${state.queue.total} mode=${mode}`);
+    console.log(`[BATCH] repo=${repo}: queued ${prompts.length} prompts — pos=${state.queue.position}/${state.queue.total} mode=${mode} batchVersion=${state._batch_version || '(append)'}`);
 
     // Write to KV directly (not writeState) so we can detect failure and
-    // return an error to the client — if the queue state wasn't persisted,
-    // the message is lost forever (next poll reads old state from KV).
-    // Trim first so JSON.stringify doesn't exceed CPU/memory limits.
+    // return an error to the client.
     trimState(state);
     try {
       await env.VIBECODE.put(`state:${repo}`, JSON.stringify(state));
@@ -1583,7 +1577,7 @@ async function route(method, path, url, request, env) {
         : `KV write failed: ${errStr.slice(0, 80)}`;
       return error(msg, status);
     }
-    return json({ status: 'queued', position: state.queue.position, total: state.queue.total });
+    return json({ status: 'queued', position: state.queue.position, total: state.queue.total, batch_version: batchVersion });
   }
 
   // POST /api/chat/batch/cancel
@@ -1922,7 +1916,7 @@ async function route(method, path, url, request, env) {
 
     // Queue naturally completed — reset to clean idle state so the app
     // doesn't show stale "1/1 done" after the task finishes.
-    if (!hasPending && q.total > 0 && !state.conversation_id) {
+    if (!hasPending && q.total > 0) {
       console.log(`[POLL] repo=${repo}: QUEUE DONE — resetting state (was ${q.total} prompts, all completed)`);
       q.position = 0;
       q.total = 0;
@@ -1931,14 +1925,16 @@ async function route(method, path, url, request, env) {
       q.modes = [];
       q.cancelled = false;
       state._batch_skip = undefined;
-      // Reset timer too; next task will set its own.
+      state.conversation_id = null;  // free the conversation — batch is done
+      state._last_event_ts = "";
+      state.sandbox_id = null;
       state._run_started_at = undefined;
-      state._error_retry = 0;  // reset retry counter for next batch
+      state._error_retry = 0;
       state._send_retry = 0;
       state._create_retry_at = undefined;
       state._send_retry_at = undefined;
       state.last_sent_position = -1;
-      state._dirty = true;  // persist all the reset changes above
+      state._dirty = true;
       // Persist so next poll sees clean state.
       await writeStateIfDirty(env, repo, state);
       // Delete lsp key since batch is done; prevents stale values from
@@ -2000,6 +1996,14 @@ async function route(method, path, url, request, env) {
       state._dirty = true;
     }
 
+    // ONE CLOUD API CALL PER POLL: to stay under the 30s CPU wall-clock
+    // limit on Cloudflare Workers free tier, we only make ONE Cloud API
+    // call per GET /api/chat request. The cron trigger runs every minute
+    // and handles the rest of the processing asynchronously. If we've
+    // already made a call in this poll, return immediately so the next
+    // poll (or cron) can continue.
+    let didCloudCall = false;
+
     // --- Phase: create conversation if queue has work ---
     if (hasPending && !state.conversation_id && !state.start_task_id) {
       // Don't retry createConversation more often than every 30s.
@@ -2050,9 +2054,11 @@ async function route(method, path, url, request, env) {
           // (before createConversation) so they persist even if the API call
           // throws. No need to push them again here.
 
+          didCloudCall = true;
           await writeStateIfDirty(env, repo, state);
         } catch (e) {
           console.error(`Create conv error: ${e.message}`);
+          didCloudCall = true;  // also true on error — we attempted a call
 
           // --- Rate limit (429): back off 60s, DON'T increment crash counter ---
           if (String(e.message).includes('429') || String(e.message).includes('rate')) {
@@ -2106,6 +2112,14 @@ async function route(method, path, url, request, env) {
           await writeStateIfDirty(env, repo, state);
         }
       }
+    }
+
+    // ONE CALL PER POLL: if we already made a Cloud API call (create or send),
+    // return now. The next poll/cron will continue with event polling.
+    if (didCloudCall) {
+      console.log(`[POLL] repo=${repo}: returning early — did one Cloud API call (${Date.now()-tPoll}ms)`);
+      await writeStateIfDirty(env, repo, state);
+      return buildStateResponse(state, q, hasPending, repo, mode, convStatus);
     }
 
     // --- Phase: send follow-up message if queue advanced but not sent yet ---
@@ -2192,16 +2206,24 @@ async function route(method, path, url, request, env) {
     };
 
     // --- Phase: poll Cloud API for agent status ---
-    if (state.conversation_id && hasPending) {
+    // ONE CALL PER POLL guard: if createConversation or sendMessage already
+    // made a Cloud API call in this request, skip event polling. The cron
+    // trigger (every 1min) or next Flutter poll will pick it up.
+    if (state.conversation_id && hasPending && !didCloudCall) {
       // Try to read the agent's response from events FIRST.
       // fetchResponse uses _last_response_ts as cutoff and skips old
       // MessageEvents, so it always returns the CURRENT turn's response
       // (if one exists). No need to guard on _last_event_ts — the cutoff
       // handles dedup correctly.
       let directResponse = await fetchResponse(env, state.conversation_id, state);
+      didCloudCall = true;  // fetchResponse made Cloud API calls
 
-      // Process events for UI enrichment (tool calls, status changes).
-      await processCloudEvents(env, state.conversation_id, state);
+      // Process events for UI enrichment — only if fetchResponse was fast
+      // and we didn't already find a response. On free tier, Cloud API
+      // calls can push us over the 30s wall-clock limit.
+      if (!directResponse) {
+        await processCloudEvents(env, state.conversation_id, state);
+      }
 
       // Fallback: if fetchResponse found no MessageEvent but the finish
       // tool has a message, use it as the response.
@@ -2300,7 +2322,7 @@ async function route(method, path, url, request, env) {
         // total and follow-up prompts are silently lost.
         await syncQueueFromKv(env, repo, q);
         const stillPending = q.position < q.total && !q.cancelled;
-        if (stillPending) {
+        if (stillPending && !didCloudCall) {
           const nextPrompt = q.prompts[q.position];
           const sendErr = await sendMessage(env, state.conversation_id, nextPrompt, state.sandbox_id);
           if (sendErr) {
@@ -2382,7 +2404,7 @@ async function route(method, path, url, request, env) {
           // Recompute hasPending after queue advance for accurate batch.running
           const stillPending = q.position < q.total && !q.cancelled;
           // If more prompts, send next one
-          if (stillPending) {
+          if (stillPending && !didCloudCall) {
             const nextPrompt = q.prompts[q.position];
             const sendErr = await sendMessage(env, state.conversation_id, nextPrompt, state.sandbox_id);
             if (sendErr) {
@@ -2514,7 +2536,7 @@ async function route(method, path, url, request, env) {
           const stillPending = q.position < q.total && !q.cancelled;
 
           // If more prompts, send next one
-          if (stillPending) {
+          if (stillPending && !didCloudCall) {
             const nextPrompt = q.prompts[q.position];
             const sendErr = await sendMessage(env, state.conversation_id, nextPrompt, state.sandbox_id);
             if (sendErr) {
@@ -2554,7 +2576,7 @@ async function route(method, path, url, request, env) {
           await syncQueueFromKv(env, repo, q);
           const stillPending = q.position < q.total && !q.cancelled;
 
-          if (stillPending) {
+          if (stillPending && !didCloudCall) {
             const nextPrompt = q.prompts[q.position];
             const sendErr = await sendMessage(env, state.conversation_id, nextPrompt, state.sandbox_id);
             if (sendErr) {
@@ -2691,6 +2713,33 @@ async function route(method, path, url, request, env) {
           await writeStateIfDirty(env, repo, state);  // persist the start timestamp once
         }
         const elapsed = Math.floor((nowMs - state._run_started_at) / 1000);
+        const MAX_RUN_SECONDS = 7200;  // 2 hour hard timeout for stuck agents
+        if (elapsed > MAX_RUN_SECONDS) {
+          console.log(`[TIMEOUT] repo=${repo}: agent running ${elapsed}s (max=${MAX_RUN_SECONDS}s) — resetting`);
+          state.messages.push({ id: nextMsgId(state), role: 'event', content: `[ERROR] Agent timed out after ${Math.floor(elapsed/60)}min.`, kind: 'ErrorEvent', timestamp: now() });
+          // Advance queue past this stuck prompt
+          q.position = Math.min(q.position + 1, q.total);
+          q.done = Math.min(q.position, q.total);
+          state._dirty = true;
+          state.conversation_id = null;
+          recordConvChange(state, 'Agent timed out — reconnecting...');
+          state._last_event_ts = "";
+          state.sandbox_id = null;
+          state.last_sent_position = -1;
+          state._run_started_at = undefined;
+          state._error_retry = 0;
+          state._send_retry = 0;
+          state._create_retry_at = undefined;
+          state._send_retry_at = undefined;
+          try { await env.VIBECODE.delete(`lsp:${repo}`); } catch (_) {}
+          try { await env.VIBECODE.put(`qpos:${state.conversation_id}`, String(q.position), {expirationTtl: 86400}); } catch (_) {}
+          try { await env.VIBECODE.put(`qdon:${state.conversation_id}`, String(q.done), {expirationTtl: 86400}); } catch (_) {}
+          await writeStateIfDirty(env, repo, state);
+          // Re-read queue total from KV
+          await syncQueueFromKv(env, repo, q);
+          const stillPending = q.position < q.total && !q.cancelled;
+          return buildStateResponse(state, q, stillPending, repo, mode, stillPending ? 'starting' : 'idle');
+        }
         const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m${elapsed % 60}s`;
 
         // Find the last "Working" heartbeat and update in-place (memory only)
