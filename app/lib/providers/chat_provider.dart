@@ -126,6 +126,9 @@ class ChatProvider extends ChangeNotifier {
   }
 
   void _resetShowIndex() {
+    // Only reset if the user hasn't explicitly expanded to see earlier
+    // messages. Otherwise, poll rebuilds clobber the "Load earlier" expansion.
+    if (_showFromIndex <= 0) return; // already showing all
     _showFromIndex = (_messages.length - _pageSize).clamp(0, _messages.length);
     _notify();
   }
@@ -197,6 +200,9 @@ class ChatProvider extends ChangeNotifier {
                 .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
                 .toList();
             _resetShowIndex();
+            // Skip "Agent connected" system message on first poll — the
+            // conversation was already established before this session.
+            _skipNextConvChangeMsg = true;
           }
           final cachedRepo = (data['repo']?.toString()) ?? '';
           final cachedMode = (data['mode']?.toString()) ?? '';
@@ -401,6 +407,19 @@ class ChatProvider extends ChangeNotifier {
   bool _sendInFlight = false;
   final List<_QueuedSend> _sendQueue = [];
 
+  // Track which assistant messages the user has explicitly collapsed.
+  // Survives poll rebuilds (unlike widget-local _expanded state).
+  final Set<String> _collapsedIds = {};
+  bool isCollapsed(ChatMessage msg) => _collapsedIds.contains(msg.id);
+  void toggleCollapsed(ChatMessage msg) {
+    if (_collapsedIds.contains(msg.id)) {
+      _collapsedIds.remove(msg.id);
+    } else {
+      _collapsedIds.add(msg.id);
+    }
+    _notify();
+  }
+
   Future<void> send(
     String prompt, {
     String repo = '',
@@ -498,9 +517,13 @@ class ChatProvider extends ChangeNotifier {
         _loadingSince = DateTime.now();
         _pendingUserContents.add(trimmed);
         _deferred.add((trimmed, DateTime.now().millisecondsSinceEpoch));
-        // Queue position from server — 0 for new batch, non-0 if appended
-        _queuePosition = (result['position'] as int?) ?? 0;
-        _queueTotal = (result['total'] as int?) ?? 1;
+        // Queue position from server — 0 for new batch, non-0 if appended.
+        // Only update if the new value is >= current to prevent regression
+        // when the server response omits the field (returns old state).
+        final newPos = (result['position'] as int?) ?? _queuePosition;
+        final newTotal = (result['total'] as int?) ?? _queueTotal;
+        _queuePosition = newPos > _queuePosition ? newPos : _queuePosition;
+        _queueTotal = newTotal > _queueTotal ? newTotal : _queueTotal;
         // NEVER show user message immediately — always defer until the poll
         // tick confirms the server has received and is processing this message.
         // This prevents "sent" appearing before the queue actually processes it,
@@ -974,6 +997,27 @@ class ChatProvider extends ChangeNotifier {
         }
       }
       _lastConversationId = newConvId;
+
+      // Insert deferred user messages BEFORE merge, same as poll tick.
+      // Without this, refreshMessages() (called on lifecycle resume) loses
+      // deferred messages that were queued but not yet sent to the server.
+      final batchPre = data['batch'] as Map<String, dynamic>?;
+      if (batchPre != null) {
+        _queuePosition = (batchPre['position'] as int?) ?? _queuePosition;
+        _queueTotal = (batchPre['total'] as int?) ?? _queueTotal;
+        _queueDone = (batchPre['done'] as int?) ?? _queueDone;
+        _lastPositionShown ??= -1;
+        while (_lastPositionShown < _queuePosition && _lastPositionShown + 1 < _deferred.length) {
+          final idx = _lastPositionShown + 1;
+          final (content, sendTs) = _deferred[idx];
+          final alreadyInChat = _messages.any((m) => m.role == 'user' && m.content == content);
+          if (!alreadyInChat) {
+            _messages.add(ChatMessage(role: 'user', content: content, timestamp: sendTs));
+            logViewer('ChatProvider.refreshMessages: inserted deferred user msg #$idx');
+          }
+          _lastPositionShown = idx;
+        }
+      }
 
       final serverMsgs = (data['messages'] as List?)
               ?.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))

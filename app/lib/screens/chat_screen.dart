@@ -1129,9 +1129,10 @@ class _ChatBubbleState extends State<_ChatBubble> {
     }
 
     // Assistant messages: auto-expand if short (< 500 chars), collapse if long.
-    // Collapsed messages show "Tap to expand" indicator so users know it's not
-    // a bug — the message is just collapsed for scrollability.
+    // _expanded survives poll rebuilds by checking the provider's collapsedIds set.
+    final prov = context.read<ChatProvider>();
     final isShortAssistant = isAssistant && msg.content.length <= 500;
+    final bool _expanded = isShortAssistant || !prov.isCollapsed(msg);
     final showPreview = isAssistant && !_expanded && !isShortAssistant;
     final previewText = showPreview
         ? '${msg.content.substring(0, 300)}…\n\n_Tap to expand full response_'
@@ -1147,7 +1148,10 @@ class _ChatBubbleState extends State<_ChatBubble> {
           Flexible(
             child: GestureDetector(
               onTap: isAssistant
-                  ? () => setState(() => _expanded = !_expanded)
+                  ? () {
+                      context.read<ChatProvider>().toggleCollapsed(msg);
+                      setState(() {});
+                    }
                   : null,
               child: Container(
                 constraints: BoxConstraints(

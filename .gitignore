@@ -30,3 +30,5 @@ Thumbs.db
 *.key
 google-services.json
 firebase-credentials.json
+backend/node_modules/
+vibecode-release.apk
